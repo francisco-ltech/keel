@@ -1,0 +1,84 @@
+"""The worker's readiness probe, as a process rather than an endpoint.
+
+    python -m app.healthcheck
+
+Exits ``0`` while :mod:`app.worker`'s heartbeat file is fresh and ``1`` when it
+is stale or absent, which is exactly the contract an orchestrator's exec probe
+wants — Kubernetes' ``exec``, Docker's ``HEALTHCHECK``, a systemd watchdog
+wrapper. It is wired as the compose ``healthcheck`` for the worker service.
+
+**Why a file and a process instead of an HTTP endpoint.** The worker answers no
+requests. Giving it a listener purely so something can ask "are you alive?"
+means a second port to allocate, a second thing to shut down gracefully, and a
+probe that passes whenever the *server* is up rather than whenever the *loop*
+is. The file's mtime cannot be refreshed by a wedged loop, so age is a claim
+about the thing that matters.
+
+**Why age rather than existence.** A crashed worker's ``finally`` removes the
+file, so existence alone would already catch most of it. Age catches the case
+that matters more and is far harder to see: a process that is still running,
+still holding its slot, and no longer working.
+
+This module deliberately imports nothing but the settings — no database, no
+Redis, no queue. A probe that can fail because a dependency is slow is a probe
+that restarts healthy containers during an incident.
+"""
+
+from __future__ import annotations
+
+import sys
+import time
+from pathlib import Path
+
+from app.settings import WorkerSettings
+
+
+def age(path: Path, now: float | None = None) -> float | None:
+    """Return how many seconds ago *path* was last refreshed.
+
+    Args:
+        path: The heartbeat file.
+        now: The current time, injected so the staleness rule can be asserted
+            without sleeping.
+
+    Returns:
+        The age in seconds, or ``None`` if the file is not there.
+    """
+    try:
+        modified = path.stat().st_mtime
+    except OSError:
+        return None
+    return (time.time() if now is None else now) - modified
+
+
+def main() -> int:
+    """Check the heartbeat and return a process exit status.
+
+    Returns:
+        ``0`` if the worker is alive, ``1`` otherwise. The message goes to
+        stderr on failure, because that is what an orchestrator captures and
+        shows next to the unhealthy container.
+    """
+    settings = WorkerSettings()
+    seconds = age(settings.health_file)
+
+    if seconds is None:
+        print(f"no heartbeat file at {settings.health_file}", file=sys.stderr)
+        return 1
+    if seconds > settings.health_max_age:
+        print(
+            f"heartbeat {settings.health_file} is {seconds:.1f}s old, "
+            f"limit is {settings.health_max_age:.0f}s",
+            file=sys.stderr,
+        )
+        return 1
+
+    print(f"heartbeat {settings.health_file} is {seconds:.1f}s old")
+    return 0
+
+
+__all__ = ["age", "main"]
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

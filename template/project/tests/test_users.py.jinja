@@ -1,0 +1,159 @@
+"""The users endpoints, end to end through a real database.
+
+Every test here writes rows and none of them clean up: the transaction the
+`client` fixture opens is rolled back when the test ends, which is why the email
+uniqueness assertions do not interfere with each other.
+"""
+
+from __future__ import annotations
+
+import pytest
+from httpx import AsyncClient
+
+from tests.conftest import create_user
+
+pytestmark = pytest.mark.anyio
+
+
+async def test_creating_a_user_returns_it(
+    client: AsyncClient, user_payload: dict[str, str]
+) -> None:
+    response = await client.post("/users", json=user_payload)
+
+    assert response.status_code == 201
+    body = response.json()
+    assert body["email"] == "ada@example.com"
+    assert body["full_name"] == "Ada Lovelace"
+    assert body["is_active"] is True
+    assert body["created_at"] and body["updated_at"]
+
+
+async def test_the_password_is_never_returned(
+    client: AsyncClient, user_payload: dict[str, str]
+) -> None:
+    """The reason UserCreate and UserRead are separate classes."""
+    body = (await client.post("/users", json=user_payload)).json()
+
+    assert "password" not in body
+    assert "hashed_password" not in body
+    assert user_payload["password"] not in str(body)
+
+
+async def test_a_duplicate_email_is_a_conflict(
+    client: AsyncClient, user_payload: dict[str, str]
+) -> None:
+    await client.post("/users", json=user_payload)
+
+    response = await client.post("/users", json=user_payload)
+
+    assert response.status_code == 409
+    assert response.headers["content-type"].startswith("application/problem+json")
+    problem = response.json()
+    assert problem["title"] == "Conflict"
+    assert problem["status"] == 409
+    assert "ada@example.com" in problem["detail"]
+    assert problem["instance"] == "/users"
+
+
+async def test_a_short_password_is_rejected(
+    client: AsyncClient, user_payload: dict[str, str]
+) -> None:
+    response = await client.post("/users", json={**user_payload, "password": "short"})
+
+    assert response.status_code == 422
+    assert response.headers["content-type"].startswith("application/problem+json")
+    assert response.json()["errors"]
+
+
+async def test_fetching_a_user(client: AsyncClient) -> None:
+    created = await create_user(client)
+
+    response = await client.get(f"/users/{created['id']}")
+
+    assert response.status_code == 200
+    assert response.json() == created
+
+
+async def test_fetching_an_unknown_user_is_a_problem_document(client: AsyncClient) -> None:
+    missing = "00000000-0000-4000-8000-000000000000"
+
+    response = await client.get(f"/users/{missing}")
+
+    assert response.status_code == 404
+    problem = response.json()
+    assert problem["status"] == 404
+    assert problem["type"].endswith("/not-found")
+    assert missing in problem["detail"]
+
+
+async def test_listing_users(client: AsyncClient) -> None:
+    """Asserted as a set: every row in one test shares a transaction timestamp."""
+    await create_user(client, email="ada@example.com")
+    await create_user(client, email="grace@example.com")
+
+    response = await client.get("/users")
+
+    assert response.status_code == 200
+    emails = {user["email"] for user in response.json()}
+    assert {"ada@example.com", "grace@example.com"} <= emails
+
+
+async def test_listing_users_respects_the_page_size(client: AsyncClient) -> None:
+    await create_user(client, email="ada@example.com")
+    await create_user(client, email="grace@example.com")
+
+    response = await client.get("/users", params={"limit": 1})
+
+    assert len(response.json()) == 1
+
+
+async def test_updating_a_user(client: AsyncClient) -> None:
+    created = await create_user(client)
+
+    response = await client.patch(f"/users/{created['id']}", json={"full_name": "Augusta Ada King"})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["full_name"] == "Augusta Ada King"
+    assert body["email"] == created["email"], "an unset field must be left alone"
+
+
+async def test_updating_a_password_does_not_return_it(client: AsyncClient) -> None:
+    created = await create_user(client)
+
+    response = await client.patch(
+        f"/users/{created['id']}", json={"password": "a-different-password"}
+    )
+
+    assert response.status_code == 200
+    assert "password" not in response.json()
+
+
+async def test_updating_to_a_taken_email_is_a_conflict(client: AsyncClient) -> None:
+    await create_user(client, email="ada@example.com")
+    other = await create_user(client, email="grace@example.com")
+
+    response = await client.patch(f"/users/{other['id']}", json={"email": "ada@example.com"})
+
+    assert response.status_code == 409
+
+
+async def test_updating_an_unknown_user_is_not_found(client: AsyncClient) -> None:
+    missing = "00000000-0000-4000-8000-000000000000"
+
+    response = await client.patch(f"/users/{missing}", json={"full_name": "Nobody"})
+
+    assert response.status_code == 404
+
+
+async def test_deleting_a_user(client: AsyncClient) -> None:
+    created = await create_user(client)
+
+    assert (await client.delete(f"/users/{created['id']}")).status_code == 204
+    assert (await client.get(f"/users/{created['id']}")).status_code == 404
+
+
+async def test_deleting_an_unknown_user_is_not_found(client: AsyncClient) -> None:
+    missing = "00000000-0000-4000-8000-000000000000"
+
+    assert (await client.delete(f"/users/{missing}")).status_code == 404

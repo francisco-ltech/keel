@@ -1,0 +1,17 @@
+"""The users domain.
+
+Five files, in dependency order:
+
+* ``models`` — SQLAlchemy tables. Imports no schemas.
+* ``schemas`` — Pydantic wire types. Imports no models.
+* ``repository`` — queries, over a session handed in from above.
+* ``service`` — business logic; opens the transaction, returns schemas.
+* ``router`` — HTTP, and nothing else.
+
+``models`` and ``schemas`` not importing each other is the constraint that keeps
+the rest honest. The moment a response model is built from an ORM class, the
+wire format is whatever the table happens to look like, and a column rename
+becomes a breaking API change nobody reviewed.
+"""
+
+from __future__ import annotations

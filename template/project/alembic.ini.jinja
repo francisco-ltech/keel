@@ -1,0 +1,64 @@
+# Alembic configuration for {{ project_name }}.
+#
+# Note what is *not* here: `sqlalchemy.url`. The database URL is read from the
+# application's settings in app/migrations/env.py, so there is one place it is
+# configured and no chance of a migration run pointing somewhere the application
+# does not.
+
+[alembic]
+script_location = app/migrations
+prepend_sys_path = .
+path_separator = os
+
+# Timestamped, slugged filenames. The default is a bare revision hash, which
+# sorts by nothing useful and tells a reviewer nothing in a directory listing.
+file_template = %%(year)d%%(month).2d%%(day).2d_%%(hour).2d%%(minute).2d-%%(rev)s_%%(slug)s
+
+# Timestamps in UTC, because a team that spans time zones otherwise gets
+# migration filenames that sort differently depending on who generated them.
+timezone = UTC
+
+[post_write_hooks]
+# Ruff formats and fixes generated migrations so they match the rest of the code
+# base without anyone editing them by hand.
+hooks = ruff_format,ruff_fix
+ruff_format.type = exec
+ruff_format.executable = ruff
+ruff_format.options = format REVISION_SCRIPT_FILENAME
+ruff_fix.type = exec
+ruff_fix.executable = ruff
+ruff_fix.options = check --fix REVISION_SCRIPT_FILENAME
+
+[loggers]
+keys = root,sqlalchemy,alembic
+
+[handlers]
+keys = console
+
+[formatters]
+keys = generic
+
+[logger_root]
+level = WARNING
+handlers = console
+qualname =
+
+[logger_sqlalchemy]
+level = WARNING
+handlers =
+qualname = sqlalchemy.engine
+
+[logger_alembic]
+level = INFO
+handlers =
+qualname = alembic
+
+[handler_console]
+class = StreamHandler
+args = (sys.stderr,)
+level = NOTSET
+formatter = generic
+
+[formatter_generic]
+format = %(levelname)-5.5s [%(name)s] %(message)s
+datefmt = %H:%M:%S

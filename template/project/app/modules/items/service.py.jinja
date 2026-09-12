@@ -1,0 +1,180 @@
+"""Business logic for items.
+
+Same two rules as the users service: ``uow()`` spans the work rather than the
+request, and what comes back is a schema rather than an ORM object whose session
+has closed.
+
+One thing is new here — this module imports another module's repository, to
+check that an owner exists before creating an item. That is the sanctioned
+direction of coupling in this layout: a module may reach into a *sibling's*
+service or repository, but nothing reaches upward into a router. Doing the check
+explicitly rather than letting the foreign key fail turns a 500 with an
+``IntegrityError`` in the logs into a 404 that says which user is missing.
+{% if has_worker %}
+This module is also where the two entrypoints meet. ``create_item`` dispatches
+:class:`app.modules.items.jobs.IndexItem` from inside its unit of work, so the
+job is pushed only if the transaction commits — and the handler that eventually
+runs it calls :func:`get_item` below, the same function the router calls. There
+is no worker-only path into this domain.
+{% endif %}"""
+
+from __future__ import annotations
+
+from typing import Any
+from uuid import UUID
+
+from keel.database import uow
+{%- if has_worker %}
+from keel.queue import dispatch
+{%- endif %}
+
+from app.errors import NotFoundError
+from app.modules.items.repository import DEFAULT_PAGE_SIZE, ItemRepository
+from app.modules.items.schemas import ItemCreate, ItemRead, ItemUpdate
+from app.modules.users.repository import UserRepository
+
+
+async def create_item(owner_id: UUID, payload: ItemCreate) -> ItemRead:
+    """Create an item for an existing owner.
+
+    Args:
+        owner_id: The user who will own it.
+        payload: The requested item.
+
+    Returns:
+        The created item.
+
+    Raises:
+        NotFoundError: If the owner does not exist.
+    """
+{%- if has_worker %}
+    # Imported here rather than at module scope, and the reason is structural:
+    # `jobs` imports this module — a handler calls the same service functions a
+    # router does — so a module-level import back would be a cycle that resolves
+    # or explodes depending on which of the two is imported first. Deferring the
+    # upward reference keeps the graph one-directional at import time. The cost
+    # is nil in practice: `app.modules` imports `jobs` at start-up, so by the
+    # first request this is a dictionary lookup in `sys.modules`.
+    from app.modules.items.jobs import IndexItem
+{% endif %}
+    async with uow() as session:
+        if await UserRepository(session).get(owner_id) is None:
+            raise NotFoundError(f"no user with id {owner_id}")
+
+        item = await ItemRepository(session).create(
+            name=payload.name,
+            description=payload.description,
+            owner_id=owner_id,
+        )
+        result = ItemRead.model_validate(item)
+{%- if has_worker %}
+
+        # Inside the unit of work, deliberately. `dispatch` finds the open
+        # transaction and holds the push until it commits, so a worker never
+        # sees a job for a row that was rolled back. Outside the block it would
+        # push immediately and usually win the race, and the job would
+        # dead-letter looking like corrupted data rather than like an ordering
+        # bug. `after_commit=False` is the escape hatch, and it has to be typed.
+        await dispatch(IndexItem(item_id=str(item.id), owner_id=str(owner_id)))
+{%- endif %}
+
+        return result
+
+
+async def list_items(
+    owner_id: UUID,
+    *,
+    limit: int = DEFAULT_PAGE_SIZE,
+    offset: int = 0,
+) -> list[ItemRead]:
+    """Return a page of one owner's items.
+
+    Args:
+        owner_id: Whose items to return.
+        limit: Maximum rows to return.
+        offset: Rows to skip.
+
+    Returns:
+        The page, as schemas.
+    """
+    async with uow() as session:
+        found = await ItemRepository(session).list(owner_id, limit=limit, offset=offset)
+        return [ItemRead.model_validate(item) for item in found]
+
+
+async def get_item(item_id: UUID, owner_id: UUID) -> ItemRead:
+    """Return one of an owner's items.
+
+    An item belonging to someone else is reported as missing rather than as
+    forbidden: telling a caller that a resource exists but is not theirs leaks
+    the existence of the resource.
+
+    Args:
+        item_id: The item's id.
+        owner_id: The owner it must belong to.
+
+    Returns:
+        The item.
+
+    Raises:
+        NotFoundError: If there is no such item for that owner.
+    """
+    async with uow() as session:
+        item = await ItemRepository(session).get_for_owner(item_id, owner_id)
+        if item is None:
+            raise NotFoundError(f"no item with id {item_id} for owner {owner_id}")
+        return ItemRead.model_validate(item)
+
+
+async def update_item(item_id: UUID, owner_id: UUID, payload: ItemUpdate) -> ItemRead:
+    """Apply a partial update to one of an owner's items.
+
+    Args:
+        item_id: The item's id.
+        owner_id: The owner it must belong to.
+        payload: The fields to change. Unset fields are left alone; ``owner_id``
+            is not among them, because transferring ownership is a different
+            operation with different rules.
+
+    Returns:
+        The updated item.
+
+    Raises:
+        NotFoundError: If there is no such item for that owner.
+    """
+    async with uow() as session:
+        items = ItemRepository(session)
+        item = await items.get_for_owner(item_id, owner_id)
+        if item is None:
+            raise NotFoundError(f"no item with id {item_id} for owner {owner_id}")
+
+        changes: dict[str, Any] = payload.model_dump(exclude_unset=True)
+        updated = await items.update(item, changes)
+        return ItemRead.model_validate(updated)
+
+
+async def delete_item(item_id: UUID, owner_id: UUID) -> None:
+    """Delete one of an owner's items.
+
+    Args:
+        item_id: The item's id.
+        owner_id: The owner it must belong to.
+
+    Raises:
+        NotFoundError: If there is no such item for that owner.
+    """
+    async with uow() as session:
+        items = ItemRepository(session)
+        item = await items.get_for_owner(item_id, owner_id)
+        if item is None:
+            raise NotFoundError(f"no item with id {item_id} for owner {owner_id}")
+        await items.delete(item)
+
+
+__all__ = [
+    "create_item",
+    "delete_item",
+    "get_item",
+    "list_items",
+    "update_item",
+]

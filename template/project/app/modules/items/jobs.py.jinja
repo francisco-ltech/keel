@@ -1,0 +1,130 @@
+"""Background work for items.
+
+The sixth file in the module, and the only one a router never touches. It is
+where the *worker* half of this service enters the items domain — through the
+same service functions the router calls, never past them into a repository.
+
+**Pattern: Command.** A job is an operation packaged with its parameters, so it
+can be serialised, queued, logged and executed minutes later by a process that
+does not know what it does. That is why the fields are the whole payload and why
+the class is a frozen dataclass: there is nothing to serialise on a plain class,
+and a mutable one would let a handler change what a retry replays.
+
+**Policy lives in ``ClassVar``s, so it never reaches the wire.** How many times
+to retry is a property of the job *type*, decided by its author. A caller cannot
+pass it, and an envelope sealed before a deploy cannot override the policy the
+deploy chose.
+
+**The direction of the call is the point.** ``handle`` calls
+:func:`app.modules.items.service.get_item` — the same function
+``GET /users/{owner_id}/items/{item_id}`` calls. There is no worker-only copy of
+the read, so a change to how an item is fetched cannot be right for HTTP and
+wrong for the queue.
+
+Declined, deliberately:
+
+* **A job per service function.** One real job is enough to establish the shape.
+  A drawer of stubs teaches nothing and rots faster than code that runs.
+* **Passing the ``ItemRead`` into the job instead of its id.** The payload would
+  be a snapshot of a row taken before the commit and read after it, which is a
+  cache with no invalidation. Ids are the only payload that cannot go stale.
+"""
+
+from __future__ import annotations
+
+import logging
+from dataclasses import dataclass
+from typing import ClassVar
+from uuid import UUID
+
+from keel.cache import cache
+from keel.queue import Backoff, ExponentialBackoff, Job, PermanentFailureError
+
+from app.errors import NotFoundError
+from app.modules.items import service
+
+logger = logging.getLogger(__name__)
+
+CARD_TTL = 3600.0
+"""Seconds a rendered card is kept. Long enough to be worth a job, short enough
+that a card missed by an invalidation repairs itself within the hour."""
+
+
+def card_key(item_id: UUID | str) -> str:
+    """Return the cache key an item's card is stored under.
+
+    A function rather than an f-string at each call site: the key format is a
+    contract between whoever writes it and whoever reads it, and two spellings
+    of it is how a cache quietly stops being read.
+
+    Args:
+        item_id: The item's id.
+
+    Returns:
+        The key.
+    """
+    return f"items:{item_id}:card"
+
+
+@dataclass(frozen=True, slots=True)
+class IndexItem(Job):
+    """Render an item's search card and put it in the cache.
+
+    Dispatched by :func:`app.modules.items.service.create_item` from *inside*
+    its unit of work, which means Keel holds the push until the transaction
+    commits. Enqueue it eagerly instead and a worker races the writer for a row
+    that may never exist — and usually wins, so the job dead-letters looking
+    like corrupted data rather than like the ordering bug it is.
+
+    Idempotent, because at-least-once is the only delivery guarantee a queue can
+    actually make: running this twice writes the same key twice.
+
+    Attributes:
+        item_id: The item to index, as a string — the payload is serialised, so
+            fields are wire types rather than ``UUID``.
+        owner_id: The owner it must belong to. Carried rather than looked up,
+            so the job asks the service exactly the scoped question the router
+            asks and cannot read across owners by accident.
+    """
+
+    max_attempts: ClassVar[int] = 5
+    """Generous, because every plausible failure here — the database, the cache
+    — is transient. A permanent one raises :class:`PermanentFailureError` below
+    and never spends the budget."""
+
+    timeout: ClassVar[float | None] = 30.0
+    """A number rather than ``None`` on purpose: a job that declares no timeout
+    cannot be told apart from one still running, so it can never be recovered
+    after the worker holding it dies."""
+
+    backoff: ClassVar[Backoff] = ExponentialBackoff(base=2.0, maximum=60.0)
+    """A failing dependency needs time, not another request."""
+
+    item_id: str
+    owner_id: str
+
+    async def handle(self) -> None:
+        """Fetch the item and cache its card.
+
+        Raises:
+            PermanentFailureError: If the item is gone. The taxonomy is the
+                whole reason this ``try`` exists: ``NotFoundError`` is a *404*
+                to a router and *stop retrying* to a worker, and only the caller
+                knows which context it is in. Letting it escape unclassified
+                would burn five attempts and an hour of backoff re-reading a row
+                that was deleted on purpose.
+        """
+        try:
+            item = await service.get_item(UUID(self.item_id), UUID(self.owner_id))
+        except NotFoundError as exc:
+            raise PermanentFailureError(f"item {self.item_id} no longer exists") from exc
+
+        await cache.put(
+            card_key(item.id),
+            {"id": str(item.id), "name": item.name, "description": item.description},
+            ttl=CARD_TTL,
+        )
+        logger.info("indexed item %s", item.id)
+
+
+__all__ = ["CARD_TTL", "IndexItem", "card_key"]

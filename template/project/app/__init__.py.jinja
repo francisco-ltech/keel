@@ -1,0 +1,23 @@
+"""{{ project_name }} — {{ description }}
+
+The package is laid out by domain rather than by layer: everything about users
+lives under ``app.modules.users``, everything about items under
+``app.modules.items``, and each module has the same five files. Finding the code
+for a feature means opening one directory, and deleting a feature means deleting
+one directory.
+
+The layers inside a module are strictly ordered, and the order is the whole
+point:
+
+    router  ->  service  ->  repository  ->  models
+      HTTP      business      queries       tables
+                  logic
+
+A router knows about HTTP and calls services. A service opens a transaction and
+returns Pydantic schemas. A repository takes a session and runs queries. Nothing
+points back up.
+"""
+
+from __future__ import annotations
+
+__version__ = "0.1.0"

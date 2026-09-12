@@ -1,0 +1,11 @@
+"""The items domain.
+
+The same five files as :mod:`app.modules.users`, which is the point of the
+layout: a second module is not a second set of conventions to learn.
+
+Items are always scoped by owner. Every read that can return more than one row
+takes an ``owner_id``, so "list everything" is not an endpoint that exists — a
+habit worth forming before there is an authenticated principal to scope by.
+"""
+
+from __future__ import annotations

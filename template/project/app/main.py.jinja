@@ -1,0 +1,119 @@
+"""The application factory and its wiring.
+
+Three things are worth reading closely.
+
+**Wiring is one lifespan.** ``database_lifespan``{% if has_worker %}, ``cache_lifespan`` and
+``queue_lifespan``{% else %} and ``cache_lifespan``{% endif %} are plain async context
+managers — Keel takes no dependency on FastAPI — so they compose in a single
+``async with`` and the same {% if has_worker %}three{% else %}two{% endif %} lines wire a worker process or a
+management command.{% if has_worker %} They are, literally: see ``app.worker.serve``, which
+opens the same three in the same order.{% endif %} All of them close their pools on the
+way out, which is the part that is forgotten until a few hundred restarts have
+leaked it.
+{% if has_worker %}
+**This process dispatches; it does not consume.** Binding the queue is what
+makes ``dispatch()`` work inside a service — the API half of a queue is the push
+side. No worker runtime is imported here: ``keel.queue`` exports ``Worker``
+lazily, so an API replica pays for none of it.
+{% endif %}
+
+**No session is held across a request.** There is no ``get_session`` dependency
+to import and this module does not invent one. A route receives nothing but its
+payload, calls a service, and the service opens ``uow()`` around the work that
+must be atomic. FastAPI PR #12066 is the reason: a session yielded from
+``Depends`` stays open through response-model validation, so under load the pool
+starves while every individual request still looks fast at p99.
+
+**Liveness and readiness are different questions.** See the two endpoints below.
+"""
+
+from __future__ import annotations
+
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI
+from fastapi.responses import JSONResponse
+from keel.cache import cache_lifespan
+from keel.database import current_database, database_lifespan
+{%- if has_worker %}
+from keel.queue import queue_lifespan
+{%- endif %}
+
+from app import __version__
+from app.errors import register_error_handlers
+from app.modules import include_modules
+from app.settings import Settings, get_settings
+
+
+def create_app(settings: Settings | None = None) -> FastAPI:
+    """Build the application.
+
+    A factory rather than a module-level singleton so that a test can build an
+    application with its own settings without touching the environment, and so
+    that importing this module has no side effects beyond the one ``app`` below.
+
+    Args:
+        settings: Configuration to use. Defaults to reading the environment,
+            which is what a real deployment does.
+
+    Returns:
+        A configured application.
+    """
+    config = settings if settings is not None else get_settings()
+
+    @asynccontextmanager
+    async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+        """Bind the database{% if has_worker %}, the cache and the queue{% else %} and the cache{% endif %} for the life of the process."""
+        async with (
+            database_lifespan(config.database_config()),
+            cache_lifespan(config.cache_config()),
+{%- if has_worker %}
+            queue_lifespan(config.queue_config()),
+{%- endif %}
+        ):
+            yield
+
+    app = FastAPI(
+        title=config.app_name,
+        description="{{ description }}",
+        version=__version__,
+        lifespan=lifespan,
+    )
+
+    register_error_handlers(app)
+    include_modules(app)
+
+    @app.get("/health", tags=["health"])
+    async def health() -> dict[str, str]:
+        """Liveness: is this process running?
+
+        Always 200 while the process can answer. It deliberately touches
+        nothing: a liveness probe that fails when the database is briefly
+        unreachable gets the container killed and restarted, which does not fix
+        the database and does lose every in-flight request.
+        """
+        return {"status": "ok", "service": config.app_name}
+
+    @app.get("/ready", tags=["health"])
+    async def ready() -> JSONResponse:
+        """Readiness: can this process serve traffic?
+
+        Checks the database, and returns 503 if it does not answer, so the
+        orchestrator stops routing to a process that cannot serve. A readiness
+        check that reports success without touching its dependencies is worse
+        than none at all.
+        """
+        healthy = await current_database().healthy()
+        return JSONResponse(
+            status_code=200 if healthy else 503,
+            content={"status": "ready" if healthy else "degraded", "database": healthy},
+        )
+
+    return app
+
+
+app = create_app()
+"""The application ``uvicorn app.main:app`` serves."""
+
+__all__ = ["app", "create_app"]

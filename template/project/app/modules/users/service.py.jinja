@@ -1,0 +1,199 @@
+"""Business logic for users.
+
+Module-level functions rather than a service class: there is no per-instance
+state to hold, and a free function is trivially callable from a worker, a CLI
+command or a test without constructing anything.
+
+Two rules are load-bearing here, and both are about the session.
+
+**The transaction spans the work, not the request.** Each function opens
+``uow()`` around exactly the reads and writes that must be atomic. The session
+is closed — and the connection returned to the pool — before the response is
+serialised. This is the whole reason Keel ships no ``get_session`` dependency.
+
+**Services return schemas, not ORM objects.** Handing a router a ``User`` means
+handing it an object whose session has closed. Any attribute that was not loaded
+raises on access, and because it usually *is* loaded in development, the failure
+arrives in production on the one code path that lazily touched a relationship.
+Validating into a :class:`~app.modules.users.schemas.UserRead` inside the block
+makes that class of bug unrepresentable.
+"""
+
+from __future__ import annotations
+
+from typing import Any
+from uuid import UUID
+
+from keel.database import uow
+from pwdlib import PasswordHash
+
+from app.errors import ConflictError, NotFoundError
+from app.modules.users.repository import DEFAULT_PAGE_SIZE, UserRepository
+from app.modules.users.schemas import UserCreate, UserRead, UserUpdate
+
+_password_hash = PasswordHash.recommended()
+"""Argon2id with pwdlib's current recommended parameters.
+
+Built once: constructing it per call re-reads the parameters for no benefit, and
+the cost that matters — the hash itself — is per call regardless.
+"""
+
+
+def hash_password(plaintext: str) -> str:
+    """Hash a password for storage.
+
+    Args:
+        plaintext: The password as the user typed it.
+
+    Returns:
+        An Argon2 hash, self-describing enough to be verified later without
+        storing the parameters separately.
+    """
+    return _password_hash.hash(plaintext)
+
+
+def verify_password(plaintext: str, hashed: str) -> bool:
+    """Check a password against a stored hash.
+
+    Unused by any route today — there is no login endpoint until Phase 4 — but
+    it lives here rather than in the future auth module because it is the other
+    half of :func:`hash_password`, and the two must agree about the algorithm.
+
+    Args:
+        plaintext: The password as the user typed it.
+        hashed: The stored hash.
+
+    Returns:
+        Whether they match.
+    """
+    return _password_hash.verify(plaintext, hashed)
+
+
+async def create_user(payload: UserCreate) -> UserRead:
+    """Create a user.
+
+    Args:
+        payload: The requested user.
+
+    Returns:
+        The created user.
+
+    Raises:
+        ConflictError: If the email address is already taken. Checked inside the
+            transaction, which narrows but does not close the race; the unique
+            index on the column is what actually guarantees it.
+    """
+    async with uow() as session:
+        users = UserRepository(session)
+        if await users.get_by_email(payload.email) is not None:
+            raise ConflictError(f"a user with email {payload.email!r} already exists")
+
+        user = await users.create(
+            email=payload.email,
+            full_name=payload.full_name,
+            hashed_password=hash_password(payload.password),
+        )
+        return UserRead.model_validate(user)
+
+
+async def list_users(*, limit: int = DEFAULT_PAGE_SIZE, offset: int = 0) -> list[UserRead]:
+    """Return a page of users.
+
+    Args:
+        limit: Maximum rows to return.
+        offset: Rows to skip.
+
+    Returns:
+        The page, as schemas.
+    """
+    async with uow() as session:
+        found = await UserRepository(session).list(limit=limit, offset=offset)
+        return [UserRead.model_validate(user) for user in found]
+
+
+async def get_user(user_id: UUID) -> UserRead:
+    """Return one user.
+
+    Args:
+        user_id: The primary key.
+
+    Returns:
+        The user.
+
+    Raises:
+        NotFoundError: If there is no such user.
+    """
+    async with uow() as session:
+        user = await UserRepository(session).get(user_id)
+        if user is None:
+            raise NotFoundError(f"no user with id {user_id}")
+        return UserRead.model_validate(user)
+
+
+async def update_user(user_id: UUID, payload: UserUpdate) -> UserRead:
+    """Apply a partial update.
+
+    Args:
+        user_id: The primary key.
+        payload: The fields to change. Unset fields are left alone.
+
+    Returns:
+        The updated user.
+
+    Raises:
+        NotFoundError: If there is no such user.
+        ConflictError: If the new email address belongs to someone else.
+    """
+    async with uow() as session:
+        users = UserRepository(session)
+        user = await users.get(user_id)
+        if user is None:
+            raise NotFoundError(f"no user with id {user_id}")
+
+        # `exclude_unset` rather than `exclude_none`: a client that sends
+        # `is_active: null` is saying something different from one that omits it,
+        # and collapsing the two makes a partial update impossible to express.
+        changes: dict[str, Any] = payload.model_dump(exclude_unset=True)
+
+        # Translate the wire field into the column. The repository never sees a
+        # plaintext password, and `password` is not a column in any case.
+        plaintext = changes.pop("password", None)
+        if plaintext is not None:
+            changes["hashed_password"] = hash_password(plaintext)
+
+        email = changes.get("email")
+        if email is not None and email != user.email:
+            clash = await users.get_by_email(email)
+            if clash is not None:
+                raise ConflictError(f"a user with email {email!r} already exists")
+
+        updated = await users.update(user, changes)
+        return UserRead.model_validate(updated)
+
+
+async def delete_user(user_id: UUID) -> None:
+    """Delete a user, and by cascade everything they own.
+
+    Args:
+        user_id: The primary key.
+
+    Raises:
+        NotFoundError: If there is no such user.
+    """
+    async with uow() as session:
+        users = UserRepository(session)
+        user = await users.get(user_id)
+        if user is None:
+            raise NotFoundError(f"no user with id {user_id}")
+        await users.delete(user)
+
+
+__all__ = [
+    "create_user",
+    "delete_user",
+    "get_user",
+    "hash_password",
+    "list_users",
+    "update_user",
+    "verify_password",
+]

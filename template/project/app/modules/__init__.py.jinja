@@ -1,0 +1,72 @@
+"""The module registry.
+
+A new domain is a new directory under this package plus one line in
+{% if has_api %}:data:`MODULES`{% else %}:data:`JOBS`{% endif %}. Nothing in the entrypoints changes, which is the point:
+{% if has_api %}the application factory{% else %}the worker{% endif %} should not grow a line per feature, and a merge
+conflict over the registry should be one line long rather than a rewrite.
+
+The registry is explicit rather than a plugin-discovery mechanism that imports
+whatever it finds. Explicit is worth more than clever here — the import list is
+the dependency graph, and an accidental import is much harder to see than an
+accidental line in this file.
+{% if has_worker %}
+**Both halves register from here**, and that is what makes one codebase serve
+two entrypoints. {% if has_api %}``MODULES`` is what ``app.main`` mounts; ``JOBS`` is what
+``app.worker`` can route to.{% else %}``JOBS`` is what ``app.worker`` can route to.{% endif %} Importing a job module is
+not optional bookkeeping: a job class registers itself under its name when it is
+defined, so a worker that never imported ``items.jobs`` treats every
+``IndexItem`` envelope as unroutable and hands it straight back to the queue.
+{% endif %}"""
+
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Final
+
+{% if has_worker %}from app.modules.items.jobs import IndexItem
+{% endif %}{% if has_api %}from app.modules.items.router import router as items_router
+from app.modules.users.router import router as users_router
+{% endif %}
+if TYPE_CHECKING:
+{%- if has_api %}
+    from fastapi import APIRouter, FastAPI
+{%- endif %}
+{%- if has_worker %}
+    from keel.queue import Job
+{%- endif %}
+
+{% if has_api %}
+MODULES: Final[tuple[APIRouter, ...]] = (
+    users_router,
+    items_router,
+)
+"""Every router the application serves, in the order they are mounted."""
+
+{% endif %}{% if has_worker %}
+JOBS: Final[tuple[type[Job], ...]] = (IndexItem,)
+"""Every job this service can run.
+
+Named rather than left as an import side effect. A tuple can be counted in a
+start-up log line and asserted on in a test, so "the worker forgot to import a
+job module" is a failure someone notices before an envelope goes unroutable.
+"""
+
+{% endif %}{% if has_api %}
+def include_modules(app: FastAPI) -> None:
+    """Mount every registered module on the application.
+
+    Args:
+        app: The application to mount on.
+    """
+    for router in MODULES:
+        app.include_router(router)
+
+{% endif %}
+__all__ = [
+{%- if has_worker %}
+    "JOBS",
+{%- endif %}
+{%- if has_api %}
+    "MODULES",
+    "include_modules",
+{%- endif %}
+]

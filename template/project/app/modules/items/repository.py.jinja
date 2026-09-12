@@ -1,0 +1,136 @@
+"""Queries against the ``items`` table.
+
+Same shape as the users repository: a session in, plain SQLAlchemy 2.0
+``select()`` out, no transaction management. The generic base class that would
+collapse the duplication between the two is Phase 2 work — two examples is not
+enough evidence to know which methods genuinely repeat and which only look
+alike.
+
+Every method that can return more than one row takes an ``owner_id``. Scoping in
+the query rather than filtering afterwards is the difference between a
+permission check and a suggestion.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Mapping, Sequence
+from typing import TYPE_CHECKING
+from uuid import UUID
+
+from sqlalchemy import select
+
+from app.modules.items.models import Item
+
+if TYPE_CHECKING:
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+DEFAULT_PAGE_SIZE = 50
+"""Rows returned when a caller does not say."""
+
+
+class ItemRepository:
+    """Data access for :class:`~app.modules.items.models.Item`.
+
+    Args:
+        session: The session to run against, supplied by the service.
+    """
+
+    __slots__ = ("_session",)
+
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def get(self, item_id: UUID) -> Item | None:
+        """Return an item by id, regardless of owner.
+
+        Args:
+            item_id: The primary key.
+
+        Returns:
+            The item, or ``None``.
+        """
+        return await self._session.get(Item, item_id)
+
+    async def get_for_owner(self, item_id: UUID, owner_id: UUID) -> Item | None:
+        """Return an item only if it belongs to the given owner.
+
+        Args:
+            item_id: The primary key.
+            owner_id: The owner the item must belong to.
+
+        Returns:
+            The item, or ``None`` if it does not exist or is someone else's.
+        """
+        statement = select(Item).where(Item.id == item_id, Item.owner_id == owner_id)
+        result = await self._session.execute(statement)
+        return result.scalar_one_or_none()
+
+    async def list(
+        self,
+        owner_id: UUID,
+        *,
+        limit: int = DEFAULT_PAGE_SIZE,
+        offset: int = 0,
+    ) -> Sequence[Item]:
+        """Return a page of one owner's items, oldest first.
+
+        Args:
+            owner_id: Whose items to return.
+            limit: Maximum rows to return.
+            offset: Rows to skip.
+
+        Returns:
+            The page.
+        """
+        statement = (
+            select(Item)
+            .where(Item.owner_id == owner_id)
+            .order_by(Item.created_at, Item.id)
+            .limit(limit)
+            .offset(offset)
+        )
+        result = await self._session.execute(statement)
+        return result.scalars().all()
+
+    async def create(self, *, name: str, description: str | None, owner_id: UUID) -> Item:
+        """Insert an item.
+
+        Args:
+            name: Short label.
+            description: Optional long text.
+            owner_id: The owning user; the service has already checked it exists.
+
+        Returns:
+            The persisted item, with its id and server-side timestamps loaded.
+        """
+        item = Item(name=name, description=description, owner_id=owner_id)
+        self._session.add(item)
+        await self._session.flush()
+        return item
+
+    async def update(self, item: Item, changes: Mapping[str, object]) -> Item:
+        """Apply changes to an item and flush them.
+
+        Args:
+            item: The row to change, already loaded in this session.
+            changes: Column names to new values, decided by the service.
+
+        Returns:
+            The updated item.
+        """
+        for key, value in changes.items():
+            setattr(item, key, value)
+        await self._session.flush()
+        return item
+
+    async def delete(self, item: Item) -> None:
+        """Delete an item.
+
+        Args:
+            item: The row to delete.
+        """
+        await self._session.delete(item)
+        await self._session.flush()
+
+
+__all__ = ["DEFAULT_PAGE_SIZE", "ItemRepository"]

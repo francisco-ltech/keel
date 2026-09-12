@@ -1,0 +1,274 @@
+"""The error taxonomy, and{% if has_api %} the one wire format it is reported in{% else %} nothing about a wire{% endif %}.
+{% if has_api %}
+Every failure this application returns is an RFC 9457 problem document served as
+``application/problem+json``::
+
+    {
+      "type":     "https://{{ project_slug }}.example/problems/not-found",
+      "title":    "Not Found",
+      "status":   404,
+      "detail":   "no user with id 7b1f...",
+      "instance": "/users/7b1f..."
+    }
+
+One format rather than several matters more than which format. A client that has
+to branch on whether an error arrived as ``{"detail": ...}``, ``{"error": ...}``
+or a bare string will eventually get it wrong, and the failure will be on the
+path nobody tested.
+
+Three families are mapped here:
+
+* :class:`AppError` — what this application raises on purpose. Carries its own
+  status and title.
+* :class:`keel.exceptions.KeelError` — anything the framework raises. A
+  :class:`~keel.exceptions.ConfigurationError` is a wiring bug and is reported
+  as a 500; it should have surfaced at startup.
+* FastAPI's own validation and HTTP exceptions, re-dressed so a 422 looks like
+  every other error.
+{% endif %}
+**The exception classes below know nothing about HTTP{% if has_api %}, and the handlers are
+kept beneath them for that reason{% endif %}.** ``status``, ``title`` and ``slug`` are
+data on the class, not a coupling to a framework — which is what lets the same
+``NotFoundError`` mean *404* to a router and, re-raised as
+``PermanentFailureError``, *stop retrying* to a worker. An error hierarchy that
+imported a web framework could not be raised by a job handler at all.
+"""
+
+from __future__ import annotations
+
+from typing import {% if has_api %}TYPE_CHECKING, Any, {% endif %}Final
+{% if has_api %}
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
+from keel.exceptions import ConfigurationError, KeelError
+from starlette.exceptions import HTTPException as StarletteHTTPException
+
+if TYPE_CHECKING:
+    # Deferred because nothing here is introspected at runtime: Starlette calls
+    # a handler positionally and never reads its annotations. Anything FastAPI
+    # *does* read — a route signature, a Pydantic field — must stay imported at
+    # module scope, or schema building fails with a NameError.
+    from fastapi import FastAPI, Request
+
+PROBLEM_JSON: Final = "application/problem+json"
+"""The media type RFC 9457 defines. Not ``application/json``: a client that
+negotiates on content type can tell an error from a payload without reading it."""
+{% endif %}
+PROBLEM_BASE: Final = "https://{{ project_slug }}.example/problems"
+"""Namespace for this application's problem types. A URI, because the ``type``
+member is an identifier — it does not have to resolve, but it does have to be
+unambiguous across services."""
+
+
+class AppError(Exception):
+    """Base class for failures this application raises deliberately.
+
+    Subclasses set ``status``, ``title`` and ``slug``; the message passed to the
+    constructor becomes the problem document's ``detail``, so it should say what
+    went wrong with *this* request and never leak a stack trace or a query.
+
+    Attributes:
+        status: The HTTP status to report.
+        title: A short, stable summary. Does not vary per occurrence.
+        slug: The last segment of the problem ``type`` URI.
+    """
+
+    status: int = 500
+    title: str = "Internal Server Error"
+    slug: str = "internal-error"
+
+    def __init__(self, detail: str) -> None:
+        self.detail = detail
+        super().__init__(detail)
+
+    @property
+    def problem_type(self) -> str:
+        """The ``type`` member for this error."""
+        return f"{PROBLEM_BASE}/{self.slug}"
+
+
+class NotFoundError(AppError):
+    """The addressed resource does not exist."""
+
+    status = 404
+    title = "Not Found"
+    slug = "not-found"
+
+
+class ConflictError(AppError):
+    """The request collides with the current state — a duplicate email, say."""
+
+    status = 409
+    title = "Conflict"
+    slug = "conflict"
+
+
+class ValidationError(AppError):
+    """The request is well-formed but asks for something the domain forbids.
+
+    Distinct from FastAPI's ``RequestValidationError``, which is about the shape
+    of the payload. This one is about the rules.
+    """
+
+    status = 422
+    title = "Unprocessable Entity"
+    slug = "validation-error"
+
+
+{% if has_api %}def problem(
+    request: Request,
+    *,
+    status: int,
+    title: str,
+    detail: str,
+    problem_type: str = "about:blank",
+    **extra: Any,
+) -> JSONResponse:
+    """Build an RFC 9457 problem response.
+
+    Args:
+        request: The request being answered; supplies ``instance``.
+        status: The HTTP status code.
+        title: A short, stable summary of the problem type.
+        detail: What went wrong with this particular request.
+        problem_type: A URI identifying the problem type.
+        **extra: Additional members. RFC 9457 allows them, and a client that
+            does not know about one must ignore it.
+
+    Returns:
+        A JSON response with the problem media type.
+    """
+    body: dict[str, Any] = {
+        "type": problem_type,
+        "title": title,
+        "status": status,
+        "detail": detail,
+        "instance": request.url.path,
+    }
+    body.update(extra)
+    return JSONResponse(status_code=status, content=body, media_type=PROBLEM_JSON)
+
+
+async def handle_app_error(request: Request, exc: Exception) -> JSONResponse:
+    """Report an :class:`AppError` as the problem document it describes.
+
+    Args:
+        request: The request being answered.
+        exc: The exception. Typed as ``Exception`` because that is the signature
+            Starlette's handler registry requires.
+
+    Returns:
+        The problem response.
+    """
+    # Guaranteed by the registration in register_error_handlers.
+    assert isinstance(exc, AppError)
+    return problem(
+        request,
+        status=exc.status,
+        title=exc.title,
+        detail=exc.detail,
+        problem_type=exc.problem_type,
+    )
+
+
+async def handle_keel_error(request: Request, exc: Exception) -> JSONResponse:
+    """Report a framework failure.
+
+    A :class:`~keel.exceptions.ConfigurationError` reaching a request handler
+    means the application is wired wrongly and should have failed at startup, so
+    it is reported as a server error and its message is kept: it names the
+    binding that is missing, which is exactly what the operator needs.
+
+    Args:
+        request: The request being answered.
+        exc: The exception.
+
+    Returns:
+        The problem response.
+    """
+    # Guaranteed by the registration in register_error_handlers.
+    assert isinstance(exc, KeelError)
+    detail = str(exc) if isinstance(exc, ConfigurationError) else "a subsystem failed"
+    return problem(
+        request,
+        status=500,
+        title="Internal Server Error",
+        detail=detail,
+        problem_type=f"{PROBLEM_BASE}/subsystem-failure",
+    )
+
+
+async def handle_request_validation_error(request: Request, exc: Exception) -> JSONResponse:
+    """Report a malformed request body or query in the same shape as everything else.
+
+    Args:
+        request: The request being answered.
+        exc: The exception.
+
+    Returns:
+        The problem response, with FastAPI's per-field report under ``errors``.
+    """
+    # Guaranteed by the registration in register_error_handlers.
+    assert isinstance(exc, RequestValidationError)
+    return problem(
+        request,
+        status=422,
+        title="Unprocessable Entity",
+        detail="the request payload failed validation",
+        problem_type=f"{PROBLEM_BASE}/validation-error",
+        errors=[
+            {"loc": list(error.get("loc", ())), "msg": error.get("msg", "")}
+            for error in exc.errors()
+        ],
+    )
+
+
+async def handle_http_exception(request: Request, exc: Exception) -> JSONResponse:
+    """Re-dress Starlette's own HTTP errors — a 404 on an unknown path, say.
+
+    Args:
+        request: The request being answered.
+        exc: The exception.
+
+    Returns:
+        The problem response.
+    """
+    # Guaranteed by the registration in register_error_handlers.
+    assert isinstance(exc, StarletteHTTPException)
+    return problem(
+        request,
+        status=exc.status_code,
+        title=str(exc.detail),
+        detail=str(exc.detail),
+    )
+
+
+def register_error_handlers(app: FastAPI) -> None:
+    """Install every handler on the application.
+
+    Registration order does not matter: Starlette resolves a handler by walking
+    the exception's MRO, so the most specific registered class wins.
+
+    Args:
+        app: The application to install handlers on.
+    """
+    app.add_exception_handler(AppError, handle_app_error)
+    app.add_exception_handler(KeelError, handle_keel_error)
+    app.add_exception_handler(RequestValidationError, handle_request_validation_error)
+    app.add_exception_handler(StarletteHTTPException, handle_http_exception)
+
+
+{% endif %}__all__ = [
+    "PROBLEM_BASE",
+{%- if has_api %}
+    "PROBLEM_JSON",
+{%- endif %}
+    "AppError",
+    "ConflictError",
+    "NotFoundError",
+    "ValidationError",
+{%- if has_api %}
+    "problem",
+    "register_error_handlers",
+{%- endif %}
+]

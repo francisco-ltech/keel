@@ -1,0 +1,272 @@
+"""Application configuration.
+
+Keel's core is deliberately pydantic-free. :class:`keel.database.DatabaseConfig`
+and :class:`keel.cache.CacheConfig` are plain frozen dataclasses, so the library
+declares the shape of the configuration it needs without forcing a configuration
+stack on every consumer.
+
+**The application is where that choice gets made**, and this module is where
+{{ project_name }} makes it: ``pydantic-settings`` reads and validates the
+environment, and the methods below hand Keel the plain dataclasses it asked for.
+The dependency points from the application to the library, never back.
+
+**Each subsystem carries its own prefix; there is no nested delimiter.** Every
+group below is a ``BaseSettings`` in its own right with an ``env_prefix``, so
+the variables read as ``DATABASE_URL``, ``DB_POOL_SIZE``, ``CACHE_STORE``{% if has_worker %},
+``QUEUE_DRIVER`` and ``WORKER_HEALTH_FILE``{% endif %} — the names a hosting
+platform injects. Adding a subsystem means a new ``<SUBSYSTEM>_*`` group, not a new
+top-level key. Setting ``env_nested_delimiter="__"`` on :class:`Settings`
+instead would silently ignore every one of those names, because
+``extra="ignore"`` means a variable that binds to nothing does not raise.
+"""
+
+from __future__ import annotations
+
+from functools import lru_cache
+{%- if has_worker %}
+from pathlib import Path
+{%- endif %}
+
+from keel.cache import CacheConfig, StoreConfig
+from keel.database import DatabaseConfig
+{%- if has_worker %}
+from keel.queue import QueueConfig
+{%- endif %}
+from pydantic import AliasChoices, Field
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class DatabaseSettings(BaseSettings):
+    """Where the database is, and how hard to pool it.
+
+    Attributes:
+        url: An async SQLAlchemy URL. Keel refuses a synchronous driver at load
+            time rather than blocking the event loop later.
+        echo: Log every statement. Useful in a test run, ruinous in production.
+        pool_size: Connections kept open per process.
+        max_overflow: Extra connections allowed under burst.
+        statement_timeout: Server-side cap on a single statement, in seconds, or
+            ``None`` for the server default.
+    """
+
+    model_config = SettingsConfigDict(env_prefix="DB_", env_file=".env", extra="ignore")
+
+    # DATABASE_URL rather than DB_URL: it is what every hosting platform
+    # injects, and what Alembic and psql tooling already read. DB_URL is
+    # accepted too so the subsystem prefix stays internally consistent.
+    url: str = Field(
+        default="postgresql+asyncpg://keel:keel@localhost:{{ postgres_port }}/keel",
+        validation_alias=AliasChoices("DATABASE_URL", "DB_URL"),
+    )
+    echo: bool = False
+    pool_size: int = Field(default=5, ge=1)
+    max_overflow: int = Field(default=10, ge=0)
+    statement_timeout: float | None = 30.0
+
+
+class CacheSettings(BaseSettings):
+    """Which cache driver to use, and how to namespace it.
+
+    Attributes:
+        store: ``redis``, ``array`` or ``null``.
+        prefix: The key namespace this application owns. Never empty on a shared
+            backend — an unnamespaced store's ``flush()`` takes everything else
+            with it.
+        redis_url: Connection URL for the ``redis`` driver.
+        default_ttl: Lifetime applied when a caller does not specify one.
+    """
+
+    model_config = SettingsConfigDict(env_prefix="CACHE_", env_file=".env", extra="ignore")
+
+    store: str = "redis"
+    prefix: str = "{{ project_slug }}"
+    redis_url: str = Field(
+        default="redis://localhost:{{ redis_port }}/0",
+        validation_alias=AliasChoices("REDIS_URL", "CACHE_REDIS_URL"),
+    )
+    default_ttl: float | None = Field(
+        default=300.0,
+        validation_alias=AliasChoices("CACHE_TTL", "CACHE_DEFAULT_TTL"),
+    )
+
+
+{% if has_worker %}class QueueSettings(BaseSettings):
+    """Which queue driver to use, and how hard one worker pulls on it.
+
+    Read by both entrypoints. An API process uses this to *dispatch* and a
+    worker process uses the same values to *consume*, which is what keeps the
+    two halves talking about the same queue without a second configuration
+    block that can drift.
+
+    Attributes:
+        driver: ``saq`` (Redis, a real worker), ``sync`` (run inline, which is
+            how a single-process development environment works without a
+            worker at all), or ``null`` (discard).
+        redis_url: Connection URL for the ``saq`` driver. The same
+            ``REDIS_URL`` the cache reads — one Redis, one variable.
+        prefix: Key namespace, never empty, for the reason ``CACHE_PREFIX`` is
+            never empty: administrative operations on an unnamespaced queue
+            reach everything else sharing the backend.
+        default_queue: Where a job goes when it names none.
+        concurrency: Jobs one worker process runs at once. Capped in practice by
+            ``DB_POOL_SIZE`` — most jobs open a transaction, and a worker
+            running more jobs than it has connections spends its time waiting
+            for one.
+    """
+
+    model_config = SettingsConfigDict(env_prefix="QUEUE_", env_file=".env", extra="ignore")
+
+    driver: str = "saq"
+    redis_url: str = Field(
+        default="redis://localhost:{{ redis_port }}/0",
+        validation_alias=AliasChoices("REDIS_URL", "QUEUE_REDIS_URL"),
+    )
+    prefix: str = "{{ project_slug }}"
+    default_queue: str = "default"
+    concurrency: int = Field(default=10, ge=1)
+
+
+class WorkerSettings(BaseSettings):
+    """How the worker process reports that it is alive.
+
+    A worker serves no HTTP, so it has no ``/health`` to probe. It refreshes the
+    mtime of a file instead and the orchestrator runs an exec probe against the
+    file's age — see :mod:`app.healthcheck`. Starting an HTTP server inside the
+    worker purely to answer a probe was declined: it is a second listener, a
+    second port to allocate and a second thing to shut down gracefully, in a
+    process whose entire job is not to serve requests.
+
+    Attributes:
+        health_file: The heartbeat file. Somewhere writable and local to the
+            container — a shared volume would let a dead replica's file keep a
+            live one's probe passing.
+        health_max_age: Seconds of staleness the probe tolerates. Comfortably
+            more than the worker's refresh interval so one slow tick is not an
+            outage, and comfortably less than a deployment's patience.
+    """
+
+    model_config = SettingsConfigDict(env_prefix="WORKER_", env_file=".env", extra="ignore")
+
+    health_file: Path = Path("/tmp/{{ project_slug }}-worker.health")
+    health_max_age: float = Field(default=30.0, gt=0)
+
+
+{% endif %}class Settings(BaseSettings):
+    """Everything {{ project_name }} reads from its environment.
+
+    Attributes:
+        app_name: Shown in the OpenAPI document.
+        debug: Enables developer-facing behaviour. Never true in production.
+        db: Database settings, from ``DATABASE_URL`` and ``DB_*``.
+        cache: Cache settings, from ``REDIS_URL`` and ``CACHE_*``.
+{%- if has_worker %}
+        queue: Queue settings, from ``REDIS_URL`` and ``QUEUE_*``.
+        worker: Worker settings, from ``WORKER_*``.
+{%- endif %}
+    """
+
+    # No env_prefix and no nested delimiter. The groups below are BaseSettings
+    # in their own right, each carrying its own subsystem prefix, so the
+    # variables read as DATABASE_URL / DB_POOL_SIZE / CACHE_STORE rather than
+    # DB__URL. A nested delimiter here would silently ignore all of those —
+    # `extra="ignore"` means a misspelled variable does not raise, it just does
+    # nothing, which is the worst way for configuration to fail.
+    model_config = SettingsConfigDict(
+        env_prefix="",
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
+
+    app_name: str = "{{ project_name }}"
+    debug: bool = False
+    db: DatabaseSettings = Field(default_factory=DatabaseSettings)
+    cache: CacheSettings = Field(default_factory=CacheSettings)
+{%- if has_worker %}
+    queue: QueueSettings = Field(default_factory=QueueSettings)
+    worker: WorkerSettings = Field(default_factory=WorkerSettings)
+{%- endif %}
+
+    def database_config(self) -> DatabaseConfig:
+        """Translate the validated settings into Keel's database config.
+
+        Returns:
+            The plain dataclass :func:`keel.database.database_lifespan` expects.
+        """
+        return DatabaseConfig(
+            url=self.db.url,
+            echo=self.db.echo,
+            pool_size=self.db.pool_size,
+            max_overflow=self.db.max_overflow,
+            statement_timeout=self.db.statement_timeout,
+        )
+
+    def cache_config(self) -> CacheConfig:
+        """Translate the validated settings into Keel's cache config.
+
+        One store named ``default`` is enough to start. A second one — a
+        longer-lived ``sessions``, say — is another entry in this mapping and
+        needs no change anywhere else.
+
+        Returns:
+            The plain dataclass :func:`keel.cache.cache_lifespan` expects.
+        """
+        return CacheConfig(
+            default="default",
+            stores={
+                "default": StoreConfig(
+                    driver=self.cache.store,
+                    prefix=self.cache.prefix,
+                    ttl=self.cache.default_ttl,
+                    url=self.cache.redis_url,
+                )
+            },
+        )
+{%- if has_worker %}
+
+    def queue_config(self) -> QueueConfig:
+        """Translate the validated settings into Keel's queue config.
+
+        The same object wires both halves: ``app.main``'s lifespan uses it to
+        bind a manager that dispatches, and ``app.worker`` uses it to build the
+        worker that consumes. One codebase, one configuration, two entrypoints.
+
+        Returns:
+            The plain dataclass :func:`keel.queue.queue_lifespan` expects.
+        """
+        return QueueConfig(
+            driver=self.queue.driver,
+            url=self.queue.redis_url,
+            prefix=self.queue.prefix,
+            default_queue=self.queue.default_queue,
+            concurrency=self.queue.concurrency,
+        )
+{%- endif %}
+
+
+@lru_cache(maxsize=1)
+def get_settings() -> Settings:
+    """Return the process-wide settings, read once.
+
+    Cached because reading and validating the environment on every request is
+    wasted work, and because a value that can change mid-process is a source of
+    bugs nobody enjoys finding.
+
+    Returns:
+        The settings.
+    """
+    return Settings()
+
+
+__all__ = [
+    "CacheSettings",
+    "DatabaseSettings",
+{%- if has_worker %}
+    "QueueSettings",
+{%- endif %}
+    "Settings",
+{%- if has_worker %}
+    "WorkerSettings",
+{%- endif %}
+    "get_settings",
+]

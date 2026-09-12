@@ -1,0 +1,72 @@
+"""Liveness and readiness are different questions, and these tests say so.
+
+If both endpoints did the same thing, one of them would be wrong: a liveness
+probe that fails on a brief database outage gets the container killed, which
+loses every in-flight request and does not fix the database.
+"""
+
+from __future__ import annotations
+
+import pytest
+from httpx import ASGITransport, AsyncClient
+from keel.database import Database, DatabaseConfig, use_database
+
+pytestmark = pytest.mark.anyio
+
+UNREACHABLE = "postgresql+asyncpg://nobody:nobody@127.0.0.1:1/nowhere"
+"""Port 1 refuses immediately, so the check fails fast rather than timing out."""
+
+
+async def test_health_is_always_ok(client: AsyncClient) -> None:
+    response = await client.get("/health")
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "ok"
+
+
+async def test_health_touches_no_dependency(app: object) -> None:
+    """Liveness answers without the database being reachable through this client.
+
+    The point is the absence of a `client` fixture here: no transaction is open,
+    nothing is bound for this request beyond the lifespan, and /health still
+    answers.
+    """
+    transport = ASGITransport(app=app)  # type: ignore[arg-type]  # ty: ignore[invalid-argument-type]
+    async with AsyncClient(transport=transport, base_url="http://test") as http:
+        assert (await http.get("/health")).status_code == 200
+
+
+async def test_ready_reports_the_database(client: AsyncClient) -> None:
+    response = await client.get("/ready")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "ready"
+    assert body["database"] is True
+
+
+async def test_an_unknown_path_is_a_problem_document(client: AsyncClient) -> None:
+    response = await client.get("/nope")
+
+    assert response.status_code == 404
+    assert response.headers["content-type"].startswith("application/problem+json")
+    assert response.json()["instance"] == "/nope"
+
+
+async def test_ready_reports_503_when_the_database_is_unreachable(app: object) -> None:
+    """The branch that makes the readiness probe worth having.
+
+    A check that cannot report failure is decoration; this one takes the process
+    out of rotation.
+    """
+    broken = Database(DatabaseConfig(url=UNREACHABLE, pool_pre_ping=False))
+    transport = ASGITransport(app=app)  # type: ignore[arg-type]  # ty: ignore[invalid-argument-type]
+    try:
+        with use_database(broken):
+            async with AsyncClient(transport=transport, base_url="http://test") as http:
+                response = await http.get("/ready")
+    finally:
+        await broken.close()
+
+    assert response.status_code == 503
+    assert response.json() == {"status": "degraded", "database": False}

@@ -1,0 +1,40 @@
+"""The ``users`` table.
+
+SQLAlchemy only. This module must never import ``schemas`` — see the package
+docstring for why the two directions are kept apart.
+
+Every table inherits :class:`keel.database.Model` so it lands on the one
+``MetaData`` Alembic autogenerates from, and so it picks up Keel's naming
+convention for constraints. Without that convention the database names them and
+the same schema produces different migration scripts on different backends.
+"""
+
+from __future__ import annotations
+
+from keel.database import Model, TimestampMixin, UUIDPrimaryKey
+from sqlalchemy import String, true
+from sqlalchemy.orm import Mapped, mapped_column
+
+
+class User(Model, UUIDPrimaryKey, TimestampMixin):
+    """A person who can own items.
+
+    Attributes:
+        email: The natural key, unique and indexed. 320 characters is the
+            maximum length RFC 5321 allows for an address.
+        full_name: Display name.
+        hashed_password: An Argon2 hash. The plaintext is never stored, never
+            logged and never leaves :mod:`app.modules.users.service`.
+        is_active: Soft disable. Defaulted server-side as well as in Python so a
+            row inserted by a migration or a psql session also gets it.
+    """
+
+    __tablename__ = "users"
+
+    email: Mapped[str] = mapped_column(String(320), unique=True, index=True)
+    full_name: Mapped[str] = mapped_column(String(200))
+    hashed_password: Mapped[str] = mapped_column(String(255))
+    is_active: Mapped[bool] = mapped_column(default=True, server_default=true())
+
+
+__all__ = ["User"]

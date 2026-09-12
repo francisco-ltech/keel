@@ -1,0 +1,105 @@
+"""The queue half of the items domain.
+
+Two questions, two tests, and keeping them apart is the point. "Did creating an
+item enqueue the index job?" is answered with a recording fake that never runs
+anything. "Does the index job work?" is answered by awaiting the handler
+directly. Conflating them — a fake that runs what it records — produces a test
+that fails for either reason and says which for neither.
+
+None of this needs a worker, a Redis or an HTTP client. A job is an object with
+a handler; the queue is what moves it between processes, and that part is
+Keel's to test rather than this application's.
+"""
+
+from __future__ import annotations
+
+from uuid import UUID
+
+import pytest
+from keel.cache import cache
+from keel.queue import PermanentFailureError
+from keel.testing import fake_queue
+
+from app.errors import NotFoundError
+from app.modules.items import service as items_service
+from app.modules.items.jobs import IndexItem, card_key
+from app.modules.items.schemas import ItemCreate
+from tests.conftest import make_user
+
+pytestmark = pytest.mark.anyio
+
+MISSING_ID = "00000000-0000-4000-8000-000000000000"
+
+
+async def test_creating_an_item_dispatches_the_index_job(rolled_back: None) -> None:
+    owner = await make_user()
+
+    with fake_queue() as queued:
+        item = await items_service.create_item(owner.id, ItemCreate(name="Engine"))
+
+    queued.assert_pushed(IndexItem, item_id=str(item.id), owner_id=str(owner.id))
+
+
+async def test_a_failed_creation_dispatches_nothing(rolled_back: None) -> None:
+    """Nothing is enqueued for a row that was never written.
+
+    The unit of work rejects the unknown owner, so the transaction never
+    commits — and `dispatch()` inside a transaction holds the push until it
+    does. A worker seeing this job would be emailing about an item that does
+    not exist, and would usually win the race and dead-letter looking like
+    corrupted data.
+    """
+    with fake_queue() as queued:
+        with pytest.raises(NotFoundError):
+            await items_service.create_item(UUID(MISSING_ID), ItemCreate(name="Orphan"))
+
+        queued.assert_nothing_pushed()
+
+
+async def test_the_index_job_caches_a_card(rolled_back: None) -> None:
+    owner = await make_user()
+    item = await items_service.create_item(owner.id, ItemCreate(name="Engine"))
+
+    await IndexItem(item_id=str(item.id), owner_id=str(owner.id)).handle()
+
+    assert await cache.get(card_key(item.id)) == {
+        "id": str(item.id),
+        "name": "Engine",
+        "description": None,
+    }
+
+
+async def test_the_index_job_is_idempotent(rolled_back: None) -> None:
+    """At-least-once is the only delivery guarantee, so running twice must be safe."""
+    owner = await make_user()
+    item = await items_service.create_item(owner.id, ItemCreate(name="Engine"))
+    job = IndexItem(item_id=str(item.id), owner_id=str(owner.id))
+
+    await job.handle()
+    await job.handle()
+
+    assert await cache.get(card_key(item.id)) is not None
+
+
+async def test_indexing_a_deleted_item_stops_retrying(rolled_back: None) -> None:
+    """The error taxonomy, from the worker's side.
+
+    The service raises the same `NotFoundError` a router turns into a 404. The
+    handler classifies it as permanent, so the worker dead-letters it now
+    instead of spending five attempts and an hour of backoff re-reading a row
+    that was deleted on purpose.
+    """
+    owner = await make_user()
+
+    with pytest.raises(PermanentFailureError):
+        await IndexItem(item_id=MISSING_ID, owner_id=str(owner.id)).handle()
+
+
+async def test_another_owners_item_is_permanently_unindexable(rolled_back: None) -> None:
+    """The job asks the scoped question, so it cannot read across owners."""
+    ada = await make_user(email="ada@example.com")
+    grace = await make_user(email="grace@example.com")
+    item = await items_service.create_item(ada.id, ItemCreate(name="Engine"))
+
+    with pytest.raises(PermanentFailureError):
+        await IndexItem(item_id=str(item.id), owner_id=str(grace.id)).handle()

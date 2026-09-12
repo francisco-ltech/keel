@@ -1,0 +1,85 @@
+# {{ project_name }}
+#
+# `just` with no arguments lists everything; `just check` runs the full gate.
+
+# Show the available recipes.
+default:
+    @just --list --unsorted
+
+# Create the virtualenv and install everything, including dev tools.
+install:
+    uv sync
+
+# Start Postgres and Redis.
+up:
+    docker compose up -d
+
+# Stop them, keeping the volumes.
+down:
+    docker compose down
+
+{% if service_shape == 'api' -%}
+# Run the API with reload on http://localhost:8000 (docs at /docs).
+dev:
+    uv run uvicorn app.main:app --reload --port 8000
+{%- elif service_shape == 'worker' -%}
+# Run the worker. The only entrypoint this service has.
+dev: worker
+{%- else -%}
+# Two processes from one codebase, exactly as production runs them — different
+# commands against the same image. `wait -n` returns as soon as either exits, so
+# a crashed worker does not leave a half-running stack that still looks fine in
+# the browser; the trap takes the other one down with it.
+
+# Run both entrypoints, the way the service actually deploys.
+dev:
+    #!/usr/bin/env bash
+    set -uo pipefail
+    uv run uvicorn app.main:app --reload --port 8000 &
+    api=$!
+    uv run python -m app.worker &
+    worker=$!
+    trap 'kill "$api" "$worker" 2>/dev/null' EXIT INT TERM
+    wait -n
+{%- endif %}
+{% if has_worker %}
+# Run the worker: consumes jobs, runs the schedule, writes its heartbeat file.
+worker:
+    uv run python -m app.worker
+
+# Ask the worker's exec probe whether it is alive. Exit status is the answer.
+health:
+    uv run python -m app.healthcheck
+{% endif %}
+# Run the suite. Needs Postgres; each test runs in a transaction that is rolled back.
+test *ARGS:
+    uv run pytest {{ '{{' }} ARGS {{ '}}' }}
+
+# Check formatting and lint rules.
+lint:
+    uv run ruff check .
+    uv run ruff format --check .
+
+# Apply formatting and the safe fixes.
+fmt:
+    uv run ruff format .
+    uv run ruff check --fix .
+
+# Type-check with ty. Fast enough to run on every save.
+types:
+    uv run ty check app tests
+
+# Type-check with mypy --strict. Slower, and what CI gates on.
+types-mypy:
+    uv run mypy app tests
+
+# Apply every pending migration.
+migrate:
+    uv run alembic upgrade head
+
+# Autogenerate a migration: just revision "add widgets"
+revision MESSAGE:
+    uv run alembic revision --autogenerate -m "{{ '{{' }} MESSAGE {{ '}}' }}"
+
+# Everything CI runs. Do this before you push.
+check: lint types types-mypy test

@@ -1,0 +1,85 @@
+"""The wire types for users.
+
+Pydantic only. This module must never import ``models``.
+
+The split is what makes ``password`` safe. It appears on the way in
+(:class:`UserCreate`, :class:`UserUpdate`) and has no counterpart on the way out
+(:class:`UserRead`), so there is no field to forget to exclude and no
+``exclude={"password"}`` to leave off one serialiser. A write-only field is
+better enforced by absence than by configuration.
+"""
+
+from __future__ import annotations
+
+from datetime import datetime
+from uuid import UUID
+
+from pydantic import BaseModel, ConfigDict, EmailStr, Field
+
+PASSWORD_MIN_LENGTH = 8
+"""Short enough to be usable, long enough that the Argon2 cost matters."""
+
+PASSWORD_MAX_LENGTH = 128
+"""Bounded because an unbounded password is an unbounded amount of hashing, and
+therefore a denial-of-service vector."""
+
+
+class UserCreate(BaseModel):
+    """What a client sends to create a user.
+
+    Attributes:
+        email: Must be unique; the service reports a 409 if it is not.
+        full_name: Display name.
+        password: Write-only. Hashed by the service and never returned.
+    """
+
+    email: EmailStr
+    full_name: str = Field(min_length=1, max_length=200)
+    password: str = Field(min_length=PASSWORD_MIN_LENGTH, max_length=PASSWORD_MAX_LENGTH)
+
+
+class UserUpdate(BaseModel):
+    """A partial update. Unset fields are left alone.
+
+    ``exclude_unset`` is what makes the distinction between "not mentioned" and
+    "explicitly set to null" survive the round trip, so the service reads the
+    payload that way rather than with ``exclude_none``.
+
+    Attributes:
+        email: A new address, still subject to uniqueness.
+        full_name: A new display name.
+        password: Write-only, as on create.
+        is_active: Soft enable or disable.
+    """
+
+    email: EmailStr | None = None
+    full_name: str | None = Field(default=None, min_length=1, max_length=200)
+    password: str | None = Field(
+        default=None, min_length=PASSWORD_MIN_LENGTH, max_length=PASSWORD_MAX_LENGTH
+    )
+    is_active: bool | None = None
+
+
+class UserRead(BaseModel):
+    """What the API returns for a user. Note the absence of any password field.
+
+    Attributes:
+        id: The application-generated UUID primary key.
+        email: The user's address.
+        full_name: Display name.
+        is_active: Whether the account is enabled.
+        created_at: Server-side timestamp, always UTC-aware.
+        updated_at: Server-side timestamp, always UTC-aware.
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    email: EmailStr
+    full_name: str
+    is_active: bool
+    created_at: datetime
+    updated_at: datetime
+
+
+__all__ = ["UserCreate", "UserRead", "UserUpdate"]

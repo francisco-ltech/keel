@@ -1,0 +1,100 @@
+"""HTTP for users.
+
+This layer knows about status codes, paths and payloads. It does not know about
+sessions, repositories or SQLAlchemy — every handler is one call into
+:mod:`app.modules.users.service`. If a handler ever needs a second call to make
+a change atomic, that is a sign the operation belongs in the service, not here.
+
+Every route carries a tag. Untagged routes land in FastAPI's ``default`` group
+in the generated documentation, which is where endpoints go to be forgotten.
+
+**No authentication yet.** There is no login endpoint, no JWT and no dependency
+guarding these routes — auth is Phase 4. Passwords are hashed from day one so
+that adding it later is a new module rather than a migration of every row.
+"""
+
+from __future__ import annotations
+
+from typing import Annotated
+from uuid import UUID
+
+from fastapi import APIRouter, Query, status
+
+from app.modules.users import service
+from app.modules.users.repository import DEFAULT_PAGE_SIZE
+from app.modules.users.schemas import UserCreate, UserRead, UserUpdate
+
+router = APIRouter(prefix="/users", tags=["users"])
+
+
+@router.post("", status_code=status.HTTP_201_CREATED, summary="Create a user")
+async def create_user(payload: UserCreate) -> UserRead:
+    """Create a user.
+
+    Args:
+        payload: The requested user. ``password`` is write-only.
+
+    Returns:
+        The created user, without any password field.
+    """
+    return await service.create_user(payload)
+
+
+@router.get("", summary="List users")
+async def list_users(
+    limit: Annotated[int, Query(ge=1, le=200)] = DEFAULT_PAGE_SIZE,
+    offset: Annotated[int, Query(ge=0)] = 0,
+) -> list[UserRead]:
+    """Return a page of users, oldest first.
+
+    Args:
+        limit: Maximum rows to return.
+        offset: Rows to skip.
+
+    Returns:
+        The page.
+    """
+    return await service.list_users(limit=limit, offset=offset)
+
+
+@router.get("/{user_id}", summary="Fetch a user")
+async def get_user(user_id: UUID) -> UserRead:
+    """Return one user.
+
+    Args:
+        user_id: The user's id.
+
+    Returns:
+        The user.
+    """
+    return await service.get_user(user_id)
+
+
+@router.patch("/{user_id}", summary="Update a user")
+async def update_user(user_id: UUID, payload: UserUpdate) -> UserRead:
+    """Apply a partial update.
+
+    ``PATCH`` rather than ``PUT`` because the payload is partial: omitted fields
+    are left alone rather than cleared.
+
+    Args:
+        user_id: The user's id.
+        payload: The fields to change.
+
+    Returns:
+        The updated user.
+    """
+    return await service.update_user(user_id, payload)
+
+
+@router.delete("/{user_id}", status_code=status.HTTP_204_NO_CONTENT, summary="Delete a user")
+async def delete_user(user_id: UUID) -> None:
+    """Delete a user and everything they own.
+
+    Args:
+        user_id: The user's id.
+    """
+    await service.delete_user(user_id)
+
+
+__all__ = ["router"]

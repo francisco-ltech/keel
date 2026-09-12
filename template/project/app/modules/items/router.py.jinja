@@ -1,0 +1,102 @@
+"""HTTP for items.
+
+Items are addressed under their owner — ``/users/{owner_id}/items`` — so the
+scope is in the path rather than in a query parameter a client can forget. When
+Phase 4 adds authentication, ``owner_id`` becomes a value read from the
+authenticated principal and these signatures barely change; the service calls
+below already take it as an argument.
+
+Every route carries a tag, and no route touches a session or a repository.
+"""
+
+from __future__ import annotations
+
+from typing import Annotated
+from uuid import UUID
+
+from fastapi import APIRouter, Query, status
+
+from app.modules.items import service
+from app.modules.items.repository import DEFAULT_PAGE_SIZE
+from app.modules.items.schemas import ItemCreate, ItemRead, ItemUpdate
+
+router = APIRouter(prefix="/users/{owner_id}/items", tags=["items"])
+
+
+@router.post("", status_code=status.HTTP_201_CREATED, summary="Create an item")
+async def create_item(owner_id: UUID, payload: ItemCreate) -> ItemRead:
+    """Create an item owned by the user in the path.
+
+    Ownership comes from the URL and is not a body field, so a request cannot
+    create an item for somebody else by disagreeing with its own path.
+
+    Args:
+        owner_id: The owning user.
+        payload: The requested item.
+
+    Returns:
+        The created item.
+    """
+    return await service.create_item(owner_id, payload)
+
+
+@router.get("", summary="List an owner's items")
+async def list_items(
+    owner_id: UUID,
+    limit: Annotated[int, Query(ge=1, le=200)] = DEFAULT_PAGE_SIZE,
+    offset: Annotated[int, Query(ge=0)] = 0,
+) -> list[ItemRead]:
+    """Return a page of one owner's items, oldest first.
+
+    Args:
+        owner_id: Whose items to return.
+        limit: Maximum rows to return.
+        offset: Rows to skip.
+
+    Returns:
+        The page.
+    """
+    return await service.list_items(owner_id, limit=limit, offset=offset)
+
+
+@router.get("/{item_id}", summary="Fetch an item")
+async def get_item(owner_id: UUID, item_id: UUID) -> ItemRead:
+    """Return one of an owner's items.
+
+    Args:
+        owner_id: The owning user.
+        item_id: The item's id.
+
+    Returns:
+        The item.
+    """
+    return await service.get_item(item_id, owner_id)
+
+
+@router.patch("/{item_id}", summary="Update an item")
+async def update_item(owner_id: UUID, item_id: UUID, payload: ItemUpdate) -> ItemRead:
+    """Apply a partial update.
+
+    Args:
+        owner_id: The owning user.
+        item_id: The item's id.
+        payload: The fields to change.
+
+    Returns:
+        The updated item.
+    """
+    return await service.update_item(item_id, owner_id, payload)
+
+
+@router.delete("/{item_id}", status_code=status.HTTP_204_NO_CONTENT, summary="Delete an item")
+async def delete_item(owner_id: UUID, item_id: UUID) -> None:
+    """Delete one of an owner's items.
+
+    Args:
+        owner_id: The owning user.
+        item_id: The item's id.
+    """
+    await service.delete_item(item_id, owner_id)
+
+
+__all__ = ["router"]

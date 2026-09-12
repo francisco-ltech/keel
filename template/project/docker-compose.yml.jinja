@@ -1,0 +1,120 @@
+# Local services for {{ project_name }}.
+#
+# The published ports are {{ postgres_port }} and {{ redis_port }} rather than the defaults, because
+# 5432 and 6379 are usually already taken on a development machine. If the Keel
+# workspace's own stack is already running on these ports, skip `just up` — the
+# credentials below match it and the application will talk to that.
+
+name: {{ project_slug }}
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: keel
+      POSTGRES_PASSWORD: keel
+      POSTGRES_DB: keel
+    ports:
+      - "{{ postgres_port }}:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      # A compose dependency on "started" only says the process launched;
+      # Postgres refuses connections for a second or two after that.
+      test: ["CMD-SHELL", "pg_isready -U keel -d keel"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "{{ redis_port }}:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+
+{% if has_worker %}
+  # -- the service itself ---------------------------------------------------
+  #
+  # Behind the `app` profile, so `just up` still starts only Postgres and Redis
+  # and `docker compose --profile app up` adds the processes.
+  #
+  # **{% if has_api %}Both services are the same image with a different command.**{% else %}One image, one command here — and the same image would serve the API
+  # with `uvicorn app.main:app`.**{% endif %} That is the whole model: a service is one
+  # codebase and one schema, deployed as an API process, a worker process, or
+  # both, with the entrypoint chosen per deployment. Nothing below is a second
+  # application, and neither has configuration the other lacks.
+  #
+  # There is no Dockerfile because Keel is a *path* dependency ({{ keel_path }}),
+  # which a build context cannot see. So this mounts the source instead and lets
+  # uv install into a container-local virtualenv — `UV_PROJECT_ENVIRONMENT`
+  # keeps it out of ./.venv, which holds macOS binaries that would not run here.
+  # Publishing Keel and adding a Dockerfile is the change that makes this a
+  # deployment file rather than a development one.
+{%- if has_api %}
+
+  api:
+    profiles: ["app"]
+    image: ghcr.io/astral-sh/uv:python{{ python_version }}-bookworm-slim
+    working_dir: /srv/app
+    command: ["sh", "-c", "uv sync && exec uv run uvicorn app.main:app --host 0.0.0.0 --port 8000"]
+    environment:
+      UV_PROJECT_ENVIRONMENT: /opt/venv
+      UV_LINK_MODE: copy
+      DATABASE_URL: postgresql+asyncpg://keel:keel@postgres:5432/keel
+      REDIS_URL: redis://redis:6379/0
+    volumes:
+      - .:/srv/app
+      # Mounted at its host path so `[tool.uv.sources] keel = { path = ... }`
+      # resolves to the same place inside the container as outside it.
+      - {{ keel_path }}:{{ keel_path }}:ro
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
+{%- endif %}
+
+  worker:
+    profiles: ["app"]
+    image: ghcr.io/astral-sh/uv:python{{ python_version }}-bookworm-slim
+    working_dir: /srv/app
+    command: ["sh", "-c", "uv sync && exec uv run python -m app.worker"]
+    environment:
+      UV_PROJECT_ENVIRONMENT: /opt/venv
+      UV_LINK_MODE: copy
+      DATABASE_URL: postgresql+asyncpg://keel:keel@postgres:5432/keel
+      REDIS_URL: redis://redis:6379/0
+      QUEUE_DRIVER: saq
+      WORKER_HEALTH_FILE: /tmp/{{ project_slug }}-worker.health
+    volumes:
+      - .:/srv/app
+      - {{ keel_path }}:{{ keel_path }}:ro
+    healthcheck:
+      # An **exec probe**, not an HTTP one, because the worker serves no HTTP.
+      # `app.healthcheck` exits 0 while the heartbeat file the worker refreshes
+      # is younger than WORKER_HEALTH_MAX_AGE, and 1 once it is stale or gone.
+      # The file is inside the container on purpose: on a shared volume a dead
+      # replica's heartbeat would keep a live replica's probe green.
+      test: ["CMD", "uv", "run", "python", "-m", "app.healthcheck"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      # Generous: the first `uv sync` in a cold container has to resolve and
+      # install before the worker can write a heartbeat at all.
+      start_period: 120s
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
+{% endif %}
+volumes:
+  postgres-data:
+  redis-data:

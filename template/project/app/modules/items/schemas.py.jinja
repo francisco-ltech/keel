@@ -1,0 +1,65 @@
+"""The wire types for items.
+
+Pydantic only; no model imports.
+
+``owner_id`` appears on :class:`ItemRead` but on neither write schema. The owner
+is addressed in the URL — ``/users/{id}/items`` — so it cannot be set or changed
+by a body that disagrees with the path, and transferring ownership stays a
+distinct operation with its own rules rather than a field in a partial update.
+"""
+
+from __future__ import annotations
+
+from datetime import datetime
+from uuid import UUID
+
+from pydantic import BaseModel, ConfigDict, Field
+
+
+class ItemCreate(BaseModel):
+    """What a client sends to create an item.
+
+    Attributes:
+        name: Short label.
+        description: Optional long text.
+    """
+
+    name: str = Field(min_length=1, max_length=200)
+    description: str | None = None
+
+
+class ItemUpdate(BaseModel):
+    """A partial update. Unset fields are left alone.
+
+    Attributes:
+        name: A new label.
+        description: New text, or ``None`` to clear it.
+    """
+
+    name: str | None = Field(default=None, min_length=1, max_length=200)
+    description: str | None = None
+
+
+class ItemRead(BaseModel):
+    """What the API returns for an item.
+
+    Attributes:
+        id: The application-generated UUID primary key.
+        name: Short label.
+        description: Optional long text.
+        owner_id: The owning user.
+        created_at: Server-side timestamp, always UTC-aware.
+        updated_at: Server-side timestamp, always UTC-aware.
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    name: str
+    description: str | None
+    owner_id: UUID
+    created_at: datetime
+    updated_at: datetime
+
+
+__all__ = ["ItemCreate", "ItemRead", "ItemUpdate"]

@@ -1,0 +1,267 @@
+"""The worker entrypoint — the second way this service runs.
+
+``python -m app.worker`` is to ``uvicorn app.main:app`` what Laravel's
+``queue:work`` is to ``serve``: **the same codebase and the same schema, a
+different entrypoint.** Nothing here is a second application. It reads the same
+settings, opens the same lifespans in the same order, and calls into the same
+service functions the routers call. A deployment picks a command; it does not
+pick a project.
+
+**Wiring is three context managers, and that is the whole of it.** Keel's
+lifespans are plain async context managers rather than FastAPI plugins, so the
+lines below are the same three that ``app.main`` composes — which is the
+property that makes "one image, two entrypoints" true rather than aspirational.
+{% if has_api %}Compare ``create_app``'s ``lifespan``: same configs, same order.{% endif %}
+
+**Readiness without HTTP.** A worker serves no requests, so there is no endpoint
+to probe. It refreshes the mtime of a heartbeat file while
+:attr:`keel.queue.Worker.healthy` is true and deletes it on the way out; an
+orchestrator runs :mod:`app.healthcheck` as an exec probe against the file's
+age. Starting an HTTP server inside the worker just to answer a probe was
+declined: a second listener, a second port and a second graceful shutdown, in a
+process whose entire purpose is not to listen.
+
+Two properties of that file are load-bearing. It must be **local to the
+container** — on a shared volume a dead replica's file keeps a live replica's
+probe green. And it is refreshed from ``healthy`` rather than from ``accepting``,
+so a draining worker still reports alive: liveness that fails during a graceful
+shutdown gets the container killed mid-job, which is the exact outcome graceful
+shutdown exists to prevent.
+
+**Patterns.** :class:`~keel.queue.Worker` is the Template Method that owns the
+loop; the two collaborators handed to it here are Strategies —
+:class:`~keel.queue.DatabaseFailureSink` decides what happens to an exhausted
+job, and the :class:`~keel.support.events.EventDispatcher` is the Observer seam
+that turns lifecycle facts into log lines. Neither is a subclass, and none of
+this file overrides the loop.
+
+Declined, deliberately:
+
+* **Subclassing ``Worker``.** Every seam it has is a constructor argument. A
+  subclass would be inheritance used for configuration.
+* **A separate scheduler process.** The scheduler's exactly-once guarantee comes
+  from a committed ``(entry, due_at)`` row, not from there being one of it, so
+  running it inside every worker is safe and one fewer deployment to forget.
+"""
+
+from __future__ import annotations
+
+import logging
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, ClassVar, Final
+
+import anyio
+from keel.cache import cache_lifespan
+from keel.database import database_lifespan, uow
+from keel.queue import (
+    DatabaseFailureSink,
+    FailedJobs,
+    Job,
+    JobDeadLettered,
+    JobSucceeded,
+    Schedule,
+    Scheduler,
+    Worker,
+    WorkerStarted,
+    WorkerStopped,
+    queue_lifespan,
+)
+from keel.support.events import EventDispatcher
+
+from app.modules import JOBS
+from app.settings import Settings, get_settings
+
+logger = logging.getLogger(__name__)
+
+HEARTBEAT_INTERVAL: Final = 5.0
+"""Seconds between heartbeat-file refreshes.
+
+Well under ``WORKER_HEALTH_MAX_AGE`` so a single slow tick — a burst of long
+jobs, a stop-the-world moment — cannot look like a dead process.
+"""
+
+
+@dataclass(frozen=True, slots=True)
+class PruneDeadLetters(Job):
+    """Delete dead letters older than the retention window.
+
+    Housekeeping rather than domain work, which is why it lives beside the
+    entrypoint instead of inside ``app/modules/<domain>/jobs.py``: it belongs to
+    no bounded context, and filing it under one would be the first step towards
+    a module that means "miscellaneous".
+
+    One attempt, because the next run is in twenty-four hours and a retry would
+    be the same query against the same database a minute later.
+    """
+
+    max_attempts: ClassVar[int] = 1
+    timeout: ClassVar[float | None] = 300.0
+
+    async def handle(self) -> None:
+        """Prune the table, using the repository's default retention."""
+        async with uow() as session:
+            removed = await FailedJobs(session).prune()
+        logger.info("pruned %d dead letters", removed)
+
+
+SCHEDULE: Final = Schedule().cron("0 3 * * *", PruneDeadLetters())
+"""Recurring work, declared as inert data.
+
+A :class:`~keel.queue.Schedule` holds no clock, no database and no queue, so it
+can be built at import time and printed or asserted on without services. Add an
+entry with ``.cron("*/5 * * * *", RefreshSearchIndex())`` or
+``.every(timedelta(minutes=5), ...)``; the scheduler below starts only if this
+is non-empty, so a service with no recurring work pays for nothing.
+"""
+
+
+def on_started(event: WorkerStarted) -> None:
+    """Record which queues this replica took."""
+    logger.info("worker %s serving %s", event.worker, ", ".join(event.queues))
+
+
+def on_stopped(event: WorkerStopped) -> None:
+    """Record the shutdown, and whether it drained or was cut short."""
+    logger.info("worker %s stopped (forced=%s)", event.worker, event.forced)
+
+
+def on_succeeded(event: JobSucceeded) -> None:
+    """Record a completed job and how long it took."""
+    logger.info("%s %s took %.3fs", event.envelope.job, event.envelope.id, event.duration)
+
+
+def on_dead_lettered(event: JobDeadLettered) -> None:
+    """Record a job that ran out of attempts.
+
+    At ``ERROR`` because this is the line a paging rule is written against. The
+    row is in ``keel_failed_jobs`` either way, with the whole envelope and the
+    original traceback; the log is what anyone notices in time.
+    """
+    logger.error("%s %s dead-lettered: %s", event.envelope.job, event.envelope.id, event.error)
+
+
+def on_listener_error(error: BaseException, event: Any) -> None:
+    """Report a listener that raised, without failing the job that emitted it.
+
+    Args:
+        error: What the listener raised.
+        event: The event being dispatched. ``Any`` because a dispatcher routes
+            every event type through one handler.
+    """
+    logger.warning("event listener failed on %r: %s", event, error)
+
+
+def log_events(events: EventDispatcher) -> None:
+    """Attach the minimum set of listeners an operator actually needs.
+
+    Observer, and the reason the worker takes a dispatcher rather than logging
+    for itself: what is worth recording differs per deployment — a log line
+    here, a Sentry event or a counter elsewhere — and none of that is the
+    loop's business.
+
+    Args:
+        events: The dispatcher the worker will emit on.
+    """
+    events.listen(WorkerStarted, on_started)
+    events.listen(WorkerStopped, on_stopped)
+    events.listen(JobSucceeded, on_succeeded)
+    events.listen(JobDeadLettered, on_dead_lettered)
+
+
+async def heartbeat(worker: Worker, path: Path, interval: float = HEARTBEAT_INTERVAL) -> None:
+    """Keep *path* fresh while *worker* is healthy, and remove it on the way out.
+
+    The refresh is conditional and the removal is not. A worker that has stopped
+    being healthy stops touching the file and the probe fails on age; a worker
+    that has *exited* takes the file with it, so the probe fails immediately
+    rather than waiting out the age limit.
+
+    Args:
+        worker: The worker whose health is being published.
+        path: The heartbeat file.
+        interval: Seconds between refreshes.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        while True:
+            if worker.healthy:
+                path.touch()  # creates it, or moves its mtime forward
+            await anyio.sleep(interval)
+    finally:
+        # Runs on cancellation too. `unlink` does not await, so the shutting-down
+        # task cannot be cancelled part-way through it.
+        path.unlink(missing_ok=True)
+
+
+async def serve(settings: Settings | None = None) -> None:
+    """Run the worker until it is asked to stop.
+
+    Returns when :meth:`keel.queue.Worker.run` returns — after SIGTERM, once
+    in-flight jobs have drained or the grace period has run out. The heartbeat
+    and the scheduler are cancelled at that point rather than joined: neither
+    has any work to finish, and both would otherwise keep the process alive.
+
+    Args:
+        settings: Configuration to use. Defaults to reading the environment,
+            which is what a real deployment does.
+    """
+    config = settings if settings is not None else get_settings()
+    queue_config = config.queue_config()
+
+    async with (
+        database_lifespan(config.database_config()),
+        cache_lifespan(config.cache_config()),
+        queue_lifespan(queue_config),
+    ):
+        # The default error handler discards listener failures; a worker that
+        # silently stopped logging its own jobs would be indistinguishable from
+        # one with nothing to do.
+        events = EventDispatcher(on_error=on_listener_error)
+        log_events(events)
+        worker = Worker(
+            queue_config,
+            queues=(queue_config.default_queue,),
+            # Exhausted jobs become rows in `keel_failed_jobs`, with the whole
+            # envelope and the original traceback, so a human can retry them by
+            # hand. The default sink only emits an event, which is a log line
+            # and then nothing.
+            failure_sink=DatabaseFailureSink(),
+            events=events,
+        )
+        logger.info("%d job types registered", len(JOBS))
+
+        async with anyio.create_task_group() as tasks:
+            tasks.start_soon(heartbeat, worker, config.worker.health_file)
+            if len(SCHEDULE):
+                tasks.start_soon(Scheduler(SCHEDULE).run)
+            await worker.run()
+            tasks.cancel_scope.cancel()
+
+
+def main() -> None:
+    """Configure logging and run the worker. The console entrypoint.
+
+    ``anyio.run`` rather than ``asyncio.run`` because the worker takes signals
+    with :func:`anyio.open_signal_receiver`, which needs an anyio event loop on
+    the main thread — which is exactly where a worker process lives.
+    """
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)-8s %(name)s %(message)s",
+    )
+    anyio.run(serve)
+
+
+__all__ = [
+    "SCHEDULE",
+    "PruneDeadLetters",
+    "heartbeat",
+    "log_events",
+    "main",
+    "serve",
+]
+
+
+if __name__ == "__main__":
+    main()

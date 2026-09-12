@@ -1,0 +1,207 @@
+# {{ project_name }}
+
+{{ description }}
+
+Built on **Keel** (`{{ keel_path }}`, a path dependency) — {% if has_api %}a FastAPI application{% else %}a queue worker{% endif %} with the
+batteries already wired: a database subsystem with a unit-of-work idiom, a cache
+with a swappable driver and a recording fake,{% if has_worker %} a queue whose dispatches wait
+for the commit,{% endif %} and a test suite that runs against a real Postgres and undoes
+itself.
+
+## One service, {% if service_shape == 'both' %}two entrypoints{% else %}one entrypoint today{% endif %}
+
+Generated as **`{{ service_shape }}`**. That decided what was scaffolded, not what is
+possible: this is one codebase and one schema either way, and a deployment picks
+a command rather than a project.
+
+| | command | what it does |
+|---|---|---|
+{% if has_api %}| API | `uvicorn app.main:app` | serves HTTP, dispatches jobs |
+{% endif %}{% if has_worker %}| Worker | `python -m app.worker` | consumes jobs, runs the schedule |
+{% endif %}
+{% if not has_worker %}Adding the worker half later is `copier update --trust -d service_shape=both` —
+it writes `app/worker.py`, `app/healthcheck.py`, `app/modules/<domain>/jobs.py`
+and the queue's migration into the project you already have.{% elif not has_api %}Adding the API half later is `copier update --trust -d service_shape=api` — it
+writes `app/main.py` and the routers into the project you already have.{% else %}Both run from the same image with the same configuration. A job handler calls
+the same service function a router calls; there is no worker-only path into a
+domain, which is what stops the two halves from drifting.{% endif %}
+
+## Getting started
+
+```sh
+just install          # uv sync
+just up               # Postgres and Redis, if you are not already running them
+cp .env.example .env  # optional; every value has a working default
+just migrate          # apply migrations
+{% if service_shape == 'api' %}just dev              # http://localhost:8000/docs{% elif service_shape == 'worker' %}just worker           # the consume side{% else %}just dev              # API on :8000 and a worker, together{% endif %}
+```
+
+`just` on its own runs the gate: `lint`, `types`, `test`.
+
+Postgres is published on `{{ postgres_port }}` and Redis on `{{ redis_port }}`, because 5432 and 6379
+are usually already taken. If the Keel workspace's own stack is running on those
+ports, skip `just up`: the credentials match.
+
+## Layout
+
+Package by domain, not by layer. Everything about a feature is in one directory,
+and the layers inside it point one way only.
+
+```
+app/
+{% if has_api %}  main.py          app factory; lifespan wires the database, cache{% if has_worker %} and queue{% endif %}
+{% endif %}{% if has_worker %}  worker.py        the worker entrypoint; same lifespans, no HTTP
+  healthcheck.py   `python -m app.healthcheck` — the worker's exec probe
+{% endif %}  settings.py      pydantic-settings -> Keel's plain dataclass configs
+  errors.py        the error taxonomy{% if has_api %}, and RFC 9457 problem+json for it{% endif %}
+  modules/
+    __init__.py    the registry: {% if has_api %}MODULES{% if has_worker %} and JOBS{% endif %}{% else %}JOBS{% endif %}
+    users/         models · schemas · repository · service{% if has_api %} · router{% endif %}
+    items/         the same files{% if has_worker %}, plus jobs.py{% endif %}, scoped by owner_id
+  migrations/      async Alembic, target_metadata = Model.metadata
+tests/             rollback-per-test against a real Postgres
+```
+
+{% if has_api and has_worker %}    router  ->
+                 service  ->  repository  ->  models
+    handler ->   business      queries       tables
+                  logic
+{% elif has_api %}    router  ->  service  ->  repository  ->  models
+      HTTP      business      queries       tables
+                  logic
+{% else %}    handler ->  service  ->  repository  ->  models
+     a job     business      queries       tables
+                 logic
+{% endif %}
+* **`models` and `schemas` never import each other.** The table shape and the
+  wire shape are allowed to differ, and a column rename should not be a breaking
+  API change nobody reviewed.
+* **A repository takes a session; it never opens one.**
+* **A service opens `uow()` and returns schemas.** Never an ORM object — its
+  session has closed by the time the router has it.
+{% if has_api %}* **A router calls services.** No session, no repository, no SQLAlchemy import.
+{% endif %}{% if has_worker %}* **A job handler calls the same services a router does.** It is a second entry
+  into the domain, not a second copy of it.
+{% endif %}
+## The rule that shapes all of it
+
+There is no `get_session` dependency, in Keel or here, and adding one would be a
+mistake rather than a convenience.
+
+FastAPI PR #12066 — open since August 2024, with production outages in its
+comments — means a session yielded from `Depends` stays open *through*
+response-model validation. Under load the pool starves while every individual
+request still looks fast at p99. So the transaction spans the work, not the
+request:
+
+```python
+async def create_user(payload: UserCreate) -> UserRead:
+    async with uow() as session:  # opens here
+        users = UserRepository(session)
+        user = await users.create(...)
+        return UserRead.model_validate(user)  # closes here, before the response
+```
+
+{% if has_worker %}## The queue
+
+`app/modules/items/jobs.py` is the example worth reading. Three things in it are
+the whole convention:
+
+```python
+@dataclass(frozen=True, slots=True)
+class IndexItem(Job):
+    # Policy on the class, never on the wire; ids in the payload, never rows.
+    max_attempts: ClassVar[int] = 5
+    item_id: str
+
+    async def handle(self) -> None:
+        try:
+            # The same function the router calls.
+            item = await service.get_item(...)
+        except NotFoundError as exc:
+            # A 404 to a router; "stop retrying" to a worker.
+            raise PermanentFailureError(...) from exc
+```
+
+**Dispatch happens inside the unit of work**, in `service.create_item`, so the
+push waits for the commit. Enqueue outside the transaction and a worker runs
+against a row that may never exist — and usually wins the race, so the job
+dead-letters looking like corrupted data rather than like an ordering bug.
+
+**The worker's readiness is a file, not an endpoint.** It refreshes the mtime of
+`WORKER_HEALTH_FILE` while it is healthy and deletes it on exit;
+`python -m app.healthcheck` exits 0 or 1 on the file's age and is wired as the
+compose healthcheck. A draining worker still reports alive — liveness that fails
+during a graceful shutdown gets the container killed mid-job.
+
+Exhausted jobs land in `keel_failed_jobs` with the whole envelope and the
+original traceback, so they can be retried by hand. `app/worker.py` prunes that
+table nightly through `SCHEDULE`, which is also where recurring work goes.
+
+## Configuration
+
+`pydantic-settings`. Each subsystem carries its own prefix rather than a nested
+delimiter, so the variables read as `DATABASE_URL`, `CACHE_STORE`{% if has_worker %}, `QUEUE_DRIVER`
+and `WORKER_HEALTH_FILE`{% endif %} — the names a hosting platform injects. Keel's own
+configs are plain frozen dataclasses — the library takes no configuration-stack
+dependency — so `app/settings.py` is the one place that translates between the
+two. See `.env.example`.
+{% else %}## Configuration
+
+`pydantic-settings`. Each subsystem carries its own prefix rather than a nested
+delimiter, so the variables read as `DATABASE_URL` and `CACHE_STORE` — the names
+a hosting platform injects. Keel's own configs are plain frozen dataclasses — the
+library takes no configuration-stack dependency — so `app/settings.py` is the one
+place that translates between the two. See `.env.example`.
+{% endif %}
+## Migrations
+
+```sh
+just revision "add widgets"   # autogenerate
+just migrate                  # alembic upgrade head
+```
+
+`target_metadata` is `keel.database.Model.metadata`, which carries Keel's
+constraint naming convention. That is what makes autogenerated names
+deterministic across backends — and what lets a downgrade name the constraint it
+is dropping. New models must be imported in `app/migrations/env.py` or
+autogenerate will produce an empty migration and report success.
+{% if has_worker %}
+Keel's own `FailedJob` and `ScheduleRun` are imported there too, and that import
+is load-bearing rather than tidy: without it, autogenerate finds two tables no
+model claims and proposes `DROP TABLE` on both — deleting the dead-letter record
+and the scheduler's exactly-once ledger, in a diff that reads like cleanup.
+{% endif %}
+## Tests
+
+```sh
+just test
+```
+
+Real Postgres, no fake, no SQLite substitute: the queries are the part most
+likely to be wrong. Each test runs inside a transaction that is rolled back, via
+`keel.testing.rolled_back_database`, so the suite needs no truncation and no
+re-seeding. Application code commits normally — sessions join the outer
+transaction with `join_transaction_mode="create_savepoint"`, so a commit releases
+a savepoint.
+
+Two things follow from that and will eventually surprise someone:
+
+* Every row written in one test shares a `created_at`, because Postgres' `now()`
+  is the transaction timestamp. Assert on sets, not on timestamp order.
+* The cache is switched to the in-process `array` driver, so the suite needs
+  Postgres but not Redis. Use `keel.testing.fake_cache` to assert on caching.
+{% if has_worker %}* The queue is switched to `null`, which is a different choice for a different
+  reason: `keel.testing.fake_queue` records dispatches without running them, so
+  "did this enqueue the job?" and "does the job work?" stay two tests. See
+  `tests/test_jobs.py`.
+{% endif %}
+## What is deliberately not here yet
+
+* **Authentication.** Passwords are hashed with Argon2 from day one, but there is
+  no login endpoint and no JWT — that is Phase 4, and it arrives as a new module
+  rather than as a migration of every row.
+* **A generic base repository.** Two modules is not enough evidence to know which
+  methods genuinely repeat. Phase 2.
+* **Soft deletes and audit columns.** Listed in the ADR rather than stubbed here;
+  a half-built mixin is worse than an absent one.

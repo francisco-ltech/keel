@@ -1,0 +1,484 @@
+"""The starter template, generated and actually run.
+
+A template is documentation that executes, and documentation rots. This test
+generates a project into a temporary directory, installs it, and runs its own
+suite, lint and type checks — so a change to the core library that breaks the
+template fails here rather than the next time someone starts a project.
+
+**Everything here runs three times, once per ``service_shape``.** A template
+that can scaffold an API, a worker, or both has three products, and two of them
+are the ones nobody generates by hand before shipping a change. The shapes are
+not variations on a theme either: ``worker`` has no FastAPI installed at all, so
+a stray framework import in a shared module fails there and only there.
+
+The shape-specific assertions are collected in :data:`INVARIANTS` rather than
+spread through the tests, because what makes a shape *that shape* is a short
+list and it should read as one.
+
+It is slow — three full dependency resolutions and installs — so it is marked
+``generator`` and excluded from ``just test``. Run it before finishing any
+change to ``keel.database``, ``keel.cache`` or ``keel.queue``'s public surface.
+"""
+
+from __future__ import annotations
+
+import os
+import shutil
+import subprocess
+from collections.abc import Iterator
+from dataclasses import dataclass, field
+from pathlib import Path
+
+import pytest
+
+REPO_ROOT = Path(__file__).resolve().parents[3]
+TEMPLATE = REPO_ROOT / "template"
+
+pytestmark = [pytest.mark.generator, pytest.mark.postgres]
+
+
+def run(
+    command: list[str],
+    cwd: Path,
+    env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
+    """Run *command*, returning the completed process without raising.
+
+    Args:
+        command: Argv to execute.
+        cwd: Working directory.
+        env: Extra environment variables for the child.
+
+    Returns:
+        The completed process, so a failing assertion can print its output.
+    """
+    return subprocess.run(
+        command,
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=900,
+        env=_child_environment(env),
+    )
+
+
+LEAKY_VARIABLES = ("DATABASE_URL", "REDIS_URL", "DB_URL", "CACHE_REDIS_URL")
+"""Workspace configuration that must not reach the generated project.
+
+The justfile exports ``DATABASE_URL`` so Keel's own suite can find Postgres, and
+a real environment variable outranks a ``.env`` file in pydantic-settings. Left
+in place, the generated project would quietly use the workspace's database
+instead of its own — which is how this test spent a run writing its tables into
+the shared schema and reporting phantom drift.
+"""
+
+
+def _child_environment(extra: dict[str, str] | None) -> dict[str, str]:
+    """Build the environment for a command run inside the generated project."""
+    environment = {key: value for key, value in os.environ.items() if key not in LEAKY_VARIABLES}
+    environment["VIRTUAL_ENV"] = ""
+    environment.update(extra or {})
+    return environment
+
+
+def explain(label: str, result: subprocess.CompletedProcess[str]) -> str:
+    """Render a failed command's output for an assertion message."""
+    return (
+        f"{label} failed ({result.returncode})\n"
+        f"--- stdout ---\n{result.stdout}\n"
+        f"--- stderr ---\n{result.stderr}"
+    )
+
+
+TEMPLATE_DATABASE = "keel_template_check"
+
+
+@dataclass(frozen=True, slots=True)
+class Shape:
+    """One value of ``service_shape``, and what makes a project that shape.
+
+    A record rather than four parametrised lists, because the interesting claim
+    is per shape and not per assertion: "a worker has no FastAPI, no ``main.py``
+    and no routers" is one sentence about one product, and splitting it across
+    the tests that check each half is how a shape acquires a missing invariant
+    nobody notices.
+
+    Attributes:
+        name: The ``service_shape`` answer.
+        present: Files this shape must scaffold, on top of :data:`ALWAYS`.
+        absent: Files this shape must *not* scaffold. The half of the contract
+            that catches a conditional that quietly stopped conditioning.
+        importable: Distributions that must be installed in its virtualenv.
+        uninstallable: Distributions that must not be — an API replica carrying
+            a worker runtime is the cost this question exists to avoid.
+        variables: Extra ``.env.example`` entries, with probe values.
+    """
+
+    name: str
+    present: tuple[str, ...] = ()
+    absent: tuple[str, ...] = ()
+    importable: tuple[str, ...] = ()
+    uninstallable: tuple[str, ...] = ()
+    variables: dict[str, str] = field(default_factory=dict)
+
+
+ALWAYS = (
+    "pyproject.toml",
+    "alembic.ini",
+    "app/settings.py",
+    "app/errors.py",
+    "app/modules/__init__.py",
+    "app/modules/users/service.py",
+    "app/modules/users/repository.py",
+    "app/modules/users/models.py",
+    "app/modules/users/schemas.py",
+    "app/migrations/env.py",
+    "app/migrations/versions/0001_initial.py",
+    "tests/conftest.py",
+)
+"""The layout every shape shares. One codebase and one schema is the claim; this
+tuple is what it means concretely — the domain, the settings and the migrations
+do not vary with the entrypoint."""
+
+API_FILES = ("app/main.py", "app/modules/users/router.py", "app/modules/items/router.py")
+WORKER_FILES = (
+    "app/worker.py",
+    "app/healthcheck.py",
+    "app/modules/items/jobs.py",
+    "app/migrations/versions/0002_queue_tables.py",
+    "tests/test_jobs.py",
+)
+
+QUEUE_VARIABLES = {
+    "QUEUE_DRIVER": "null",
+    "QUEUE_PREFIX": "probe-queue",
+    "QUEUE_CONCURRENCY": "23",
+    "WORKER_HEALTH_FILE": "/tmp/probe-worker.health",
+    "WORKER_HEALTH_MAX_AGE": "29",
+}
+
+SHAPES = (
+    Shape(
+        name="api",
+        present=API_FILES,
+        absent=WORKER_FILES,
+        importable=("fastapi", "uvicorn"),
+        # The point of the question. `saq` is a worker runtime, and a replica
+        # that only serves HTTP should not ship one.
+        uninstallable=("saq",),
+    ),
+    Shape(
+        name="worker",
+        present=WORKER_FILES,
+        absent=API_FILES,
+        importable=("saq",),
+        # Not merely unused: nothing in a worker-only project may import
+        # FastAPI, so a shared module that quietly does fails here.
+        uninstallable=("fastapi", "uvicorn"),
+        variables=QUEUE_VARIABLES,
+    ),
+    Shape(
+        name="both",
+        present=API_FILES + WORKER_FILES,
+        importable=("fastapi", "uvicorn", "saq"),
+        variables=QUEUE_VARIABLES,
+    ),
+)
+
+
+@pytest.fixture(scope="module", params=SHAPES, ids=[shape.name for shape in SHAPES])
+def shape(request: pytest.FixtureRequest) -> Shape:
+    """The service shape under test.
+
+    Module-scoped and parametrised, so each shape is generated and installed
+    once and every test below runs against all three.
+    """
+    chosen: Shape = request.param
+    return chosen
+
+
+@pytest.fixture(scope="module")
+def isolated_database_url(shape: Shape, database_url: str) -> Iterator[str]:
+    """Create a database used only by the generated project, and drop it after.
+
+    The drift check compares the models against everything in the schema, so a
+    table belonging to some other test reads as "a table the migrations do not
+    know about" and fails the assertion. Sharing a database with the rest of the
+    suite made this test report drift that did not exist — which is worse than
+    no check, because the next person learns to ignore it.
+
+    One database *per shape*, for the same reason: the shapes do not agree about
+    which tables should exist, so a worker's ``keel_failed_jobs`` left in a
+    shared database would read as drift to the API shape.
+    """
+    import anyio
+    import asyncpg
+
+    admin_url = database_url.replace("+asyncpg", "")
+    name = f"{TEMPLATE_DATABASE}_{shape.name}"
+
+    async def administer(statement: str) -> None:
+        connection = await asyncpg.connect(admin_url)
+        try:
+            await connection.execute(statement)
+        finally:
+            await connection.close()
+
+    anyio.run(administer, f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)')
+    anyio.run(administer, f'CREATE DATABASE "{name}"')
+    yield (
+        admin_url.rsplit("/", 1)[0].replace("postgresql://", "postgresql+asyncpg://") + f"/{name}"
+    )
+    anyio.run(administer, f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)')
+
+
+@pytest.fixture(scope="module")
+def generated(
+    tmp_path_factory: pytest.TempPathFactory, shape: Shape, isolated_database_url: str
+) -> Iterator[Path]:
+    """A freshly generated project, installed and ready to run.
+
+    Args:
+        tmp_path_factory: Pytest's temporary directory factory.
+        shape: Which ``service_shape`` to generate.
+        isolated_database_url: A database used only by this shape.
+
+    Yields:
+        The generated project's root.
+    """
+    if shutil.which("uv") is None:  # pragma: no cover — uv is how this runs
+        pytest.skip("uv is not on PATH")
+
+    destination = tmp_path_factory.mktemp(f"generated-{shape.name}") / "app"
+    result = run(
+        [
+            "uv",
+            "run",
+            "copier",
+            "copy",
+            "--trust",
+            "--defaults",
+            "--data",
+            f"service_shape={shape.name}",
+            str(TEMPLATE),
+            str(destination),
+        ],
+        cwd=REPO_ROOT,
+    )
+    assert result.returncode == 0, explain("copier copy", result)
+
+    # Point the generated project at its own database. Written to `.env`
+    # rather than passed per-command because the app, Alembic and pytest all
+    # read settings the same way — through `.env` — and only one of them being
+    # redirected is how half the test ends up in the shared database.
+    (destination / ".env").write_text(f"DATABASE_URL={isolated_database_url}\n")
+
+    installed = run(["uv", "sync"], cwd=destination)
+    assert installed.returncode == 0, explain("uv sync", installed)
+
+    yield destination
+    # Nothing to clean up: the isolated_database_url fixture drops the whole
+    # database, so there is no shared schema left behind.
+
+
+def test_the_generated_project_has_the_expected_shape(generated: Path, shape: Shape) -> None:
+    """The layout is the convention; a generator that drifts from it is a bug."""
+    for relative in ALWAYS + shape.present:
+        assert (generated / relative).is_file(), f"{shape.name}: missing {relative}"
+
+
+def test_a_shape_scaffolds_only_its_own_half(generated: Path, shape: Shape) -> None:
+    """The other half of the contract.
+
+    A conditional that stops conditioning still passes every "is this file
+    here?" assertion, and the result is an API-only project carrying a worker
+    entrypoint that was never installed against.
+    """
+    for relative in shape.absent:
+        assert not (generated / relative).exists(), (
+            f"{shape.name}: {relative} belongs to the other half"
+        )
+
+
+def test_a_shape_installs_only_what_its_entrypoints_need(generated: Path, shape: Shape) -> None:
+    """Dependencies follow the shape, checked against the real virtualenv.
+
+    Reading ``pyproject.toml`` would only prove the template wrote the right
+    string. What matters is what ended up installed — a transitive dependency
+    can put FastAPI in a worker's environment without anyone asking for it.
+    """
+    names = sorted({*shape.importable, *shape.uninstallable})
+    probe = (
+        "import importlib.util as u;"
+        f"print(' '.join(n for n in {names!r} if u.find_spec(n) is not None))"
+    )
+    result = run(["uv", "run", "python", "-c", probe], cwd=generated)
+    assert result.returncode == 0, explain("dependency probe", result)
+    installed = set(result.stdout.split())
+
+    assert set(shape.importable) <= installed, (
+        f"{shape.name}: missing {sorted(set(shape.importable) - installed)}"
+    )
+    assert not (set(shape.uninstallable) & installed), (
+        f"{shape.name}: should not ship {sorted(set(shape.uninstallable) & installed)}"
+    )
+
+
+def test_an_api_process_does_not_import_a_worker_runtime(generated: Path, shape: Shape) -> None:
+    """`keel.queue` exports the worker lazily, and the template must not undo it.
+
+    An API replica dispatches and never consumes, so importing ``app.main``
+    must not drag in ``keel.queue.worker`` or SAQ behind it. One eager
+    ``from keel.queue import Worker`` in a shared module would put a worker
+    runtime in every web process, and nothing would fail — it would just cost.
+    """
+    if "app/main.py" not in shape.present:
+        pytest.skip("no API entrypoint in this shape")
+
+    probe = (
+        "import sys, app.main;"
+        "print(' '.join(n for n in ('keel.queue.worker', 'saq') if n in sys.modules))"
+    )
+    result = run(["uv", "run", "python", "-c", probe], cwd=generated)
+    assert result.returncode == 0, explain("lazy-export probe", result)
+    assert result.stdout.strip() == "", (
+        f"{shape.name}: importing app.main pulled in {result.stdout.strip()}"
+    )
+
+
+def test_the_generated_project_keeps_models_and_schemas_apart(generated: Path) -> None:
+    """The one layout rule worth enforcing mechanically.
+
+    A schema module that imports models is how ORM objects start leaking to the
+    wire, taking their lazy-loading behaviour with them.
+    """
+    schemas = (generated / "app/modules/users/schemas.py").read_text()
+    assert "models import" not in schemas
+    assert "from app.modules.users.models" not in schemas
+
+
+def test_the_generated_project_holds_no_session_dependency(generated: Path) -> None:
+    """ADR 0002, enforced against the thing people actually copy from.
+
+    A `Depends`-yielded session is the shape with the open FastAPI deadlock, so
+    the template must never demonstrate it.
+    """
+    for path in generated.rglob("app/**/*.py"):
+        source = path.read_text()
+        assert "yield session" not in source, f"{path.name} yields a session from a dependency"
+        assert "def get_session" not in source, f"{path.name} defines a session dependency"
+
+
+def test_migrations_apply_to_an_empty_database(generated: Path) -> None:
+    result = run(["uv", "run", "alembic", "upgrade", "head"], cwd=generated)
+    assert result.returncode == 0, explain("alembic upgrade head", result)
+
+
+def test_the_generated_suite_passes(generated: Path) -> None:
+    result = run(["uv", "run", "pytest", "-q"], cwd=generated)
+    assert result.returncode == 0, explain("generated pytest", result)
+
+
+def test_the_generated_project_is_clean_and_typed(generated: Path) -> None:
+    """The template has to meet the same bar as the library it demonstrates."""
+    linted = run(["uv", "run", "ruff", "check", "."], cwd=generated)
+    assert linted.returncode == 0, explain("generated ruff check", linted)
+
+    formatted = run(["uv", "run", "ruff", "format", "--check", "."], cwd=generated)
+    assert formatted.returncode == 0, explain("generated ruff format", formatted)
+
+    typed = run(["uv", "run", "mypy", "app", "tests"], cwd=generated)
+    assert typed.returncode == 0, explain("generated mypy", typed)
+
+    # The template ships both checkers, so both have to be clean in the output —
+    # a generated project that starts red teaches people to ignore the tool.
+    checked = run(["uv", "run", "ty", "check", "app", "tests"], cwd=generated)
+    assert checked.returncode == 0, explain("generated ty", checked)
+
+
+def test_autogenerating_after_the_shipped_migration_finds_no_drift(generated: Path) -> None:
+    """The shipped migration must match the shipped models.
+
+    A spurious diff here means a type, a server default or the naming convention
+    is not what the migration thinks it is — and every project generated from
+    the template would inherit the discrepancy on day one.
+    """
+    result = run(
+        ["uv", "run", "alembic", "revision", "--autogenerate", "-m", "drift-check"],
+        cwd=generated,
+    )
+    assert result.returncode == 0, explain("alembic revision --autogenerate", result)
+
+    versions = generated / "app/migrations/versions"
+    drift = [path for path in versions.glob("*.py") if "drift_check" in path.name]
+    assert len(drift) == 1, "expected exactly one generated migration"
+
+    body = drift[0].read_text()
+    assert "op.create_table" not in body, f"models and shipped migration have drifted:\n{body}"
+    assert "op.drop_table" not in body, f"models and shipped migration have drifted:\n{body}"
+    assert "op.add_column" not in body, f"models and shipped migration have drifted:\n{body}"
+
+
+def test_every_documented_environment_variable_is_actually_read(
+    generated: Path, shape: Shape
+) -> None:
+    """`.env.example` must not document names the settings ignore.
+
+    Regression: the generated settings used ``env_nested_delimiter="__"``, so
+    ``DATABASE_URL`` and ``CACHE_STORE`` bound to nothing while
+    ``extra="ignore"`` swallowed them silently. The app fell back to defaults
+    and looked fine — the worst way for configuration to fail, because it fails
+    quietly and only in the environment where the default is wrong.
+
+    This walks every assignment in the shipped `.env.example` and asserts the
+    settings object actually changes when it is set.
+    """
+    documented = [
+        line.split("=", 1)[0].strip()
+        for line in (generated / ".env.example").read_text().splitlines()
+        if "=" in line and not line.lstrip().startswith("#")
+    ]
+    assert documented, "no variables found in .env.example"
+
+    probe = "\n".join(
+        [
+            "import json, os",
+            "from app.settings import Settings",
+            "os.environ.pop('DATABASE_URL', None)",
+            "settings = Settings(_env_file=None)",
+            "print(json.dumps(settings.model_dump(mode='json')))",
+        ]
+    )
+    baseline = run(["uv", "run", "python", "-c", probe], cwd=generated)
+    assert baseline.returncode == 0, explain("settings baseline", baseline)
+
+    overrides = {
+        "DATABASE_URL": "postgresql+asyncpg://probe@localhost/probe",
+        "DB_ECHO": "true",
+        "DB_POOL_SIZE": "17",
+        "DB_MAX_OVERFLOW": "19",
+        "DB_STATEMENT_TIMEOUT": "11",
+        "REDIS_URL": "redis://localhost:6399/7",
+        "CACHE_STORE": "null",
+        "CACHE_PREFIX": "probe-prefix",
+        "CACHE_TTL": "13",
+        "APP_NAME": "Probe App",
+        "DEBUG": "true",
+        **shape.variables,
+    }
+    unread = sorted(set(documented) - set(overrides))
+    assert not unread, f".env.example documents variables this test does not probe: {unread}"
+    unwritten = sorted(set(shape.variables) - set(documented))
+    assert not unwritten, f"{shape.name} reads variables .env.example never mentions: {unwritten}"
+
+    changed = run(["uv", "run", "python", "-c", probe], cwd=generated, env=overrides)
+    assert changed.returncode == 0, explain("settings with overrides", changed)
+    assert changed.stdout.strip() != baseline.stdout.strip(), (
+        "setting every documented variable changed nothing — they are not being read"
+    )
+
+    rendered = changed.stdout
+    expected_values = ("probe-prefix", "17", "6399", "Probe App", *shape.variables.values())
+    for expected in expected_values:
+        assert expected in rendered, f"{expected!r} did not reach the settings object:\n{rendered}"

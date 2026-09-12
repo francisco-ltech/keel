@@ -1,0 +1,136 @@
+# Copier template for a new Keel application.
+#
+# Everything here is local: the generated project depends on the Keel package by
+# path, nothing is published to an index, and no git remote is involved.
+#
+#     uv run copier copy --trust template /path/to/new-app
+#
+# `--trust` is needed because the template renders file *names* from answers.
+
+_subdirectory: "project"
+_templates_suffix: ".jinja"
+
+# Files copied verbatim rather than rendered are the ones without the suffix —
+# `app/migrations/script.py.mako` most importantly, which is Alembic's own
+# Mako template and must reach the generated project untouched.
+#
+# `_exclude` is templated, which is how `service_shape` decides what gets
+# scaffolded. The alternative — a Jinja conditional inside every file *name* —
+# was declined: it spreads one decision across a dozen directory listings, it
+# renders unreadable on disk (`app/{% raw %}{% if %}{% endraw %}worker.py`), and
+# a mistake in it produces a file called `.jinja` rather than an error. One
+# block here is the whole rule, in shape order, and it works identically for
+# rendered and verbatim files.
+_exclude:
+  - "copier.yml"
+  - "copier.yaml"
+  - "~*"
+  - "*.py[co]"
+  - "__pycache__"
+  - ".git"
+  - ".DS_Store"
+  - ".svn"
+  # -- the API half: dropped from a worker-only service.
+  - "{% if not has_api %}app/main.py{% endif %}"
+  - "{% if not has_api %}app/modules/users/router.py{% endif %}"
+  - "{% if not has_api %}app/modules/items/router.py{% endif %}"
+  - "{% if not has_api %}tests/test_health.py{% endif %}"
+  - "{% if not has_api %}tests/test_users.py{% endif %}"
+  - "{% if not has_api %}tests/test_items.py{% endif %}"
+  # -- the worker half: dropped from an API-only service. `0002` creates the
+  #    queue's own tables, so it ships only where there is a queue to need them.
+  - "{% if not has_worker %}app/worker.py{% endif %}"
+  - "{% if not has_worker %}app/healthcheck.py{% endif %}"
+  - "{% if not has_worker %}app/modules/items/jobs.py{% endif %}"
+  - "{% if not has_worker %}app/migrations/versions/0002_queue_tables.py{% endif %}"
+  - "{% if not has_worker %}tests/test_jobs.py{% endif %}"
+
+_message_after_copy: |
+  Created {{ project_name }} in {{ _copier_conf.dst_path }} ({{ service_shape }} shape).
+
+    cd {{ _copier_conf.dst_path }}
+    just install
+    just migrate     # creates the schema
+    just test
+    {% if service_shape == 'worker' %}just worker      # the consume side{% else %}just dev         # {% if has_worker %}API and worker together{% else %}http://localhost:8000/docs{% endif %}{% endif %}
+
+  The database and cache default to the local dev services on ports
+  {{ postgres_port }} and {{ redis_port }}; `just up` starts its own if you need them.
+  {% if not has_worker %}
+  This is an API-only scaffold. Adding the worker half later is
+  `copier update --trust -d service_shape=both`, not a new project.
+  {% elif not has_api %}
+  This is a worker-only scaffold. Adding the API half later is
+  `copier update --trust -d service_shape=both`, not a new project.
+  {% endif %}
+
+project_name:
+  type: str
+  help: Human-readable name of the application
+  default: Keel Starter
+
+project_slug:
+  type: str
+  help: Python-safe name (package metadata, cache namespace, compose project)
+  default: "{{ project_name | lower | replace(' ', '_') | replace('-', '_') }}"
+  validator: >-
+    {% if not (project_slug | regex_search('^[a-z][a-z0-9_]*$')) %}
+    project_slug must be lowercase letters, digits and underscores, starting with a letter.
+    {% endif %}
+
+description:
+  type: str
+  help: One-line description of the application
+  default: "A FastAPI application built on Keel."
+
+service_shape:
+  type: str
+  help: >-
+    Which entrypoints to scaffold. One codebase and one schema either way: a
+    service deploys as an API process, a worker process, or both, from the same
+    image with the entrypoint chosen per deployment. This answer decides what is
+    written now, not what is possible later — `copier update` adds the other
+    half without regenerating anything.
+  default: both
+  choices:
+    "API only — app/main.py and routers": api
+    "Worker only — app/worker.py and jobs": worker
+    "Both — one image, two entrypoints": both
+
+has_api:
+  type: bool
+  # Computed, never asked. `when: false` is copier's way of saying "derive this
+  # and remember it in .copier-answers.yml", which keeps the two-way condition
+  # out of every template that needs it.
+  when: false
+  default: "{{ service_shape in ['api', 'both'] }}"
+
+has_worker:
+  type: bool
+  when: false
+  default: "{{ service_shape in ['worker', 'both'] }}"
+
+python_version:
+  type: str
+  help: Minimum Python version
+  default: "3.13"
+  choices:
+    - "3.13"
+    - "3.14"
+
+postgres_port:
+  type: int
+  help: Host port Postgres listens on
+  default: 5433
+
+redis_port:
+  type: int
+  help: Host port Redis listens on
+  default: 6380
+
+keel_path:
+  type: str
+  help: >-
+    Absolute path to the Keel package. Absolute rather than relative so a
+    generated project works from any directory.
+  default: "/Users/francisco/Source/keel/packages/keel"

@@ -1,0 +1,124 @@
+"""The items endpoints, and the scoping that makes them safe.
+
+The tests worth reading are the ones that ask for another owner's item: the
+answer is 404, not 403, because "this exists but is not yours" is itself
+information.
+"""
+
+from __future__ import annotations
+
+import pytest
+from httpx import AsyncClient
+
+from tests.conftest import create_user
+
+pytestmark = pytest.mark.anyio
+
+MISSING_ID = "00000000-0000-4000-8000-000000000000"
+
+
+async def test_creating_an_item(client: AsyncClient) -> None:
+    owner = await create_user(client)
+
+    response = await client.post(
+        f"/users/{owner['id']}/items",
+        json={"name": "Analytical Engine", "description": "Not finished."},
+    )
+
+    assert response.status_code == 201
+    body = response.json()
+    assert body["name"] == "Analytical Engine"
+    assert body["owner_id"] == owner["id"]
+
+
+async def test_creating_an_item_for_an_unknown_owner_is_not_found(client: AsyncClient) -> None:
+    response = await client.post(f"/users/{MISSING_ID}/items", json={"name": "Orphan"})
+
+    assert response.status_code == 404
+    assert MISSING_ID in response.json()["detail"]
+
+
+async def test_items_are_listed_per_owner(client: AsyncClient) -> None:
+    ada = await create_user(client, email="ada@example.com")
+    grace = await create_user(client, email="grace@example.com")
+    await client.post(f"/users/{ada['id']}/items", json={"name": "Engine"})
+    await client.post(f"/users/{grace['id']}/items", json={"name": "Compiler"})
+
+    ada_items = (await client.get(f"/users/{ada['id']}/items")).json()
+
+    assert [item["name"] for item in ada_items] == ["Engine"]
+
+
+async def test_fetching_another_owners_item_is_not_found(client: AsyncClient) -> None:
+    ada = await create_user(client, email="ada@example.com")
+    grace = await create_user(client, email="grace@example.com")
+    item = (await client.post(f"/users/{ada['id']}/items", json={"name": "Engine"})).json()
+
+    response = await client.get(f"/users/{grace['id']}/items/{item['id']}")
+
+    assert response.status_code == 404, "existence must not leak across owners"
+
+
+async def test_updating_an_item(client: AsyncClient) -> None:
+    owner = await create_user(client)
+    item = (
+        await client.post(
+            f"/users/{owner['id']}/items",
+            json={"name": "Engine", "description": "Draft."},
+        )
+    ).json()
+
+    response = await client.patch(
+        f"/users/{owner['id']}/items/{item['id']}", json={"name": "Analytical Engine"}
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["name"] == "Analytical Engine"
+    assert body["description"] == "Draft.", "an unset field must be left alone"
+
+
+async def test_an_update_can_clear_the_description(client: AsyncClient) -> None:
+    """`exclude_unset` is what makes an explicit null different from an omission."""
+    owner = await create_user(client)
+    item = (
+        await client.post(
+            f"/users/{owner['id']}/items", json={"name": "Engine", "description": "Draft."}
+        )
+    ).json()
+
+    response = await client.patch(
+        f"/users/{owner['id']}/items/{item['id']}", json={"description": None}
+    )
+
+    assert response.json()["description"] is None
+
+
+async def test_updating_another_owners_item_is_not_found(client: AsyncClient) -> None:
+    ada = await create_user(client, email="ada@example.com")
+    grace = await create_user(client, email="grace@example.com")
+    item = (await client.post(f"/users/{ada['id']}/items", json={"name": "Engine"})).json()
+
+    response = await client.patch(
+        f"/users/{grace['id']}/items/{item['id']}", json={"name": "Stolen"}
+    )
+
+    assert response.status_code == 404
+
+
+async def test_deleting_an_item(client: AsyncClient) -> None:
+    owner = await create_user(client)
+    item = (await client.post(f"/users/{owner['id']}/items", json={"name": "Engine"})).json()
+
+    assert (await client.delete(f"/users/{owner['id']}/items/{item['id']}")).status_code == 204
+    assert (await client.get(f"/users/{owner['id']}/items/{item['id']}")).status_code == 404
+
+
+async def test_deleting_an_owner_deletes_their_items(client: AsyncClient) -> None:
+    """The foreign key cascades, so an item never outlives its owner."""
+    owner = await create_user(client)
+    item = (await client.post(f"/users/{owner['id']}/items", json={"name": "Engine"})).json()
+
+    await client.delete(f"/users/{owner['id']}")
+
+    assert (await client.get(f"/users/{owner['id']}/items/{item['id']}")).status_code == 404

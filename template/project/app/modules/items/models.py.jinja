@@ -1,0 +1,43 @@
+"""The ``items`` table.
+
+SQLAlchemy only; no schema imports.
+
+There is deliberately no ``relationship()`` to :class:`User` here. A relationship
+is a lazy load, and a lazy load on an object whose session has closed raises —
+in async SQLAlchemy it raises ``MissingGreenlet``, from whatever line happened to
+touch the attribute. Since services return schemas rather than ORM objects, the
+join, when one is needed, belongs in an explicit ``select(...).join(...)`` in the
+repository where the cost is visible.
+"""
+
+from __future__ import annotations
+
+import uuid
+
+from keel.database import Model, TimestampMixin, UUIDPrimaryKey
+from sqlalchemy import ForeignKey, String, Text
+from sqlalchemy.orm import Mapped, mapped_column
+
+
+class Item(Model, UUIDPrimaryKey, TimestampMixin):
+    """Something a user owns.
+
+    Attributes:
+        name: Short label.
+        description: Optional long text.
+        owner_id: The owning user. ``ON DELETE CASCADE`` because an item with no
+            owner has no meaning in this domain — the alternative is a nullable
+            column that every query then has to handle.
+    """
+
+    __tablename__ = "items"
+
+    name: Mapped[str] = mapped_column(String(200))
+    description: Mapped[str | None] = mapped_column(Text(), default=None)
+    owner_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"),
+        index=True,
+    )
+
+
+__all__ = ["Item"]
