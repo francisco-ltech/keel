@@ -17,11 +17,12 @@ default:
 install:
     uv sync --all-extras
 
-# Install the git hooks in .githooks (format and check before every commit).
+# Install the git hooks in .githooks.
 [group('setup')]
 hooks:
     git config core.hooksPath .githooks
-    @echo "pre-commit hook installed; bypass with 'git commit --no-verify'"
+    @echo "hooks installed: pre-commit formats and checks types; pre-push runs the suite"
+    @echo "bypass either with --no-verify"
 
 # Remove caches and build artefacts. Leaves .venv and the database alone.
 [group('setup')]
@@ -62,14 +63,28 @@ check: lint types types-mypy test
 # Extra arguments go straight to pytest, so `just test -k soft_delete -x` works.
 
 # Run the suite, excluding the slow template generator.
+#
+# Parallel by default: the suite is almost entirely waiting on Postgres and
+# Redis, so it drops from ~44s to ~16s. Each worker gets its own database — see
+# the `database_url` fixture. Use `test-serial` when a traceback or a debugger
+# matters, since xdist makes both awkward.
 [group('test')]
 test *ARGS:
+    uv run pytest -m "not generator" -n auto --dist loadfile {{ ARGS }}
+
+# Run the suite in one process, for debugging.
+[group('test')]
+test-serial *ARGS:
     uv run pytest -m "not generator" {{ ARGS }}
 
 # Run only what needs no running service — the loop to use while editing.
 [group('test')]
 test-fast *ARGS:
     uv run pytest -m "not redis and not postgres and not generator" {{ ARGS }}
+
+# Everything the pre-commit hook runs: fast, deterministic, no services needed.
+[group('quality')]
+quick: lint types types-mypy
 
 # Run only the tests that talk to Postgres or Redis.
 [group('test')]
@@ -84,7 +99,7 @@ test-generator *ARGS:
 # Run the suite with a coverage report.
 [group('test')]
 cov *ARGS:
-    uv run pytest -m "not generator" --cov --cov-report=term-missing {{ ARGS }}
+    uv run pytest -m "not generator" -n auto --dist loadfile --cov --cov-report=term-missing {{ ARGS }}
 
 # Re-run only what failed last time.
 [group('test')]

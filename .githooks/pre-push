@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# Runs the full check before anything leaves the machine.
+#
+# Note it will pass with far less coverage if Postgres and Redis are down: the
+# fixtures skip rather than fail, by design, so the suite stays runnable without
+# Docker. `just doctor` says whether they are actually answering.
+set -euo pipefail
+
+command -v just >/dev/null 2>&1 || { echo "pre-push: just not installed; skipping" >&2; exit 0; }
+just check

@@ -83,7 +83,7 @@ jobs:
       # separately because it resolves and installs a second project and would
       # otherwise dominate the feedback loop on an ordinary change.
       - name: Pytest
-        run: uv run pytest -m "not generator" --cov --cov-report=term-missing
+        run: uv run pytest -m "not generator" -n auto --dist loadfile --cov --cov-report=term-missing
 
       # Generates the starter template and runs its suite, lint and types. This
       # is what stops a change to the core library from quietly breaking every

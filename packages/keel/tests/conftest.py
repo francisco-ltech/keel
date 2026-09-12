@@ -170,16 +170,27 @@ DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql+asyncpg://keel:keel@lo
 
 
 @pytest.fixture(scope="session")
-def database_url() -> str:
-    """The Postgres URL under test, skipping the session if it is unreachable."""
+def database_url(worker_id: str) -> Iterator[str]:
+    """The Postgres URL under test, skipping the session if it is unreachable.
+
+    Under xdist each worker gets **its own database**, created here and dropped
+    at the end of the session. Test modules create and drop their own tables in
+    a shared database, which is fine serially and a race in parallel: one
+    module's ``drop_all`` runs while another is mid-``create_all``. Namespacing
+    the tables instead would mean touching every fixture and would still leave
+    advisory locks and sequences shared. One database per worker removes the
+    whole class of interference in one place.
+
+    Serially there is no worker, and the configured database is used directly.
+    """
     pytest.importorskip("asyncpg", reason="asyncpg not installed")
     import anyio
     from sqlalchemy import text
 
     from keel.database import Database, DatabaseConfig
 
-    async def reachable() -> bool:
-        database = Database(DatabaseConfig(url=DATABASE_URL, statement_timeout=None))
+    async def reachable(url: str) -> bool:
+        database = Database(DatabaseConfig(url=url, statement_timeout=None))
         try:
             async with database.connect() as connection:
                 await connection.execute(text("SELECT 1"))
@@ -189,9 +200,42 @@ def database_url() -> str:
         finally:
             await database.close()
 
-    if not anyio.run(reachable):
+    if not anyio.run(reachable, DATABASE_URL):
         pytest.skip(f"no Postgres reachable at {DATABASE_URL}")
-    return DATABASE_URL
+
+    if worker_id == "master":
+        yield DATABASE_URL
+        return
+
+    import asyncpg
+
+    base, _, _ = DATABASE_URL.rpartition("/")
+    name = f"keel_test_{worker_id}"
+    admin = DATABASE_URL.replace("+asyncpg", "")
+
+    async def administer(statement: str) -> None:
+        connection = await asyncpg.connect(admin)
+        try:
+            await connection.execute(statement)
+        finally:
+            await connection.close()
+
+    anyio.run(administer, f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)')
+    anyio.run(administer, f'CREATE DATABASE "{name}"')
+    try:
+        yield f"{base}/{name}"
+    finally:
+        anyio.run(administer, f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)')
+
+
+@pytest.fixture(scope="session")
+def worker_id() -> str:
+    """The xdist worker name, or ``master`` when running serially.
+
+    Declared here rather than relying on xdist's own fixture so the suite still
+    collects when xdist is not installed.
+    """
+    return os.environ.get("PYTEST_XDIST_WORKER", "master")
 
 
 @pytest.fixture
