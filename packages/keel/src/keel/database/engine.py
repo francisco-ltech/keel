@@ -1,0 +1,254 @@
+"""The engine, the session factory, and the transaction idiom.
+
+One rule shapes this whole module, and it is worth stating before the code:
+
+    **A database session is never held for the lifetime of a request.**
+
+FastAPI's own PR #12066 — "Fix deadlock that can occur when closing dependencies
+during response model validation" — has been open since August 2024, with
+production outages reported in its comments. A session yielded by ``Depends`` is
+held open *through* response-model validation, so under load the pool starves
+while every individual request still looks fast at p99. The compounding hazard
+is Starlette's fixed 40-thread pool, which sync dependencies share.
+
+Keel's answer is to make the safe thing the only thing on offer: there is no
+``get_session`` dependency here, deliberately. A route receives services; a
+service opens a transaction around the work that needs one and returns the
+connection before it builds a response.
+
+    async def publish(post_id: UUID) -> PostRead:
+        async with uow() as session:
+            post = await Posts(session).find_or_fail(post_id)
+            post.publish()
+        return PostRead.model_validate(post)   # session already returned
+
+The second thing this module does is refuse to let a query hold a connection
+forever: ``statement_timeout`` is applied per connection, so a pathological
+query fails instead of starving the pool behind it.
+"""
+
+from __future__ import annotations
+
+from collections.abc import AsyncIterator, Callable
+from contextlib import asynccontextmanager
+from typing import Any
+
+from sqlalchemy import event, text
+from sqlalchemy.ext.asyncio import (
+    AsyncConnection,
+    AsyncEngine,
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
+
+from keel.database.config import DatabaseConfig
+from keel.database.hooks import publish_session, run_after_commit, withdraw_session
+from keel.database.observers import ModelEvent, dispatch_pending
+
+
+class Database:
+    """Owns the engine and hands out sessions.
+
+    One instance per process. It holds a connection pool, so building a second
+    one silently doubles the connection count the database sees — which is why
+    the application binds a single instance at startup and reaches it through
+    :func:`~keel.database.current_database` rather than constructing its own.
+
+    Args:
+        config: How to reach and pool the database.
+        on_observer_error: Called when a model observer raises after a commit.
+            Observers run once the write is durable, so a failure there cannot
+            roll anything back and must not stop the remaining observers — but
+            it must not vanish either. Pass something that logs.
+        on_deferred_error: Called when an after-commit callback raises — most
+            often a job that could not be pushed because the queue was
+            unreachable. Silence here means a dispatch disappears with no
+            record, so pass something that logs.
+    """
+
+    __slots__ = (
+        "_config",
+        "_engine",
+        "_on_deferred_error",
+        "_on_observer_error",
+        "_sessions",
+    )
+
+    def __init__(
+        self,
+        config: DatabaseConfig,
+        on_observer_error: Callable[[BaseException, ModelEvent], None] | None = None,
+        on_deferred_error: Callable[[BaseException], None] | None = None,
+    ) -> None:
+        self._config = config
+        self._on_observer_error = on_observer_error
+        self._on_deferred_error = on_deferred_error
+        self._engine = self._create_engine(config)
+        self._sessions = async_sessionmaker(
+            self._engine,
+            expire_on_commit=False,
+            autoflush=False,
+        )
+
+    @staticmethod
+    def _connect_args(config: DatabaseConfig) -> dict[str, Any]:
+        """Return driver-specific connection arguments.
+
+        The connect timeout is spelled differently by every driver — asyncpg
+        calls it ``timeout``, psycopg calls it ``connect_timeout`` — so it is
+        translated here rather than pushed onto the caller.
+
+        Args:
+            config: The database configuration.
+
+        Returns:
+            Arguments to pass through to the DBAPI's connect call.
+        """
+        scheme = config.url.split("://", 1)[0]
+        match scheme:
+            case "postgresql+asyncpg":
+                return {"timeout": config.connect_timeout}
+            case "postgresql+psycopg":
+                return {"connect_timeout": int(config.connect_timeout)}
+            case _:
+                # SQLite and anything unrecognised: connecting is local or the
+                # spelling is unknown, so pass nothing rather than guess.
+                return {}
+
+    @staticmethod
+    def _create_engine(config: DatabaseConfig) -> AsyncEngine:
+        """Build the engine, applying pool settings the backend supports."""
+        options: dict[str, Any] = {"echo": config.echo, "pool_pre_ping": config.pool_pre_ping}
+        connect_args = Database._connect_args(config)
+        if connect_args:
+            options["connect_args"] = connect_args
+        if not config.is_sqlite:
+            # SQLite's async driver uses a pool that rejects these arguments.
+            options |= {
+                "pool_size": config.pool_size,
+                "max_overflow": config.max_overflow,
+                "pool_timeout": config.pool_timeout,
+                "pool_recycle": config.pool_recycle,
+            }
+
+        engine = create_async_engine(config.url, **options)
+        if config.statement_timeout is not None and not config.is_sqlite:
+            _apply_statement_timeout(engine, config.statement_timeout)
+        return engine
+
+    @property
+    def config(self) -> DatabaseConfig:
+        """The configuration this database was built from."""
+        return self._config
+
+    @property
+    def engine(self) -> AsyncEngine:
+        """The underlying engine, for migrations and administrative work."""
+        return self._engine
+
+    def session(self) -> AsyncSession:
+        """Return a new, unopened session.
+
+        Prefer :meth:`transaction`. Use this only when you need control over
+        the transaction boundary that the context manager does not give you —
+        and remember that you are then responsible for closing it.
+
+        Returns:
+            A new session.
+        """
+        return self._sessions()
+
+    @asynccontextmanager
+    async def transaction(self) -> AsyncIterator[AsyncSession]:
+        """Open a session and a transaction, committing on success.
+
+        The transaction is committed when the block exits normally and rolled
+        back if it raises. The session is closed either way, which is the part
+        that returns the connection to the pool.
+
+        Once the commit succeeds, two kinds of deferred work run: buffered model
+        events reach their observers (:mod:`keel.database.observers`), and
+        buffered after-commit callbacks run (:mod:`keel.database.hooks`) — which
+        is how a job dispatched inside the block reaches the queue only if the
+        block succeeded.
+
+        Both happen here rather than inside, because neither must react to a
+        change that is subsequently rolled back.
+
+        The session is also published to the context for the duration, so code
+        deeper in the call stack can discover that a transaction is open without
+        it being threaded through every signature.
+
+        Yields:
+            A session inside an open transaction.
+        """
+        # Not merged into one `async with`: the work below has to run inside the
+        # session but *after* the transaction has committed.
+        async with self._sessions() as session:
+            token = publish_session(session)
+            try:
+                async with session.begin():
+                    yield session
+            finally:
+                withdraw_session(token)
+            await dispatch_pending(session, self._on_observer_error)
+            await run_after_commit(session, self._on_deferred_error)
+
+    @asynccontextmanager
+    async def connect(self) -> AsyncIterator[AsyncConnection]:
+        """Open a raw connection, for work that is not ORM-shaped.
+
+        Yields:
+            A connection inside an open transaction.
+        """
+        async with self._engine.begin() as connection:
+            yield connection
+
+    async def healthy(self) -> bool:
+        """Whether the database answers.
+
+        Intended for a readiness probe. A health check that reports success
+        without touching its dependencies is worse than none: the orchestrator
+        keeps routing traffic to a process that cannot serve it.
+
+        Returns:
+            ``True`` if a trivial query succeeded.
+        """
+        try:
+            async with self.connect() as connection:
+                await connection.execute(text("SELECT 1"))
+        except Exception:  # noqa: BLE001 — any failure means "not ready"
+            return False
+        return True
+
+    async def close(self) -> None:
+        """Dispose of the pool. Call this once, at shutdown."""
+        await self._engine.dispose()
+
+    def __repr__(self) -> str:
+        """Identify the backend without leaking the password."""
+        scheme = self._config.url.split("://", 1)[0]
+        return f"<Database {scheme}>"
+
+
+def _apply_statement_timeout(engine: AsyncEngine, seconds: float) -> None:
+    """Apply a server-side statement timeout to every new connection.
+
+    Done with a connection event rather than a URL parameter because the option
+    is spelled differently by every driver, and because setting it per
+    connection means it survives a pool recycle.
+
+    Args:
+        engine: The engine whose connections should be capped.
+        seconds: The cap.
+    """
+    milliseconds = max(1, int(seconds * 1000))
+
+    @event.listens_for(engine.sync_engine, "connect")
+    def _set_timeout(dbapi_connection: Any, _record: Any) -> None:
+        cursor = dbapi_connection.cursor()
+        try:
+            cursor.execute(f"SET statement_timeout = {milliseconds}")
+        finally:
+            cursor.close()

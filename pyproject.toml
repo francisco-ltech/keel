@@ -1,0 +1,155 @@
+# Workspace root. Deliberately not a package — it exists to hold the shared
+# tool configuration and the dev environment that `packages/keel` and the
+# generated starter app are both checked with.
+#
+# Everything here is local: the starter template depends on `keel` by path, and
+# nothing is published to an index.
+
+[tool.uv.workspace]
+members = ["packages/*"]
+
+[tool.uv.sources]
+keel = { workspace = true }
+
+[dependency-groups]
+dev = [
+    "keel[postgres,migrations,factories,queue]",
+    "pytest>=8.0",
+    "pytest-cov>=5.0",
+    "anyio>=4.0",
+    "ruff>=0.6",
+    "mypy>=1.11",
+    # Two type checkers on purpose. ty is ~30x faster and is what you run on
+    # every save; mypy stays as the gate because ty is pre-1.0 and shipping
+    # weekly, and a checker whose verdicts move under you needs a second
+    # opinion. They also disagree usefully — ty found a generic-widening
+    # unsoundness mypy accepts, and mypy's warn_unreachable has caught bugs ty
+    # does not look for. Revisit dropping mypy when ty reaches 1.0.
+    "ty>=0.0.80",
+    # FastAPI is a dev dependency only. Keel's core must not depend on a web
+    # framework — the same subsystems are used by workers and CLI commands —
+    # but the integration has to be proved by a test, not by a README.
+    "fastapi>=0.115",
+    "httpx>=0.27",
+    # Phase 0: the starter template is generated and its tests are run as part
+    # of this suite, so the generator is a dev dependency of the workspace.
+    "copier>=9.4",
+]
+
+# ---------------------------------------------------------------- ruff
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+src = ["packages/keel/src", "packages/keel/tests"]
+extend-exclude = [
+    # Copier templates are Jinja source, not Python. `.jinja` files are not
+    # parsed by ruff anyway; this keeps any stray generated output out.
+    "template/**",
+    ".generated/**",
+]
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "F",    # pyflakes
+    "W",    # pycodestyle warnings
+    "I",    # isort
+    "N",    # pep8-naming
+    "UP",   # pyupgrade
+    "B",    # flake8-bugbear
+    "A",    # flake8-builtins
+    "C4",   # flake8-comprehensions
+    "SIM",  # flake8-simplify
+    "TC",   # flake8-type-checking (formerly "TCH")
+    "BLE",  # flake8-blind-except
+    "RUF",  # ruff-specific
+    "ANN",  # flake8-annotations
+    "D",    # pydocstyle
+]
+ignore = [
+    "D107",    # undocumented __init__ (documented on the class instead)
+    "ANN401",  # dynamically typed expressions (Any) are sometimes the honest type
+    # TC001/TC003 push imports used only in annotations into `if TYPE_CHECKING`.
+    # That trades readability for import time, and Keel is heading for Pydantic
+    # and FastAPI integration, where annotations must stay resolvable at runtime
+    # — a deferred import there produces a confusing NameError at schema build
+    # time rather than a faster start-up. TC002 (third-party) is kept: those are
+    # genuinely heavy and we do not expose them in runtime-evaluated signatures.
+    "TC001",
+    "TC003",
+]
+
+[tool.ruff.lint.isort]
+# `examples` is our own code, not a third-party package.
+known-first-party = ["keel", "examples"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.lint.per-file-ignores]
+"packages/keel/tests/**/*.py" = ["D", "ANN", "S101"]
+
+[tool.ruff.format]
+# defaults: double quotes, trailing commas, magic trailing comma respected
+
+# ---------------------------------------------------------------- mypy
+
+[tool.mypy]
+python_version = "3.13"
+strict = true
+warn_unreachable = true
+disallow_any_generics = true
+no_implicit_reexport = true
+show_error_codes = true
+
+# asyncpg ships no py.typed marker. It is used directly only in test
+# fixtures that create and drop databases; the library reaches Postgres
+# through SQLAlchemy, which is typed.
+[[tool.mypy.overrides]]
+module = "asyncpg.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "tests.*"
+disallow_untyped_defs = false
+disallow_incomplete_defs = false
+
+# ---------------------------------------------------------------- ty
+
+[tool.ty.src]
+include = ["packages/keel/src", "packages/keel/tests", "examples"]
+
+[tool.ty.environment]
+python-version = "3.13"
+
+# ---------------------------------------------------------------- pytest
+
+[tool.pytest.ini_options]
+testpaths = ["packages/keel/tests"]
+# The repo root on sys.path so `examples/` is importable by the integration
+# test. The example is documentation that has to keep working.
+pythonpath = ["."]
+addopts = "-q --strict-markers --strict-config"
+markers = [
+    "redis: requires a live Redis server (see docker-compose.yml)",
+    "postgres: requires a live Postgres server (see docker-compose.yml)",
+    "contract: driver contract suite, run against every cache driver",
+    "generator: generates the starter template and runs its suite; slow",
+]
+
+# ---------------------------------------------------------------- coverage
+
+[tool.coverage.run]
+source = ["packages/keel/src/keel"]
+branch = true
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
+fail_under = 90
+exclude_lines = [
+    "if TYPE_CHECKING:",
+    "^\\s*\\.\\.\\.$",
+    "raise NotImplementedError",
+]

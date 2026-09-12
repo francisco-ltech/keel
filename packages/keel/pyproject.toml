@@ -1,0 +1,31 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "keel"
+version = "0.1.0"
+description = "Batteries for FastAPI — a facade/driver/fake seam for application subsystems."
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "redis>=6.0",
+    "sqlalchemy[asyncio]>=2.0.40",
+]
+
+[project.optional-dependencies]
+# Installed by an application that uses the Postgres driver. Kept optional so a
+# worker or CLI that only needs the cache does not pull in a database driver.
+postgres = ["asyncpg>=0.30"]
+# Migration tooling. Optional for the same reason: a worker process runs
+# migrations never, and should not carry Alembic to do it.
+migrations = ["alembic>=1.13"]
+# Test-data factories. Optional because production never builds fake rows, and
+# a web process should not carry a data generator into its image.
+factories = ["polyfactory>=2.18"]
+# The queue driver. Optional because an API-only deployment that dispatches
+# nothing, and any process that only reads, should not carry a worker runtime.
+queue = ["saq>=0.22"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/keel"]

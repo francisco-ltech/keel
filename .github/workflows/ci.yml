@@ -1,0 +1,92 @@
+name: CI
+
+# This repository is local-only for now — there is no remote, so nothing here
+# runs today. It is kept current anyway: a workflow written after the fact tends
+# to encode what the project looked like months ago.
+#
+# NOTE: actions are pinned by tag. Pinning by commit SHA (with dependabot
+# keeping them fresh) is a follow-up before this repo goes anywhere public.
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: lint + types + tests
+    runs-on: ubuntu-latest
+
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 5
+
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: keel
+          POSTGRES_PASSWORD: keel
+          POSTGRES_DB: keel
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U keel -d keel"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 5
+
+    env:
+      # Default ports here: the service containers are the only ones in the job.
+      REDIS_URL: redis://localhost:6379/0
+      DATABASE_URL: postgresql+asyncpg://keel:keel@localhost:5432/keel
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install Python
+        run: uv python install 3.13
+
+      - name: Install dependencies
+        run: uv sync --all-extras
+
+      - name: Ruff lint
+        run: uv run ruff check --output-format=github .
+
+      - name: Ruff format check
+        run: uv run ruff format --check .
+
+      # Two checkers, deliberately — see the comment on the `ty` dev
+      # dependency. ty runs first because it is near-instant, so an obvious
+      # type error fails the job before mypy spends seven seconds finding it.
+      - name: ty
+        run: uv run ty check packages/keel/src packages/keel/tests
+
+      - name: Mypy
+        run: uv run mypy packages/keel/src packages/keel/tests
+
+      # The library's own suite. Excludes the template generator, which is run
+      # separately because it resolves and installs a second project and would
+      # otherwise dominate the feedback loop on an ordinary change.
+      - name: Pytest
+        run: uv run pytest -m "not generator" --cov --cov-report=term-missing
+
+      # Generates the starter template and runs its suite, lint and types. This
+      # is what stops a change to the core library from quietly breaking every
+      # project generated from it.
+      - name: Template generation
+        run: uv run pytest -m generator -q
