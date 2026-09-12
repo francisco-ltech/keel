@@ -154,15 +154,16 @@ doctor:
             import asyncpg
             url = os.environ["DATABASE_URL"].replace("+asyncpg", "")
             connection = await asyncio.wait_for(asyncpg.connect(url), timeout=5)
-            print("postgres: ok —", await connection.fetchval("select version()"))
+            version = await connection.fetchval("show server_version")
+            print(f"postgres: ok — PostgreSQL {version}")
             await connection.close()
         except Exception as exc:
             print(f"postgres: FAILED — {type(exc).__name__}: {exc}")
         try:
             from redis.asyncio import Redis
-            client = Redis.from_url(os.environ["REDIS_URL"])
-            await asyncio.wait_for(client.ping(), timeout=5)
-            print("redis:    ok")
+            client = Redis.from_url(os.environ["REDIS_URL"], decode_responses=True)
+            info = await asyncio.wait_for(client.info("server"), timeout=5)
+            print(f"redis:    ok — Redis {info['redis_version']}")
             await client.aclose()
         except Exception as exc:
             print(f"redis:    FAILED — {type(exc).__name__}: {exc}")
