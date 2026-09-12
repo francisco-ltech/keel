@@ -1,5 +1,8 @@
 # Keel
 
+*A keel is the backbone of a hull: the member everything else is fastened to,
+and what stops the boat being pushed sideways.*
+
 Batteries for backend services. A core library you install, and a starter
 template you generate from.
 
@@ -8,8 +11,9 @@ database schema. It deploys as an API, as a queue worker, or as both from the
 same image, with the entrypoint chosen per deployment. Purely backend: no
 frontend, no templating, no asset pipeline.
 
-This is how Laravel works (`serve`, `queue:work`, `schedule:run` over one
-codebase), and matching it is the point. The core library depends on no web
+Keel takes its design principles from Laravel: convention over configuration,
+one uniform way to reach each subsystem, and a test double for everything. It
+borrows the ideas, not the framework. The core library depends on no web
 framework, so the parts a worker uses carry no HTTP baggage.
 
 Each subsystem is reached the same way: a **facade** the application calls, a
