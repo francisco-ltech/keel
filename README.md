@@ -1,5 +1,7 @@
 # Keel
 
+[![CI](https://github.com/francisco-ltech/keel/actions/workflows/ci.yml/badge.svg)](https://github.com/francisco-ltech/keel/actions/workflows/ci.yml)
+
 *A keel is the backbone of a hull: the member everything else is fastened to,
 and what stops the boat being pushed sideways.*
 

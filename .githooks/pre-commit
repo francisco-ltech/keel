@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+# Keel pre-commit hook.
+#
+# Installed by `just hooks`, which points core.hooksPath here so the hook is
+# version-controlled rather than living in .git/hooks where it cannot be shared
+# or reviewed.
+#
+# Runs `just fmt` then `just check`. That is slower than a typical hook — the
+# full suite is around 45 seconds — because the alternative is discovering the
+# same failure in CI several minutes later. Skip it with `git commit --no-verify`
+# when you genuinely need to.
+set -euo pipefail
+
+if ! command -v just >/dev/null 2>&1; then
+    echo "pre-commit: just is not installed; skipping" >&2
+    exit 0
+fi
+
+staged=$(git diff --cached --name-only --diff-filter=ACMR)
+if [ -z "$staged" ]; then
+    exit 0
+fi
+
+echo "pre-commit: formatting"
+just fmt >/dev/null
+
+# Re-stage only files that were already staged. Formatting may also have touched
+# files you deliberately left out of this commit, and those stay out.
+echo "$staged" | while IFS= read -r path; do
+    [ -f "$path" ] && git add -- "$path"
+done
+
+echo "pre-commit: lint, types, tests"
+just check

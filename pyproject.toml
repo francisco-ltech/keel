@@ -131,6 +131,15 @@ testpaths = ["packages/keel/tests"]
 # test. The example is documentation that has to keep working.
 pythonpath = ["."]
 addopts = "-q --strict-markers --strict-config"
+# A warning is a failure. Almost every one is either our own deprecation or a
+# resource we forgot to close, and both are worth a red build. Third-party
+# noise gets a narrow, dated exception rather than a blanket filter.
+filterwarnings = [
+    "error",
+    # saq 0.26.4 calls redis-py's deprecated setex() internally. Nothing we can
+    # do from here; drop this line when saq stops doing it.
+    "ignore:Call to deprecated setex.*:DeprecationWarning",
+]
 markers = [
     "redis: requires a live Redis server (see docker-compose.yml)",
     "postgres: requires a live Postgres server (see docker-compose.yml)",

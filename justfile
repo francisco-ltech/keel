@@ -17,6 +17,12 @@ default:
 install:
     uv sync --all-extras
 
+# Install the git hooks in .githooks (format and check before every commit).
+[group('setup')]
+hooks:
+    git config core.hooksPath .githooks
+    @echo "pre-commit hook installed; bypass with 'git commit --no-verify'"
+
 # Remove caches and build artefacts. Leaves .venv and the database alone.
 [group('setup')]
 clean:
