@@ -363,9 +363,8 @@ class SaqQueue:
             return envelope.id
         existing = await lane.job(self._job_key(envelope))
         if existing is None:
-            # The in-flight duplicate finished and expired between the enqueue
-            # and this read. Reporting the caller's own id is honest: nothing is
-            # queued under it, but nothing was lost either.
+            # The in-flight duplicate finished and expired between the enqueue and
+            # this read. Reporting the caller's own id is honest: nothing was lost.
             return envelope.id
         return decode(existing.kwargs).id
 
@@ -447,11 +446,9 @@ class SaqQueue:
         await self._redis.connection_pool.disconnect()
 
     # -- consume side -----------------------------------------------------
-    #
-    # Not part of the Queue protocol, and deliberately not promoted into one:
-    # there is exactly one consumer, keel.queue.worker.Worker, and ADR 0000
-    # declines interfaces with a single implementor. These are ordinary methods
-    # on the concrete driver, which is what the worker holds.
+
+    # Not in the Queue protocol, and deliberately not promoted into one: Worker is
+    # the only consumer, and ADR 0000 declines interfaces with one implementor.
 
     async def reserve(
         self,
@@ -502,11 +499,8 @@ class SaqQueue:
             status=Status.ACTIVE,
             started=saq_now(),
             kwargs=encode(envelope),
-            # The original dispatch's `scheduled` is a past epoch once a delayed
-            # job has run, and SAQ's scheduler treats any non-zero score as
-            # "due" — so leaving it would let a swept job be promoted a second
-            # time and delivered twice. Zeroing it here costs nothing: a job
-            # being reserved is, by definition, no longer scheduled.
+            # SAQ treats any non-zero `scheduled` as "due", so a delayed job's now-past
+            # epoch would let a swept job be promoted a second time and delivered twice.
             scheduled=0,
         )
         return Reservation(envelope=envelope, lane=resolved, saq_job=saq_job)
@@ -682,10 +676,8 @@ class SaqQueue:
             key=self._job_key(envelope),
             timeout=timeout,
             scheduled=scheduled,
-            # Keel's worker decides every retry, so SAQ must never schedule one
-            # of its own. The remaining budget is still declared, because it is
-            # what SAQ's sweeper would use to re-queue a job orphaned by a
-            # worker that died mid-attempt, rather than aborting it outright.
+            # Not a retry policy — Keel's worker decides every retry. The remaining
+            # budget is what SAQ's sweeper uses to re-queue a job orphaned mid-attempt.
             retries=max(1, envelope.max_attempts - envelope.attempts),
         )
 

@@ -114,7 +114,7 @@ DEFAULT_UNROUTABLE_AFTER: Final = 3600.0
 
 
 # -- events ---------------------------------------------------------------
-#
+
 # Frozen dataclasses with no behaviour, like keel.cache.events: an event is a
 # fact that has already happened, so there is nothing to do to it.
 
@@ -700,10 +700,8 @@ class Worker:
         """
         attempt = reservation.envelope
         if attempt.attempts > attempt.max_attempts:
-            # Only reachable through recovery: a job that kills its worker is
-            # swept back and delivered again, and without this it would keep
-            # being delivered for ever. `exhausted` is not the test — that is
-            # true *on* the last legitimate attempt, which must still run.
+            # Only reachable through recovery: a job that kills its worker is swept
+            # back for ever. Not `exhausted` — that is true on the last valid attempt.
             await queue.fail(reservation, "attempt budget exceeded after recovery")
             await self._dead_letter(attempt, JobError("job exceeded its attempts after recovery"))
             return
@@ -713,9 +711,8 @@ class Worker:
             await self._offer_again(queue, reservation, exc)
             return
         except JobError as exc:
-            # The payload no longer fits the job's fields. Deterministic: every
-            # remaining attempt would fail identically, so spending them only
-            # delays the moment a human sees the envelope.
+            # The payload no longer fits the job's fields. Deterministic, so spending
+            # the remaining attempts only delays the dead-letter a human needs to see.
             await queue.fail(reservation, self._describe(exc))
             await self._dead_letter(attempt, exc)
             return
@@ -725,9 +722,8 @@ class Worker:
         try:
             await self._handle(job, attempt.timeout)
         except PermanentFailureError as exc:
-            # The handler has said retrying cannot help. Spending the remaining
-            # attempts would only delay the dead-letter a human needs to see,
-            # and would make a broken job look like a flaky one.
+            # The handler has said retrying cannot help; spending the remaining
+            # attempts would only make a broken job look like a flaky one.
             await queue.fail(reservation, self._describe(exc))
             await self._dead_letter(attempt, exc)
         except Exception as exc:  # noqa: BLE001 — a handler may raise anything
@@ -891,9 +887,8 @@ class Worker:
             try:
                 signals = stack.enter_context(anyio.open_signal_receiver(*STOP_SIGNALS))
             except (NotImplementedError, ValueError, RuntimeError):
-                # No signal support here: a non-main thread, or a platform
-                # without it. Reported through `handles_signals` rather than
-                # raised, so an embedded worker still runs.
+                # No signal support here: a non-main thread, or a platform without
+                # it. Reported via `handles_signals` so an embedded worker still runs.
                 return
             self._signals_installed = True
             async for _ in signals:

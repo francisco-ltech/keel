@@ -51,9 +51,8 @@ class DatabaseSettings(BaseSettings):
 
     model_config = SettingsConfigDict(env_prefix="DB_", env_file=".env", extra="ignore")
 
-    # DATABASE_URL rather than DB_URL: it is what every hosting platform
-    # injects, and what Alembic and psql tooling already read. DB_URL is
-    # accepted too so the subsystem prefix stays internally consistent.
+    # DATABASE_URL rather than DB_URL: it is what hosting platforms inject and what
+    # Alembic and psql already read. DB_URL is accepted too, for prefix consistency.
     url: str = Field(
         default="postgresql+asyncpg://keel:keel@localhost:{{ postgres_port }}/keel",
         validation_alias=AliasChoices("DATABASE_URL", "DB_URL"),
@@ -165,12 +164,8 @@ class WorkerSettings(BaseSettings):
 {%- endif %}
     """
 
-    # No env_prefix and no nested delimiter. The groups below are BaseSettings
-    # in their own right, each carrying its own subsystem prefix, so the
-    # variables read as DATABASE_URL / DB_POOL_SIZE / CACHE_STORE rather than
-    # DB__URL. A nested delimiter here would silently ignore all of those —
-    # `extra="ignore"` means a misspelled variable does not raise, it just does
-    # nothing, which is the worst way for configuration to fail.
+    # No env_prefix and no nested delimiter: the groups below carry their own
+    # prefixes (DB_POOL_SIZE, not DB__URL), which a delimiter here would silently break.
     model_config = SettingsConfigDict(
         env_prefix="",
         env_file=".env",

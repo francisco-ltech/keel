@@ -214,18 +214,15 @@ async def serve(settings: Settings | None = None) -> None:
         cache_lifespan(config.cache_config()),
         queue_lifespan(queue_config),
     ):
-        # The default error handler discards listener failures; a worker that
-        # silently stopped logging its own jobs would be indistinguishable from
-        # one with nothing to do.
+        # The default error handler discards listener failures: a worker that stopped
+        # logging its own jobs would look exactly like one with nothing to do.
         events = EventDispatcher(on_error=on_listener_error)
         log_events(events)
         worker = Worker(
             queue_config,
             queues=(queue_config.default_queue,),
-            # Exhausted jobs become rows in `keel_failed_jobs`, with the whole
-            # envelope and the original traceback, so a human can retry them by
-            # hand. The default sink only emits an event, which is a log line
-            # and then nothing.
+            # Exhausted jobs become rows in `keel_failed_jobs`, envelope and traceback
+            # included, so a human can retry them. The default sink only emits an event.
             failure_sink=DatabaseFailureSink(),
             events=events,
         )

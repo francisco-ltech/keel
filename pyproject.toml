@@ -19,16 +19,11 @@ dev = [
     "anyio>=4.0",
     "ruff>=0.6",
     "mypy>=1.11",
-    # Two type checkers on purpose. ty is ~30x faster and is what you run on
-    # every save; mypy stays as the gate because ty is pre-1.0 and shipping
-    # weekly, and a checker whose verdicts move under you needs a second
-    # opinion. They also disagree usefully — ty found a generic-widening
-    # unsoundness mypy accepts, and mypy's warn_unreachable has caught bugs ty
-    # does not look for. Revisit dropping mypy when ty reaches 1.0.
+    # ty for speed, mypy as the gate. Both must pass; see ADR 0004 for why, and
+    # for when dropping mypy becomes reasonable.
     "ty>=0.0.80",
-    # FastAPI is a dev dependency only. Keel's core must not depend on a web
-    # framework — the same subsystems are used by workers and CLI commands —
-    # but the integration has to be proved by a test, not by a README.
+    # Dev-only: the core must not depend on a web framework, but the integration
+    # still has to be proved by a test.
     "fastapi>=0.115",
     "httpx>=0.27",
     # Phase 0: the starter template is generated and its tests are run as part
@@ -71,12 +66,8 @@ select = [
 ignore = [
     "D107",    # undocumented __init__ (documented on the class instead)
     "ANN401",  # dynamically typed expressions (Any) are sometimes the honest type
-    # TC001/TC003 push imports used only in annotations into `if TYPE_CHECKING`.
-    # That trades readability for import time, and Keel is heading for Pydantic
-    # and FastAPI integration, where annotations must stay resolvable at runtime
-    # — a deferred import there produces a confusing NameError at schema build
-    # time rather than a faster start-up. TC002 (third-party) is kept: those are
-    # genuinely heavy and we do not expose them in runtime-evaluated signatures.
+    # Pydantic and FastAPI need annotations resolvable at runtime, so deferring
+    # first-party imports buys start-up time and costs a NameError. TC002 stays.
     "TC001",
     "TC003",
 ]

@@ -1,0 +1,85 @@
+# {{ project_name }} — working notes for agents
+
+{{ description }}
+
+One bounded domain, one codebase, one database schema.
+{% if service_shape == 'both' %}It runs as an API (`app/main.py`) or as a queue
+worker (`app/worker.py`) — same image, entrypoint chosen per deployment.
+{% elif service_shape == 'worker' %}It runs as a queue worker (`app/worker.py`).
+There is no HTTP surface; adding one means adding `main.py` and a `router.py`,
+not regenerating.
+{% else %}It runs as an API (`app/main.py`). Adding background work means adding
+`worker.py` and a `jobs.py`, not regenerating.
+{% endif %}
+Built on [Keel](https://github.com/francisco-ltech/keel), which supplies the
+cache, database and queue. The rules below come from Keel and are not
+stylistic — each one exists because the obvious alternative has a failure mode.
+
+## Layout
+
+```
+app/modules/<domain>/
+  models.py       SQLAlchemy. Never imports schemas.
+  schemas.py      Pydantic. Never imports models.
+  repository.py   data access; takes a session, never opens one
+  service.py      business logic; owns the transaction, returns schemas
+{% if has_api %}  router.py       HTTP only; calls services
+{% endif %}{% if has_worker %}  jobs.py         job handlers; call the same services
+{% endif %}```
+
+## Rules
+
+**Never write a `get_session` dependency.** A session held across a request hits
+an open FastAPI deadlock and starves the pool while p99 still looks healthy.
+Routes take services; services open the transaction:
+
+```python
+async def approve(invoice_id: UUID) -> InvoiceRead:
+    async with uow() as session:
+        invoice = await Invoices(session).get_or_fail(invoice_id)
+        invoice.approve()
+        return InvoiceRead.model_validate(invoice)
+```
+
+**Services return schemas, not ORM objects.** A detached instance raises on the
+next attribute access. Convert inside the block.
+
+**Eager-load relationships you will use.** Lazy loading raises under async
+rather than quietly issuing a query — `Repository.eager(...)`.
+{% if has_worker %}
+**`dispatch()` inside a transaction waits for the commit.** That is the default
+and it is correct: pushing immediately means a worker acting on a row that was
+rolled back. Do not pass `after_commit=False` to "fix" a timing problem.
+
+**Raise `PermanentFailureError` when a retry cannot help** — a missing row, a
+validation error, a 4xx. Otherwise the job burns its attempts and looks flaky
+rather than broken.
+
+**Jobs are dataclasses, retried, and may run more than once.** Write handlers to
+be idempotent; at-least-once is the only guarantee a queue can make.
+{% endif %}
+**Soft-deleted rows are filtered globally.** You do not add `WHERE deleted_at IS
+NULL`. To include them, `with_deleted(...)` explicitly.
+
+**Test with the fakes.** `fake_queue()` records dispatches without running them;
+`fake_cache()` does the same for the cache. Asserting a job was enqueued and
+testing what the job does are two different tests.
+
+**Tests run against real Postgres inside a transaction that is rolled back.**
+There is no fake database — the queries are the part most likely to be wrong.
+
+## Commands
+
+`just` lists everything. `just check` is the full gate and what CI runs.
+{% if has_worker %}`just worker` runs the worker; `just dev` runs {% if has_api %}both{% else %}it with reload{% endif %}.
+{% endif %}
+Postgres is on {{ postgres_port }} and Redis on {{ redis_port }}, to avoid
+clashing with anything on the default ports. `just up` starts them.
+
+## Style
+
+Inline comments: two lines maximum, clear and brief. Longer explanations belong
+in the docstring. Docstrings say *why*, not *what*.
+
+Migrations: `just revision "what changed"`, then read the generated file before
+committing it. Autogenerate misses things and invents others.

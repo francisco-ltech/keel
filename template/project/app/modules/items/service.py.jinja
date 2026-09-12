@@ -48,13 +48,8 @@ async def create_item(owner_id: UUID, payload: ItemCreate) -> ItemRead:
         NotFoundError: If the owner does not exist.
     """
 {%- if has_worker %}
-    # Imported here rather than at module scope, and the reason is structural:
-    # `jobs` imports this module — a handler calls the same service functions a
-    # router does — so a module-level import back would be a cycle that resolves
-    # or explodes depending on which of the two is imported first. Deferring the
-    # upward reference keeps the graph one-directional at import time. The cost
-    # is nil in practice: `app.modules` imports `jobs` at start-up, so by the
-    # first request this is a dictionary lookup in `sys.modules`.
+    # Deferred because `jobs` imports this module: a module-level import back would
+    # be a cycle. By the first request this is only a `sys.modules` lookup.
     from app.modules.items.jobs import IndexItem
 {% endif %}
     async with uow() as session:
@@ -69,12 +64,8 @@ async def create_item(owner_id: UUID, payload: ItemCreate) -> ItemRead:
         result = ItemRead.model_validate(item)
 {%- if has_worker %}
 
-        # Inside the unit of work, deliberately. `dispatch` finds the open
-        # transaction and holds the push until it commits, so a worker never
-        # sees a job for a row that was rolled back. Outside the block it would
-        # push immediately and usually win the race, and the job would
-        # dead-letter looking like corrupted data rather than like an ordering
-        # bug. `after_commit=False` is the escape hatch, and it has to be typed.
+        # Inside the unit of work deliberately: `dispatch` holds the push until the
+        # transaction commits, so a worker never sees a job for a rolled-back row.
         await dispatch(IndexItem(item_id=str(item.id), owner_id=str(owner_id)))
 {%- endif %}
 

@@ -10,17 +10,8 @@
 _subdirectory: "project"
 _templates_suffix: ".jinja"
 
-# Files copied verbatim rather than rendered are the ones without the suffix —
-# `app/migrations/script.py.mako` most importantly, which is Alembic's own
-# Mako template and must reach the generated project untouched.
-#
-# `_exclude` is templated, which is how `service_shape` decides what gets
-# scaffolded. The alternative — a Jinja conditional inside every file *name* —
-# was declined: it spreads one decision across a dozen directory listings, it
-# renders unreadable on disk (`app/{% raw %}{% if %}{% endraw %}worker.py`), and
-# a mistake in it produces a file called `.jinja` rather than an error. One
-# block here is the whole rule, in shape order, and it works identically for
-# rendered and verbatim files.
+# `_exclude` is templated: one block decides what each service shape scaffolds,
+# rather than a Jinja conditional inside a dozen file *names*.
 _exclude:
   - "copier.yml"
   - "copier.yaml"
@@ -99,9 +90,8 @@ service_shape:
 
 has_api:
   type: bool
-  # Computed, never asked. `when: false` is copier's way of saying "derive this
-  # and remember it in .copier-answers.yml", which keeps the two-way condition
-  # out of every template that needs it.
+  # Computed, never asked. `when: false` derives it and records it in
+  # .copier-answers.yml, keeping the condition out of every template.
   when: false
   default: "{{ service_shape in ['api', 'both'] }}"
 

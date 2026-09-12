@@ -396,11 +396,8 @@ class CronTrigger:
         """
         fields = self._fields
         if fields is None:
-            # ``get_prev`` is strictly-before, so asking it about a moment that
-            # is itself a firing instant would skip to the one before. Cron's
-            # resolution is a minute, so truncating to the minute and stepping
-            # one second into it makes the boundary inclusive without ever
-            # reaching forward past *moment*.
+            # ``get_prev`` is strictly-before, so a moment that is itself a firing
+            # instant would skip one. Second 1 of its minute makes it inclusive.
             inside = moment.replace(second=1, microsecond=0)
             return _from_croniter(self.expression, inside, backwards=True)
         return fields.previous_due(moment)
@@ -897,10 +894,8 @@ class Scheduler:
         """
         window = entry.catch_up
         if window is None:
-            # "Never run late" still has to tolerate the tick interval: the
-            # scheduler only wakes every few seconds, so a strict `due == now`
-            # would mean an entry fires only when a tick lands on its instant to
-            # the microsecond, i.e. essentially never.
+            # "Never run late" still has to tolerate the tick interval: a strict
+            # `due == now` would need a tick on the exact microsecond, i.e. never.
             window = timedelta(seconds=self._tick_interval)
         return timedelta(0) <= now - due <= window
 
@@ -967,9 +962,8 @@ class Scheduler:
         """
         key = entry_lock_key(name)
         async with self._bound_database().engine.connect() as connection:
-            # AUTOCOMMIT so the lock is not parked inside an idle transaction:
-            # one held for the length of a dispatch would hold back vacuum on
-            # every table in the database.
+            # AUTOCOMMIT so the lock is not parked in an idle transaction, which for
+            # the length of a dispatch would hold back vacuum across the database.
             session = await connection.execution_options(isolation_level="AUTOCOMMIT")
             acquired = bool(
                 (
@@ -1291,10 +1285,8 @@ class _CronFields:
             for hour in hours:
                 for minute in minutes:
                     candidate = day.replace(hour=hour, minute=minute)
-                    # Only the starting day is bounded by the starting time;
-                    # every later (or earlier) day is searched whole, which is
-                    # why the hour and minute lists are sorted in the direction
-                    # of travel — the first candidate found is the nearest one.
+                    # Only the starting day is bounded by the starting time; the hour
+                    # and minute lists are sorted by direction, so the first hit wins.
                     if offset == 0 and (candidate < cursor if forwards else candidate > cursor):
                         continue
                     return candidate

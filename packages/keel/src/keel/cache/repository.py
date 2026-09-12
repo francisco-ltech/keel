@@ -310,11 +310,8 @@ class Repository:
 
     # -- the interesting one ---------------------------------------------
 
-    # Two overloads rather than one union-typed parameter. A bare
-    # `Callable[[], T | Awaitable[T]]` is unsolvable for a type checker given an
-    # `async def` callback: it infers `T = Never` and rejects the call, which
-    # would force an explicit annotation at every async call site — the most
-    # common shape this method has. Splitting the cases makes both infer.
+    # Two overloads, not one union-typed parameter: given an `async def` callback a
+    # bare `Callable[[], T | Awaitable[T]]` infers `T = Never` and rejects the call.
     @overload
     async def remember[T](
         self,
@@ -470,9 +467,7 @@ class Repository:
         """
         lock = self.lock(f"remember:{key}", ttl=self.single_flight_ttl)
         # Not `async with await lock.block(...)`: block() already acquires, and
-        # __aenter__ would then try to acquire the same lock a second time and
-        # fail because this caller is holding it. Acquire once, release in
-        # `finally`.
+        # __aenter__ would then re-acquire and fail. Acquire once, release in `finally`.
         await lock.block(self.single_flight_timeout, poll=self.single_flight_poll)
         try:
             cached = await self.store.get(key)

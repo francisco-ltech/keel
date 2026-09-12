@@ -76,9 +76,8 @@ def fake_cache(
         stores={"default": StoreConfig(driver="array", ttl=default_ttl)},
     )
     manager = CacheManager(config)
-    # Replace the configured store wholesale rather than adding a "fake" driver:
-    # the code under test asks for the default store by name and must get this
-    # instance, not one built from configuration.
+    # Replace the configured store wholesale rather than adding a "fake" driver: the
+    # code under test asks for the default by name and must get *this* instance.
     manager.extend("default", lambda name: Repository(store, default_ttl, name))
     with use_cache(manager):
         yield store
@@ -90,28 +89,27 @@ class _SavepointDatabase(Database):
     Constructed by :func:`rolled_back_database`. It reuses the original
     database's engine — building a second one would open a second pool, and the
     whole trick depends on every session sharing one connection.
+
+    ``__init__`` copies *every* declared slot rather than the two or three it
+    happens to need. Naming them individually has already broken twice in this
+    codebase — once here and once on ``CacheProxy`` — because adding a field to the
+    parent silently leaves it unset on the subclass, and the ``AttributeError``
+    surfaces somewhere unrelated. A loop over ``__slots__`` cannot go stale.
     """
 
     __slots__ = ()
 
     def __init__(self, origin: Database, connection: AsyncConnection) -> None:
         # Bypasses Database.__init__ on purpose: that builds an engine, and this
-        # object must borrow rather than create one.
-        #
-        # Copying every declared slot rather than the two or three we happen to
-        # need is deliberate. Naming them individually has already broken twice
-        # in this codebase — once here and once on CacheProxy — because adding a
-        # field to the parent silently leaves it unset on the subclass, and the
-        # AttributeError surfaces somewhere unrelated. This loop cannot go stale.
+        # object must borrow rather than create one. Copies every slot; see above.
         for slot in Database.__slots__:
             setattr(self, slot, getattr(origin, slot))
         self._sessions = async_sessionmaker(
             bind=connection,
             expire_on_commit=False,
             autoflush=False,
-            # Makes session.commit() release a SAVEPOINT instead of committing
-            # the outer transaction, so code under test can commit normally and
-            # still be undone.
+            # Makes session.commit() release a SAVEPOINT instead of committing the
+            # outer transaction, so code under test can commit and still be undone.
             join_transaction_mode="create_savepoint",
         )
 

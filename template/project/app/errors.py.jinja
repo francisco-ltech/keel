@@ -44,10 +44,8 @@ from keel.exceptions import ConfigurationError, KeelError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 if TYPE_CHECKING:
-    # Deferred because nothing here is introspected at runtime: Starlette calls
-    # a handler positionally and never reads its annotations. Anything FastAPI
-    # *does* read — a route signature, a Pydantic field — must stay imported at
-    # module scope, or schema building fails with a NameError.
+    # Deferred: Starlette calls a handler positionally and never reads its annotations.
+    # What FastAPI *does* read — route signatures, fields — must stay at module scope.
     from fastapi import FastAPI, Request
 
 PROBLEM_JSON: Final = "application/problem+json"

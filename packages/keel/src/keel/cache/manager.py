@@ -144,8 +144,7 @@ class CacheManager(Manager[Repository]):
 
                 if not config.url:
                     # Unreachable: StoreConfig rejects a urlless redis store at
-                    # construction. Kept because the type is `str | None` and a
-                    # future driver factory could bypass that validation.
+                    # construction. Kept because the type is still `str | None`.
                     raise ConfigurationError(  # pragma: no cover
                         f"cache store {name!r} needs a redis url"
                     )

@@ -20,6 +20,16 @@ Wiring is one context manager, as it is for the cache and the database:
 The design deliberately does not mirror the cache. See ADR 0001 for why the
 Store/Repository split does not transfer, and :mod:`keel.contracts.queue` for
 why only the dispatch side has a protocol.
+
+The worker runtime, the SAQ driver, the scheduler and the failed-job store are
+exported lazily through ``__getattr__`` (PEP 562). A service that only *dispatches*
+— an API replica — should not pay to import a worker runtime it will never run.
+``saq_driver`` and ``worker`` also pull in SAQ, which is an optional extra, so an
+eager import would make ``import keel.queue`` fail for anyone who did not install
+it; ``failed`` and ``scheduler`` pull in the whole database layer, which a
+queue-only process has no use for. The names are still declared under
+``TYPE_CHECKING``, so editors and both type checkers resolve them as if imported
+normally.
 """
 
 from __future__ import annotations
@@ -89,18 +99,7 @@ async def queue_lifespan(config: QueueConfig) -> AsyncIterator[QueueManager]:
         set_queue_manager(previous)
 
 
-# -- lazily exported ------------------------------------------------------
-#
-# These live behind ``__getattr__`` (PEP 562) rather than being imported here,
-# and the reason is a property worth protecting: a service that only *dispatches*
-# — an API replica — should not pay to import a worker runtime it will never
-# run. `saq_driver` and `worker` pull in SAQ, which is an optional extra, so an
-# eager import would also make `import keel.queue` fail for anyone who did not
-# install it. `failed` and `scheduler` pull in the whole database layer, which a
-# queue-only process has no use for.
-#
-# The names are still declared under TYPE_CHECKING, so editors and both type
-# checkers resolve them exactly as if they were imported normally.
+# -- lazily exported (rationale in the module docstring) ------------------
 
 if TYPE_CHECKING:
     from keel.queue.failed import DatabaseFailureSink, FailedJob, FailedJobs

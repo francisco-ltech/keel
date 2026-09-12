@@ -181,9 +181,8 @@ class FactorySeeder(SeedIfEmpty, ABC):
             :attr:`~SeedIfEmpty.model`.
     """
 
-    # `ClassVar` cannot hold a type variable, so the factory's model parameter
-    # is erased here. Nothing in this class reads a column, so nothing is lost;
-    # the concrete subclass still names a fully parameterised factory.
+    # `ClassVar` cannot hold a type variable, so the model parameter is erased here.
+    # Nothing is lost: the concrete subclass still names a parameterised factory.
     factory: ClassVar[type[ModelFactory[Any]]]
 
     __slots__ = ("_count", "_overrides")
@@ -321,9 +320,8 @@ async def run_seeders(
 
             logger.info("running seeder %s", seeder.name)
             await seeder.run(session)
-            # Sessions have autoflush off, so a seeder that only staged rows has
-            # not shown them to the database yet. Flushing here is what makes
-            # the next seeder's `should_run` — and its foreign keys — see them.
+            # Autoflush is off, so staged rows are invisible until flushed. This is
+            # what lets the next seeder's `should_run` — and its foreign keys — see them.
             await session.flush()
             results.append(SeedResult(name=seeder.name, ran=True))
 

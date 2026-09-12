@@ -150,9 +150,8 @@ async def update_user(user_id: UUID, payload: UserUpdate) -> UserRead:
         if user is None:
             raise NotFoundError(f"no user with id {user_id}")
 
-        # `exclude_unset` rather than `exclude_none`: a client that sends
-        # `is_active: null` is saying something different from one that omits it,
-        # and collapsing the two makes a partial update impossible to express.
+        # `exclude_unset`, not `exclude_none`: sending `is_active: null` means
+        # something different from omitting it, and a partial update needs both.
         changes: dict[str, Any] = payload.model_dump(exclude_unset=True)
 
         # Translate the wire field into the column. The repository never sees a

@@ -303,9 +303,8 @@ class RedisStore:
         from keel.support.sentinels import is_missing
 
         lock = self.lock(f"increment:{key}", ttl=EMULATED_INCREMENT_LOCK_TTL)
-        # `async with lock` would *fail* on contention rather than wait for it,
-        # which turns concurrent increments into a pile of LockTimeoutErrors and
-        # silently loses every one of them. Waiting is the entire point here.
+        # `async with lock` fails on contention rather than waiting, losing every
+        # concurrent increment to a LockTimeoutError. Waiting is the point here.
         await lock.block(EMULATED_INCREMENT_TIMEOUT, poll=EMULATED_INCREMENT_POLL)
         try:
             current = await self.get(key)

@@ -70,23 +70,20 @@ jobs:
       - name: Ruff format check
         run: uv run ruff format --check .
 
-      # Two checkers, deliberately — see the comment on the `ty` dev
-      # dependency. ty runs first because it is near-instant, so an obvious
-      # type error fails the job before mypy spends seven seconds finding it.
+      # ty first because it is near-instant, so an obvious error fails the job
+      # before mypy spends seven seconds finding it. ADR 0004.
       - name: ty
         run: uv run ty check packages/keel/src packages/keel/tests
 
       - name: Mypy
         run: uv run mypy packages/keel/src packages/keel/tests
 
-      # The library's own suite. Excludes the template generator, which is run
-      # separately because it resolves and installs a second project and would
-      # otherwise dominate the feedback loop on an ordinary change.
+      # The generator is excluded here: it installs a second project and would
+      # dominate the feedback loop on an ordinary change.
       - name: Pytest
         run: uv run pytest -m "not generator" -n auto --dist loadfile --cov --cov-report=term-missing
 
-      # Generates the starter template and runs its suite, lint and types. This
-      # is what stops a change to the core library from quietly breaking every
-      # project generated from it.
+      # Stops a change to the core library from quietly breaking every project
+      # generated from it.
       - name: Template generation
         run: uv run pytest -m generator -q

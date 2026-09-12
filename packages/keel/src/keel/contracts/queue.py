@@ -27,10 +27,8 @@ from collections.abc import Sequence
 from typing import TYPE_CHECKING, Protocol
 
 if TYPE_CHECKING:
-    # Deferred to break a genuine cycle: `keel.queue.__init__` imports this
-    # module, so importing `keel.queue.envelope` eagerly here fails whenever the
-    # contract happens to be imported first. `Envelope` appears only in
-    # annotations, which `from __future__ import annotations` already defers.
+    # Deferred to break a genuine cycle: `keel.queue.__init__` imports this module.
+    # `Envelope` is annotation-only, which `from __future__ import annotations` defers.
     from keel.queue.envelope import Envelope
 
 

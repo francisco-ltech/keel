@@ -29,6 +29,9 @@ build/
 # Projects generated from the template during verification
 .generated/
 
+# Per-machine Claude Code state; skills and CLAUDE.md are shared
+.claude/settings.local.json
+
 # IDE
 .idea/
 .vscode/

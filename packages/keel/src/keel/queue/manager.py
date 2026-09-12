@@ -93,9 +93,8 @@ class QueueManager(Manager[Queue]):
             case "fake":
                 return FakeQueue(name)
             case "saq":
-                # Imported lazily so a service using the sync driver — or one
-                # that only dispatches and never runs a worker — does not pay
-                # for importing a worker runtime.
+                # Imported lazily so a service that only dispatches, and never runs
+                # a worker, does not pay for importing a worker runtime.
                 from keel.queue.saq_driver import SaqQueue
 
                 if not self._config.url:  # pragma: no cover — QueueConfig validates this

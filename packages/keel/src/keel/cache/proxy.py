@@ -90,6 +90,13 @@ def use_cache(manager: CacheManager) -> AbstractContextManager[CacheManager]:
 class CacheProxy(Repository):
     """A repository that resolves its backing store on every call.
 
+    The proxy deliberately holds no state of its own and never calls
+    ``Repository.__init__``. That only works while *every* piece of
+    ``Repository``'s state is reachable through a property this class overrides:
+    adding a plain attribute to ``Repository`` and reading it as ``self._x``
+    inside a method breaks the proxy with an ``AttributeError`` at runtime.
+    Adding state to ``Repository`` means adding a property here.
+
     Args:
         resolver: Returns the repository to delegate to. Called per operation,
             which is what makes a rebind take effect immediately rather than at
@@ -99,12 +106,7 @@ class CacheProxy(Repository):
     __slots__ = ("_resolver",)
 
     def __init__(self, resolver: Callable[[], Repository]) -> None:
-        # Deliberately does not call super().__init__: this class holds no
-        # state of its own. That only works while EVERY piece of Repository's
-        # state is reachable through a property this class overrides — adding a
-        # plain attribute to Repository and reading it as `self._x` inside a
-        # method breaks the proxy with an AttributeError at runtime. Adding
-        # state to Repository means adding a property here.
+        # No super().__init__ on purpose; see the class docstring.
         self._resolver = resolver
 
     @property

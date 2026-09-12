@@ -91,9 +91,8 @@ async def cache_lifespan(
         yield manager
     finally:
         await manager.close()
-        # Restore rather than unbind. Nesting a test lifespan inside an
-        # application lifespan is normal, and unbinding would leave the outer
-        # one silently dead for the rest of the process.
+        # Restore rather than unbind: these lifespans nest, and unbinding would
+        # leave the outer manager silently dead for the rest of the process.
         set_cache_manager(previous)
 
 

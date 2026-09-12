@@ -66,14 +66,12 @@ def _fallback_uuid7() -> uuid.UUID:
             _last_timestamp_ms = timestamp_ms
             _sequence = secrets.randbits(_SEQUENCE_HEADROOM_BITS)
         else:
-            # Same millisecond, or a clock that went backwards. Both are handled
-            # by staying on the last timestamp and advancing the counter, so
-            # ordering never regresses even if the system clock does.
+            # Same millisecond, or a clock that went backwards. Holding the last
+            # timestamp and advancing the counter keeps ordering from regressing.
             _sequence += 1
             if _sequence > _RAND_A_MAX:
-                # Counter exhausted: borrow the next millisecond rather than
-                # emit a duplicate. At >4,000 ids per millisecond this drifts
-                # slightly ahead of the wall clock, which is the right trade.
+                # Counter exhausted: borrow the next millisecond rather than emit a
+                # duplicate. Above ~4,000 ids/ms this drifts ahead of the wall clock.
                 _last_timestamp_ms += 1
                 _sequence = 0
             timestamp_ms = _last_timestamp_ms

@@ -393,9 +393,8 @@ class FailedJobs(Repository[FailedJob]):
         """
         record = await self.get_or_fail(identifier)
         accepted = await queue_connection(connection).push(record.envelope_for_retry())
-        # force_delete rather than delete: if this model ever gains
-        # SoftDeleteMixin, `delete()` would quietly become a no-op that leaves
-        # the row to be retried again on the next sweep.
+        # force_delete, not delete: if this model ever gains SoftDeleteMixin,
+        # `delete()` would become a no-op and the row would be retried again.
         await self.force_delete(record)
         return accepted
 

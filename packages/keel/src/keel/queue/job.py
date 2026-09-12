@@ -252,19 +252,16 @@ class Job(ABC):
             JobError: If the subclass is not a dataclass, since there is then
                 nothing to serialise.
         """
-        # Checked with `hasattr` rather than `dataclasses.is_dataclass`: that
-        # function carries a TypeGuard which narrows the success path to Never
-        # here, since Job itself is not declared as a dataclass. The attribute
-        # is the same thing the stdlib checks.
+        # `hasattr`, not `dataclasses.is_dataclass`: its TypeGuard narrows the success
+        # path to Never here. The attribute is the same thing the stdlib checks.
         cls = type(self)
         if not hasattr(cls, "__dataclass_fields__"):
             raise JobError(
                 f"{cls.__name__} must be a dataclass: a job's payload is "
                 f"serialised field by field, so decorate it with @dataclass"
             )
-        # `fields()` rather than reading __dataclass_fields__ directly, because
-        # it filters out ClassVar pseudo-fields — which is where every job's
-        # policy lives, and none of it belongs on the wire.
+        # `fields()` rather than __dataclass_fields__: it filters out ClassVar
+        # pseudo-fields, where a job's policy lives. None of that belongs on the wire.
         return {
             field.name: getattr(self, field.name) for field in dataclasses.fields(cast("Any", cls))
         }

@@ -204,17 +204,9 @@ def alembic_config(tmp_path: Path) -> AlembicConfig:
 
 
 # -- an isolated database --------------------------------------------------
-#
-# These tests run against their own Postgres database, created for the session
-# and dropped afterwards, rather than against the shared ``keel`` one.
-#
-# Two reasons, and the second is the one that matters. Migrations create and
-# drop real tables, so sharing a database with the rest of the suite means
-# cleaning up by hand, and a hand-written cleanup list is exactly the thing that
-# goes stale. More importantly, ``compare_metadata`` reports *every* table it
-# can see: a drift check run against a database that also holds another test's
-# tables can never legitimately return "no differences". Isolation is not
-# tidiness here, it is what makes the assertion mean anything.
+
+# Not tidiness: ``compare_metadata`` reports *every* table it can see, so a drift
+# check sharing a database with other tests could never return "no differences".
 
 
 @pytest.fixture(scope="session")
