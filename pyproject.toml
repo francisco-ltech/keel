@@ -29,6 +29,7 @@ dev = [
     # Phase 0: the starter template is generated and its tests are run as part
     # of this suite, so the generator is a dev dependency of the workspace.
     "copier>=9.4",
+    "types-pyyaml>=6.0",
     "pytest-xdist>=3.8.0",
 ]
 

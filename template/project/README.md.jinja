@@ -196,6 +196,27 @@ Two things follow from that and will eventually surprise someone:
   "did this enqueue the job?" and "does the job work?" stay two tests. See
   `tests/test_jobs.py`.
 {% endif %}
+## Running it in Docker
+
+`just up` starts only Postgres and Redis. `docker compose --profile app up` adds
+{% if has_api and has_worker %}the API and the worker — the same image with a different command, which is the
+whole point of the table above.{% elif has_api %}the API.{% else %}the worker.{% endif %}
+{% if has_worker %}
+The worker's healthcheck is an *exec* probe rather than an HTTP one, since it
+serves no HTTP: `app.healthcheck` exits 0 while the heartbeat file is younger
+than `WORKER_HEALTH_MAX_AGE`. That file stays inside the container on purpose —
+on a shared volume a dead replica's heartbeat would keep a live replica green.
+{% endif %}
+### Why there is no Dockerfile
+
+Keel is a *path* dependency (`{{ keel_path }}`), which a build context cannot
+see. Compose mounts the source instead and lets uv install into a
+container-local virtualenv; `UV_PROJECT_ENVIRONMENT` keeps that out of `./.venv`,
+which holds host binaries that would not run in the container.
+
+Publishing Keel and adding a Dockerfile is the change that turns this into a
+deployment file rather than a development one.
+
 ## What is deliberately not here yet
 
 * **Authentication.** Passwords are hashed with Argon2 from day one, but there is

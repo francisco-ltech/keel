@@ -30,6 +30,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import pytest
+import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 TEMPLATE = REPO_ROOT / "template"
@@ -113,6 +114,8 @@ class Shape:
         uninstallable: Distributions that must not be — an API replica carrying
             a worker runtime is the cost this question exists to avoid.
         variables: Extra ``.env.example`` entries, with probe values.
+        processes: The services ``docker-compose.yml`` must define beyond the
+            two backing stores, one per entrypoint this shape scaffolds.
     """
 
     name: str
@@ -121,6 +124,7 @@ class Shape:
     importable: tuple[str, ...] = ()
     uninstallable: tuple[str, ...] = ()
     variables: dict[str, str] = field(default_factory=dict)
+    processes: tuple[str, ...] = ()
 
 
 ALWAYS = (
@@ -167,6 +171,7 @@ SHAPES = (
         # The point of the question. `saq` is a worker runtime, and a replica
         # that only serves HTTP should not ship one.
         uninstallable=("saq",),
+        processes=("api",),
     ),
     Shape(
         name="worker",
@@ -177,12 +182,14 @@ SHAPES = (
         # FastAPI, so a shared module that quietly does fails here.
         uninstallable=("fastapi", "uvicorn"),
         variables=QUEUE_VARIABLES,
+        processes=("worker",),
     ),
     Shape(
         name="both",
         present=API_FILES + WORKER_FILES,
         importable=("fastapi", "uvicorn", "saq"),
         variables=QUEUE_VARIABLES,
+        processes=("api", "worker"),
     ),
 )
 
@@ -261,10 +268,8 @@ def generated(
             "--defaults",
             "--data",
             f"service_shape={shape.name}",
-            # Passed explicitly rather than left to the template's default. The
-            # generated project depends on Keel by path, and a test that relies
-            # on that path being right by default fails on any checkout in a
-            # different directory — which is exactly how it failed in CI.
+            # Explicit rather than the template's default: the generated project
+            # depends on Keel by path, which breaks on a checkout elsewhere (as in CI).
             "--data",
             f"keel_path={REPO_ROOT / 'packages' / 'keel'}",
             str(TEMPLATE),
@@ -274,10 +279,8 @@ def generated(
     )
     assert result.returncode == 0, explain("copier copy", result)
 
-    # Point the generated project at its own database. Written to `.env`
-    # rather than passed per-command because the app, Alembic and pytest all
-    # read settings the same way — through `.env` — and only one of them being
-    # redirected is how half the test ends up in the shared database.
+    # Its own database, via `.env` rather than per-command: the app, Alembic and pytest
+    # all read settings there, and redirecting one leaves the rest on the shared one.
     (destination / ".env").write_text(f"DATABASE_URL={isolated_database_url}\n")
 
     installed = run(["uv", "sync"], cwd=destination)
@@ -304,6 +307,23 @@ def test_a_shape_scaffolds_only_its_own_half(generated: Path, shape: Shape) -> N
     for relative in shape.absent:
         assert not (generated / relative).exists(), (
             f"{shape.name}: {relative} belongs to the other half"
+        )
+
+
+def test_compose_runs_every_entrypoint_the_shape_scaffolds(generated: Path, shape: Shape) -> None:
+    """A shape that scaffolds an entrypoint must be able to run it.
+
+    The api-only shape shipped a compose file with no ``api`` service for as
+    long as this went unchecked: both processes sat behind one conditional on
+    the worker, so the half that needs no worker got nothing to run.
+    """
+    compose = yaml.safe_load((generated / "docker-compose.yml").read_text())
+    assert set(compose["services"]) == {"postgres", "redis", *shape.processes}
+
+    for process in shape.processes:
+        assert compose["services"][process]["profiles"] == ["app"], (
+            f"{shape.name}: {process} must stay behind the app profile so "
+            f"`just up` starts only the backing stores"
         )
 
 

@@ -41,24 +41,8 @@ services:
       retries: 5
       start_period: 5s
 
-{% if has_worker %}
-  # -- the service itself ---------------------------------------------------
-  #
-  # Behind the `app` profile, so `just up` still starts only Postgres and Redis
-  # and `docker compose --profile app up` adds the processes.
-  #
-  # **{% if has_api %}Both services are the same image with a different command.**{% else %}One image, one command here — and the same image would serve the API
-  # with `uvicorn app.main:app`.**{% endif %} That is the whole model: a service is one
-  # codebase and one schema, deployed as an API process, a worker process, or
-  # both, with the entrypoint chosen per deployment. Nothing below is a second
-  # application, and neither has configuration the other lacks.
-  #
-  # There is no Dockerfile because Keel is a *path* dependency ({{ keel_path }}),
-  # which a build context cannot see. So this mounts the source instead and lets
-  # uv install into a container-local virtualenv — `UV_PROJECT_ENVIRONMENT`
-  # keeps it out of ./.venv, which holds macOS binaries that would not run here.
-  # Publishing Keel and adding a Dockerfile is the change that makes this a
-  # deployment file rather than a development one.
+  # Behind the `app` profile, so `just up` still starts only Postgres and Redis.
+  # Deployment model and why there is no Dockerfile: see the README.
 {%- if has_api %}
 
   api:
@@ -82,6 +66,7 @@ services:
       postgres: {condition: service_healthy}
       redis: {condition: service_healthy}
 {%- endif %}
+{%- if has_worker %}
 
   worker:
     profiles: ["app"]
@@ -99,11 +84,8 @@ services:
       - .:/srv/app
       - {{ keel_path }}:{{ keel_path }}:ro
     healthcheck:
-      # An **exec probe**, not an HTTP one, because the worker serves no HTTP.
-      # `app.healthcheck` exits 0 while the heartbeat file the worker refreshes
-      # is younger than WORKER_HEALTH_MAX_AGE, and 1 once it is stale or gone.
-      # The file is inside the container on purpose: on a shared volume a dead
-      # replica's heartbeat would keep a live replica's probe green.
+      # An **exec probe**, not HTTP: the worker serves no HTTP. `app.healthcheck`
+      # exits 0 while the container-local heartbeat file is younger than its max age.
       test: ["CMD", "uv", "run", "python", "-m", "app.healthcheck"]
       interval: 10s
       timeout: 5s
@@ -114,7 +96,8 @@ services:
     depends_on:
       postgres: {condition: service_healthy}
       redis: {condition: service_healthy}
-{% endif %}
+{%- endif %}
+
 volumes:
   postgres-data:
   redis-data:
