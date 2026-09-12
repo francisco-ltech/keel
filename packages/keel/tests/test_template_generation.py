@@ -261,6 +261,12 @@ def generated(
             "--defaults",
             "--data",
             f"service_shape={shape.name}",
+            # Passed explicitly rather than left to the template's default. The
+            # generated project depends on Keel by path, and a test that relies
+            # on that path being right by default fails on any checkout in a
+            # different directory — which is exactly how it failed in CI.
+            "--data",
+            f"keel_path={REPO_ROOT / 'packages' / 'keel'}",
             str(TEMPLATE),
             str(destination),
         ],

@@ -131,6 +131,7 @@ redis_port:
 keel_path:
   type: str
   help: >-
-    Absolute path to the Keel package. Absolute rather than relative so a
-    generated project works from any directory.
-  default: "/Users/francisco/Source/keel/packages/keel"
+    Path to the Keel package this project depends on. Derived from where the
+    template was copied from, so it is correct on any checkout rather than
+    hardcoding one person's directory.
+  default: "{{ _copier_conf.src_path }}/../packages/keel"
