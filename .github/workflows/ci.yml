@@ -73,10 +73,10 @@ jobs:
       # ty first because it is near-instant, so an obvious error fails the job
       # before mypy spends seven seconds finding it. ADR 0004.
       - name: ty
-        run: uv run ty check packages/keel/src packages/keel/tests
+        run: uv run ty check src tests
 
       - name: Mypy
-        run: uv run mypy packages/keel/src packages/keel/tests
+        run: uv run mypy src tests
 
       # The generator is excluded here: it installs a second project and would
       # dominate the feedback loop on an ordinary change.

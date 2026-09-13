@@ -124,4 +124,4 @@ keel_path:
     Path to the Keel package this project depends on. Derived from where the
     template was copied from, so it is correct on any checkout rather than
     hardcoding one person's directory.
-  default: "{{ _copier_conf.src_path }}/../packages/keel"
+  default: "{{ _copier_conf.src_path }}/.."

@@ -7,27 +7,6 @@ resolution-markers = [
     "python_full_version < '3.14'",
 ]
 
-[manifest]
-members = [
-    "keel",
-]
-
-[manifest.dependency-groups]
-dev = [
-    { name = "anyio", specifier = ">=4.0" },
-    { name = "copier", specifier = ">=9.4" },
-    { name = "fastapi", specifier = ">=0.115" },
-    { name = "httpx", specifier = ">=0.27" },
-    { name = "keel", extras = ["postgres", "migrations", "factories", "queue", "auth"], editable = "packages/keel" },
-    { name = "mypy", specifier = ">=1.11" },
-    { name = "pytest", specifier = ">=8.0" },
-    { name = "pytest-cov", specifier = ">=5.0" },
-    { name = "pytest-xdist", specifier = ">=3.8.0" },
-    { name = "ruff", specifier = ">=0.6" },
-    { name = "ty", specifier = ">=0.0.80" },
-    { name = "types-pyyaml", specifier = ">=6.0" },
-]
-
 [[package]]
 name = "alembic"
 version = "1.20.0"
@@ -633,7 +612,7 @@ wheels = [
 [[package]]
 name = "keel"
 version = "0.1.0"
-source = { editable = "packages/keel" }
+source = { editable = "." }
 dependencies = [
     { name = "redis" },
     { name = "sqlalchemy", extra = ["asyncio"] },
@@ -656,6 +635,22 @@ queue = [
     { name = "saq" },
 ]
 
+[package.dev-dependencies]
+dev = [
+    { name = "anyio" },
+    { name = "copier" },
+    { name = "fastapi" },
+    { name = "httpx" },
+    { name = "keel", extra = ["auth", "factories", "migrations", "postgres", "queue"] },
+    { name = "mypy" },
+    { name = "pytest" },
+    { name = "pytest-cov" },
+    { name = "pytest-xdist" },
+    { name = "ruff" },
+    { name = "ty" },
+    { name = "types-pyyaml" },
+]
+
 [package.metadata]
 requires-dist = [
     { name = "alembic", marker = "extra == 'migrations'", specifier = ">=1.13" },
@@ -667,6 +662,22 @@ requires-dist = [
     { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0.40" },
 ]
 provides-extras = ["postgres", "migrations", "factories", "queue", "auth"]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "anyio", specifier = ">=4.0" },
+    { name = "copier", specifier = ">=9.4" },
+    { name = "fastapi", specifier = ">=0.115" },
+    { name = "httpx", specifier = ">=0.27" },
+    { name = "keel", extras = ["postgres", "migrations", "factories", "queue", "auth"], editable = "." },
+    { name = "mypy", specifier = ">=1.11" },
+    { name = "pytest", specifier = ">=8.0" },
+    { name = "pytest-cov", specifier = ">=5.0" },
+    { name = "pytest-xdist", specifier = ">=3.8.0" },
+    { name = "ruff", specifier = ">=0.6" },
+    { name = "ty", specifier = ">=0.0.80" },
+    { name = "types-pyyaml", specifier = ">=6.0" },
+]
 
 [[package]]
 name = "librt"

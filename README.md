@@ -29,8 +29,9 @@ the library by path.
 ## Layout
 
 ```
-packages/keel/     the core library
+src/keel/          the core library
 template/          copier template for new applications
+examples/          a small FastAPI app used as an end-to-end test
 docs/adr/          why things are shaped the way they are
 ```
 

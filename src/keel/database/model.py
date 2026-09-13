@@ -15,13 +15,14 @@ here, because a half-built mixin is worse than an absent one.
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, datetime
+from datetime import datetime
 from typing import Final
 
 from sqlalchemy import DateTime, MetaData, event, func
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from keel.database.ids import uuid7
+from keel.support.clock import utcnow
 
 NAMING_CONVENTION: Final[dict[str, str]] = {
     "ix": "ix_%(column_0_label)s",
@@ -32,16 +33,6 @@ NAMING_CONVENTION: Final[dict[str, str]] = {
 }
 """Deterministic constraint names, so migrations are reproducible across
 backends and a downgrade can name what it drops."""
-
-
-def utcnow() -> datetime:
-    """Return an aware UTC timestamp.
-
-    Returns:
-        The current time in UTC. Aware, always — a naive datetime in a database
-        layer is a bug waiting for a deployment in another timezone.
-    """
-    return datetime.now(UTC)
 
 
 class Model(DeclarativeBase):

@@ -1,6 +1,6 @@
 ---
 name: keel-subsystem
-description: The fixed shape every Keel subsystem takes — contract, drivers, manager, facade, fake, parametrised contract suite, ADR — and which parts transfer between subsystems and which do not. Read this BEFORE adding a subsystem to packages/keel (mail, storage, notifications, auth), before adding a driver to an existing one, and before deciding what a new protocol should contain. Covers the ADR 0000 obligations that a review will check.
+description: The fixed shape every Keel subsystem takes — contract, drivers, manager, facade, fake, parametrised contract suite, ADR — and which parts transfer between subsystems and which do not. Read this BEFORE adding a subsystem to src/keel (mail, storage, notifications, auth), before adding a driver to an existing one, and before deciding what a new protocol should contain. Covers the ADR 0000 obligations that a review will check.
 ---
 
 # Keel — adding a subsystem

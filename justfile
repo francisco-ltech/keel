@@ -47,12 +47,12 @@ lint:
 # Type-check with ty. Fast enough to run on every save.
 [group('quality')]
 types:
-    uv run ty check packages/keel/src packages/keel/tests
+    uv run ty check src tests
 
 # Type-check with mypy --strict. Slower, and the gate that CI enforces.
 [group('quality')]
 types-mypy:
-    uv run mypy packages/keel/src packages/keel/tests
+    uv run mypy src tests
 
 # Everything CI runs, minus the template generator. Run this before you stop.
 [group('quality')]

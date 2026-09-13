@@ -1,12 +1,41 @@
-# Workspace root. Deliberately not a package — it exists to hold the shared
-# tool configuration and the dev environment that `packages/keel` and the
-# generated starter app are both checked with.
-#
-# Everything here is local: the starter template depends on `keel` by path, and
-# nothing is published to an index.
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
 
-[tool.uv.workspace]
-members = ["packages/*"]
+[project]
+name = "keel"
+version = "0.1.0"
+description = "Batteries for FastAPI — a facade/driver/fake seam for application subsystems."
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "redis>=6.0",
+    "sqlalchemy[asyncio]>=2.0.40",
+]
+
+[project.optional-dependencies]
+# Installed by an application that uses the Postgres driver. Kept optional so a
+# worker or CLI that only needs the cache does not pull in a database driver.
+postgres = ["asyncpg>=0.30"]
+# Migration tooling. Optional for the same reason: a worker process runs
+# migrations never, and should not carry Alembic to do it.
+migrations = ["alembic>=1.13"]
+# Test-data factories. Optional because production never builds fake rows, and
+# a web process should not carry a data generator into its image.
+factories = ["polyfactory>=2.18"]
+# The queue driver. Optional because an API-only deployment that dispatches
+# nothing, and any process that only reads, should not carry a worker runtime.
+queue = ["saq>=0.22"]
+# Password hashing. Optional because a service that authenticates by token, or
+# not at all, stores no passwords and should not carry an Argon2 binding.
+auth = ["pwdlib[argon2]>=0.2"]
+
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/keel"]
+
+# The library and its tooling in one file. There is one distribution here, so a
+# workspace would be a directory level carrying nothing.
 
 [tool.uv.sources]
 keel = { workspace = true }
@@ -38,7 +67,7 @@ dev = [
 [tool.ruff]
 line-length = 100
 target-version = "py313"
-src = ["packages/keel/src", "packages/keel/tests"]
+src = ["src", "tests"]
 extend-exclude = [
     # Copier templates are Jinja source, not Python. `.jinja` files are not
     # parsed by ruff anyway; this keeps any stray generated output out.
@@ -81,7 +110,7 @@ known-first-party = ["keel", "examples"]
 convention = "google"
 
 [tool.ruff.lint.per-file-ignores]
-"packages/keel/tests/**/*.py" = ["D", "ANN", "S101"]
+"tests/**/*.py" = ["D", "ANN", "S101"]
 
 [tool.ruff.format]
 # defaults: double quotes, trailing commas, magic trailing comma respected
@@ -111,7 +140,7 @@ disallow_incomplete_defs = false
 # ---------------------------------------------------------------- ty
 
 [tool.ty.src]
-include = ["packages/keel/src", "packages/keel/tests", "examples"]
+include = ["src", "tests", "examples"]
 
 [tool.ty.environment]
 python-version = "3.13"
@@ -119,7 +148,7 @@ python-version = "3.13"
 # ---------------------------------------------------------------- pytest
 
 [tool.pytest.ini_options]
-testpaths = ["packages/keel/tests"]
+testpaths = ["tests"]
 # The repo root on sys.path so `examples/` is importable by the integration
 # test. The example is documentation that has to keep working.
 pythonpath = ["."]
@@ -143,7 +172,7 @@ markers = [
 # ---------------------------------------------------------------- coverage
 
 [tool.coverage.run]
-source = ["packages/keel/src/keel"]
+source = ["src/keel"]
 branch = true
 
 [tool.coverage.report]

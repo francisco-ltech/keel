@@ -1,6 +1,6 @@
 ---
 name: keel-template
-description: How to change the Keel copier template safely and verify it, including the three service shapes and the traps that have broken generated projects before. Read this BEFORE editing anything under template/, before adding a copier question, and before changing anything in packages/keel that a generated project imports. Covers why the generator suite is the only real check and what it costs.
+description: How to change the Keel copier template safely and verify it, including the three service shapes and the traps that have broken generated projects before. Read this BEFORE editing anything under template/, before adding a copier question, and before changing anything in src/keel that a generated project imports. Covers why the generator suite is the only real check and what it costs.
 ---
 
 # Keel — changing the starter template
@@ -24,7 +24,7 @@ To look at output by hand:
 ```sh
 uv run copier copy --trust --defaults \
   --data service_shape=worker \
-  --data keel_path="$PWD/packages/keel" \
+  --data keel_path="$PWD/src/keel" \
   template /tmp/gen && cd /tmp/gen && uv sync && just check
 ```
 
