@@ -32,8 +32,15 @@ from pathlib import Path
 import pytest
 import yaml
 
-REPO_ROOT = Path(__file__).resolve().parents[3]
+REPO_ROOT = Path(__file__).resolve().parents[1]
 TEMPLATE = REPO_ROOT / "template"
+
+if not (TEMPLATE / "copier.yml").is_file():  # pragma: no cover - a layout change, not a run
+    raise RuntimeError(
+        f"{REPO_ROOT} is not the repository root, so this suite would hand copier "
+        f"a path that is not a template. Fix the `parents[...]` above. Moving the "
+        f"package once already turned this into 'Local template must be a directory'."
+    )
 
 pytestmark = [pytest.mark.generator, pytest.mark.postgres]
 
@@ -271,7 +278,7 @@ def generated(
             # Explicit rather than the template's default: the generated project
             # depends on Keel by path, which breaks on a checkout elsewhere (as in CI).
             "--data",
-            f"keel_path={REPO_ROOT / 'packages' / 'keel'}",
+            f"keel_path={REPO_ROOT}",
             str(TEMPLATE),
             str(destination),
         ],
