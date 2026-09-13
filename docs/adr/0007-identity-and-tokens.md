@@ -114,6 +114,24 @@ without anything depending on it in production.
 * **Token rotation / refresh pairs.** Real, and a decision about session policy
   rather than storage. `revoke` plus `issue` composes it today.
 
+### 8. `AuthenticationRequiredError` is a 500, and edges must not translate it
+
+`require_identity()` raises when nothing is bound. That means the edge did not
+authenticate the caller, or authenticated and did not bind the result — a
+wiring bug, not a rejected credential.
+
+The tempting mapping is 401, and it is wrong. A caller who reaches it has
+usually sent a working credential that nothing read, so 401 tells them to retry
+with the thing that just succeeded and they loop; worse, the failure lands in
+the 4xx bucket, where nobody is paged, so a route that silently authenticates
+nobody looks like ordinary login noise. It belongs beside `ConfigurationError`
+as a 500: it should have been impossible.
+
+Rejecting a missing or unusable credential is a different error, raised at the
+edge before any service runs, by whatever dependency reads the header. Keeping
+the two apart is what makes "some users can never sign in" show up as an alarm
+rather than a metric.
+
 ## Consequences
 
 **`keel.auth` exports tokens lazily.** Hashing pulls in pwdlib, an optional

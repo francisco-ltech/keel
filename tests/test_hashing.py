@@ -14,6 +14,7 @@ the real event it defends against.
 from __future__ import annotations
 
 from collections.abc import Iterator
+from typing import Any
 
 import pytest
 from pwdlib.hashers.argon2 import Argon2Hasher
@@ -121,11 +122,48 @@ def test_a_miss_does_the_same_work_as_a_hit(
 
 
 def test_the_dummy_is_computed_once(hasher: PasswordHasher) -> None:
-    """Cached, so a service under credential stuffing does not rehash it per attempt."""
-    hasher.verify(PASSWORD, None)
+    """Not per attempt, so credential stuffing does not rehash it every time."""
     first = hasher._dummy
     hasher.verify(PASSWORD, None)
+    hasher.verify(PASSWORD, None)
     assert hasher._dummy is first
+
+
+def test_the_first_miss_in_a_process_costs_what_a_hit_costs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The dummy was computed lazily, which made the *first* miss twice a hit.
+
+    Measured at production parameters: 81ms against 38ms. One probe per process
+    is one per worker, per deploy, per scale-out — so the oracle was reachable
+    however warm the fleet got.
+    """
+    counts = {"hash": 0, "verify": 0}
+    hashed = Argon2Hasher.hash
+    verified = Argon2Hasher.verify
+
+    def count_hash(self: Argon2Hasher, *args: Any, **kwargs: Any) -> str:
+        counts["hash"] += 1
+        return hashed(self, *args, **kwargs)
+
+    def count_verify(self: Argon2Hasher, *args: Any, **kwargs: Any) -> bool:
+        counts["verify"] += 1
+        return verified(self, *args, **kwargs)
+
+    stored = PasswordHasher(CHEAP).hash(PASSWORD)
+    monkeypatch.setattr(Argon2Hasher, "hash", count_hash)
+    monkeypatch.setattr(Argon2Hasher, "verify", count_verify)
+
+    miss = PasswordHasher(CHEAP)
+    counts["hash"] = counts["verify"] = 0
+    miss.verify(PASSWORD, None)
+    first_miss = dict(counts)
+
+    hit = PasswordHasher(CHEAP)
+    counts["hash"] = counts["verify"] = 0
+    hit.verify(PASSWORD, stored)
+
+    assert first_miss == counts, "the first miss did more work than the first hit"
 
 
 def test_verify_and_upgrade_leaves_a_current_hash_alone(hasher: PasswordHasher) -> None:

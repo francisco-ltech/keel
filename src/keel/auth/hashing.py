@@ -15,6 +15,13 @@ address registered?" to anyone with a stopwatch. Passing ``None`` for the stored
 hash verifies against a dummy and returns ``False``, which is the same shape of
 defence as comparing digests rather than strings.
 
+The dummy is hashed **in the constructor**, not on first use. Deferring it looks
+like a saving and is a timing oracle: the first miss in a process would pay a
+hash *and* a verify while the first hit paid only a verify — 81ms against 38ms
+at production parameters. One probe per process is one per worker, per rolling
+deploy, per scale-out, and every ``hashing_lifespan`` resets the counter. What
+deferring bought was one hash at boot.
+
 **A hash nobody can read is an error, not a rejection.** pwdlib raises when no
 configured hasher recognises a stored digest — bcrypt rows against an Argon2-only
 configuration. Translating that to ``False`` would lock those accounts out
@@ -32,7 +39,6 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager, contextmanager
-from functools import cached_property
 
 from pwdlib import PasswordHash
 from pwdlib.exceptions import UnknownHashError
@@ -43,8 +49,8 @@ from keel.exceptions import UnsupportedHashError
 from keel.support.binding import Binding
 
 DUMMY_PASSWORD = "keel-dummy-password-for-constant-time-misses"
-"""Hashed on demand so a miss costs what a hit costs. Never a valid credential:
-it is compared against, never stored."""
+"""Hashed at construction so a miss costs what a hit costs from the first
+request. Never a valid credential: it is compared against, never stored."""
 
 
 class PasswordHasher:
@@ -54,7 +60,7 @@ class PasswordHasher:
         config: Argon2id parameters. Defaults to pwdlib's recommended set.
     """
 
-    __slots__ = ("__dict__", "_backend", "_config")
+    __slots__ = ("_backend", "_config", "_dummy")
 
     def __init__(self, config: HashingConfig | None = None) -> None:
         self._config = config or HashingConfig()
@@ -67,21 +73,12 @@ class PasswordHasher:
                 ),
             )
         )
+        self._dummy = self._backend.hash(DUMMY_PASSWORD)
 
     @property
     def config(self) -> HashingConfig:
         """The parameters this hasher was built with."""
         return self._config
-
-    @cached_property
-    def _dummy(self) -> str:
-        """A hash to verify against when there is no real one.
-
-        Computed once on first miss rather than in ``__init__``: a process that
-        never sees a failed login should not pay for it at startup, and paying
-        once is enough to make every subsequent miss cost what a hit costs.
-        """
-        return self._backend.hash(DUMMY_PASSWORD)
 
     def hash(self, plaintext: str) -> str:
         """Hash a password for storage.

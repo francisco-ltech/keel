@@ -51,7 +51,13 @@ if TYPE_CHECKING:
         token_store,
         use_token_manager,
     )
-    from keel.auth.config import HashingConfig, TokenConfig
+    from keel.auth.config import (
+        DEFAULT_TOKEN_PREFIX,
+        DEFAULT_TOKEN_TTL,
+        MINIMUM_MEMORY_COST,
+        HashingConfig,
+        TokenConfig,
+    )
     from keel.auth.fake import FakeTokenStore, TokenAssertionError
     from keel.auth.hashing import (
         PasswordHasher,
@@ -69,6 +75,9 @@ if TYPE_CHECKING:
 
 _LAZY: Final[dict[str, str]] = {
     "FakeTokenStore": "keel.auth.fake",
+    "DEFAULT_TOKEN_PREFIX": "keel.auth.config",
+    "DEFAULT_TOKEN_TTL": "keel.auth.config",
+    "MINIMUM_MEMORY_COST": "keel.auth.config",
     "HashingConfig": "keel.auth.config",
     "IssuedToken": "keel.auth.tokens",
     "PasswordHasher": "keel.auth.hashing",
@@ -124,6 +133,9 @@ def __dir__() -> list[str]:
 
 
 __all__ = [
+    "DEFAULT_TOKEN_PREFIX",
+    "DEFAULT_TOKEN_TTL",
+    "MINIMUM_MEMORY_COST",
     "FakeTokenStore",
     "HashingConfig",
     "Identity",

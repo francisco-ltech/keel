@@ -66,6 +66,14 @@ class AuthenticationRequiredError(KeelError):
 
     A programming error rather than a failed login: the edge either did not
     authenticate the caller or did not bind the result.
+
+    **An edge must not map this to 401.** A caller reaching it has usually sent
+    a perfectly good credential that nothing read, so a 401 tells them to retry
+    with the thing that just worked, and hides the wiring bug among ordinary
+    auth failures where no alarm looks. It belongs with
+    :class:`ConfigurationError` as a 500 — it should have been impossible.
+    Rejecting a *missing or bad* credential is the edge's own error to raise,
+    at the edge, before any service runs.
     """
 
 
