@@ -12,8 +12,22 @@ it on the one operation people run while panicking about a compromised account.
 **The index is allowed to hold stale members.** Redis expires the record and
 cannot reach into the set to say so, and chasing that with keyspace
 notifications would make correctness depend on a server setting. So reads skip
-members whose record is gone, and :meth:`purge_expired` prunes them. The index
-is a hint; the record is the truth.
+members whose record is gone and remove them on the way past, and
+:meth:`purge_expired` sweeps the rest. The index is a hint; the record is the
+truth.
+
+**Nothing here ever deletes the index key.** Every removal is an ``SREM`` of
+digests this call actually read, and Redis drops a set once its last member
+goes. Deleting the key instead would destroy any digest added between the read
+and the write, leaving a live token that no longer appears in its subject's
+index — invisible to ``issued_for`` and immune to ``revoke_subject`` for the
+rest of its life. A review caught that; the regression tests name it.
+
+**The index carries no TTL**, and an earlier attempt to give it one was worse
+than nothing: ``EXPIRE ... GT`` refuses on a key that has no expiry, and
+``SADD`` never creates one, so the call failed silently on every issue. Pruning
+is what bounds the set, which makes :meth:`purge_expired` a real operation to
+schedule rather than an optimisation.
 
 ``purge_expired`` scans this store's namespace rather than the keyspace, for the
 reason the cache's ``flush`` does: token stores share servers, and an
@@ -28,6 +42,7 @@ from typing import TYPE_CHECKING, Final
 from uuid import UUID
 
 from redis.asyncio import Redis
+from redis.exceptions import ResponseError
 
 from keel.auth.identity import Identity
 from keel.auth.tokens import (
@@ -39,6 +54,7 @@ from keel.auth.tokens import (
     encode_record,
     generate_token,
 )
+from keel.exceptions import ConfigurationError
 from keel.support.clock import utcnow
 from keel.support.keys import KeyNamespace
 
@@ -56,6 +72,30 @@ SCAN_BATCH: Final = 500
 not to block the server on one."""
 
 
+def _require_namespace(namespace: KeyNamespace) -> KeyNamespace:
+    """Return *namespace*, refusing one that scopes nothing.
+
+    Args:
+        namespace: The configured namespace.
+
+    Returns:
+        The namespace, unchanged.
+
+    Raises:
+        ConfigurationError: If it is empty. ``child()`` would still produce a
+            usable-looking prefix, so the guard in ``KeyNamespace.pattern()``
+            never fires and ``purge_expired`` sweeps every ``subject:*`` key on
+            the server instead.
+    """
+    if namespace.is_empty:
+        raise ConfigurationError(
+            "a redis token store needs a non-empty namespace: purge_expired "
+            "would otherwise scan keys belonging to anything else sharing the "
+            "server"
+        )
+    return namespace
+
+
 class RedisTokenStore:
     """Stores tokens in Redis.
 
@@ -66,7 +106,7 @@ class RedisTokenStore:
         ttl: Default lifetime in seconds, or ``None`` for no expiry.
     """
 
-    __slots__ = ("_client", "_name", "_records", "_subjects", "_ttl")
+    __slots__ = ("_client", "_name", "_owns_client", "_records", "_subjects", "_ttl")
 
     def __init__(
         self,
@@ -75,12 +115,15 @@ class RedisTokenStore:
         name: str = "redis",
         namespace: KeyNamespace,
         ttl: float | None = None,
+        owns_client: bool = False,
     ) -> None:
+        namespace = _require_namespace(namespace)
         self._client = client
         self._name = name
         self._records = namespace.child(RECORDS)
         self._subjects = namespace.child(SUBJECTS)
         self._ttl = ttl
+        self._owns_client = owns_client
 
     @classmethod
     def from_url(cls, url: str, config: TokenConfig) -> RedisTokenStore:
@@ -94,9 +137,11 @@ class RedisTokenStore:
             A store owning its own client.
         """
         return cls(
-            Redis.from_url(url),
+            Redis.from_url(url, decode_responses=False),
+            name=config.driver,
             namespace=KeyNamespace(config.prefix),
             ttl=config.ttl,
+            owns_client=True,
         )
 
     @property
@@ -131,16 +176,12 @@ class RedisTokenStore:
         lifetime = record.ttl_remaining()
 
         pipe = self._client.pipeline(transaction=True)
-        key = self._records.apply(record.digest)
-        index = self._subjects.apply(str(record.subject))
-        pipe.set(key, encode_record(record), ex=None if lifetime is None else int(lifetime) + 1)
-        pipe.sadd(index, record.digest)
-        if lifetime is None:
-            pipe.persist(index)
-        else:
-            # The index must outlive its longest-lived member, never the reverse:
-            # a set that expired first would strand tokens nothing can revoke.
-            pipe.expire(index, int(lifetime) + 1, gt=True)
+        pipe.set(
+            self._records.apply(record.digest),
+            encode_record(record),
+            ex=None if lifetime is None else int(lifetime) + 1,
+        )
+        pipe.sadd(self._subjects.apply(str(record.subject)), record.digest)
         await pipe.execute()
         return IssuedToken(plaintext=plaintext, record=record)
 
@@ -186,15 +227,21 @@ class RedisTokenStore:
             How many live tokens were removed.
         """
         index = self._subjects.apply(str(subject))
-        digests: set[bytes | str] = await self._client.smembers(index)
-        if not digests:
+        members: set[bytes | str] = await self._client.smembers(index)
+        if not members:
             return 0
 
-        keys = [self._records.apply(self._as_text(digest)) for digest in digests]
-        live = sum(1 for raw in await self._client.mget(keys) if raw is not None)
+        digests = [self._as_text(member) for member in members]
+        keys = [self._records.apply(digest) for digest in digests]
+        raws = await self._client.mget(keys)
+        now = utcnow()
+        live = sum(1 for raw in raws if raw is not None and not decode_record(raw).is_expired(now))
+
         pipe = self._client.pipeline(transaction=True)
         pipe.unlink(*keys)
-        pipe.unlink(index)
+        # SREM only the digests this call read. Deleting the index key would take
+        # a token issued since the SMEMBERS with it, and nothing could revoke it.
+        pipe.srem(index, *digests)
         await pipe.execute()
         return live
 
@@ -208,49 +255,87 @@ class RedisTokenStore:
             The records, newest first.
         """
         index = self._subjects.apply(str(subject))
-        digests: set[bytes | str] = await self._client.smembers(index)
-        if not digests:
+        members: set[bytes | str] = await self._client.smembers(index)
+        if not members:
             return []
 
-        ordered = [self._as_text(digest) for digest in digests]
-        raws = await self._client.mget([self._records.apply(digest) for digest in ordered])
+        digests = [self._as_text(member) for member in members]
+        raws = await self._client.mget([self._records.apply(digest) for digest in digests])
         now = utcnow()
-        live = [
-            record
-            for raw in raws
-            if raw is not None and not (record := decode_record(raw)).is_expired(now)
-        ]
+        live: list[TokenRecord] = []
+        dead: list[str] = []
+        for digest, raw in zip(digests, raws, strict=True):
+            record = None if raw is None else decode_record(raw)
+            if record is not None and not record.is_expired(now):
+                live.append(record)
+            else:
+                dead.append(digest)
+        if dead:
+            # Self-healing: a listing already paid for the reads, so it may as
+            # well leave the index smaller than it found it.
+            await self._client.srem(index, *dead)
         return sorted(live, key=lambda record: record.issued_at, reverse=True)
 
     async def purge_expired(self) -> int:
-        """Prune index members whose record Redis has already dropped.
+        """Reclaim expired records and the index members pointing at them.
 
-        The records need no purging — Redis expired them. What accumulates is
-        the sets pointing at them, so this is the operation that keeps a
-        long-lived subject's index from growing without bound.
+        Redis drops most records itself, so the work here is mostly the sets,
+        which nothing else bounds. Since the index carries no TTL, this is a
+        real operation to schedule rather than an optimisation.
 
         Returns:
-            How many stale members were removed.
+            How many entries were reclaimed.
         """
-        removed = 0
+        reclaimed = 0
         async for index in self._client.scan_iter(match=self._subjects.pattern(), count=SCAN_BATCH):
-            digests: set[bytes | str] = await self._client.smembers(index)
-            if not digests:
-                await self._client.unlink(index)
-                continue
-            ordered = [self._as_text(digest) for digest in digests]
-            raws = await self._client.mget([self._records.apply(digest) for digest in ordered])
-            stale = [digest for digest, raw in zip(ordered, raws, strict=True) if raw is None]
-            if stale:
-                await self._client.srem(index, *stale)
-                removed += len(stale)
-            if len(stale) == len(ordered):
-                await self._client.unlink(index)
-        return removed
+            reclaimed += await self._purge_index(index)
+        return reclaimed
+
+    async def _purge_index(self, index: bytes | str) -> int:
+        """Reclaim one subject's dead entries.
+
+        Args:
+            index: The subject set's key.
+
+        Returns:
+            How many entries were reclaimed. Zero if the key is not a set —
+            something else's key inside this namespace must not wedge
+            housekeeping for every subject after it in the scan.
+        """
+        try:
+            members: set[bytes | str] = await self._client.smembers(index)
+        except ResponseError:
+            return 0
+        if not members:
+            return 0
+
+        digests = [self._as_text(member) for member in members]
+        raws = await self._client.mget([self._records.apply(digest) for digest in digests])
+        now = utcnow()
+        dead = [
+            digest
+            for digest, raw in zip(digests, raws, strict=True)
+            if raw is None or decode_record(raw).is_expired(now)
+        ]
+        if not dead:
+            return 0
+
+        pipe = self._client.pipeline(transaction=True)
+        pipe.unlink(*[self._records.apply(digest) for digest in dead])
+        # SREM, never a delete of the index key: a digest added since the
+        # SMEMBERS above would go with it and become unrevocable.
+        pipe.srem(index, *dead)
+        await pipe.execute()
+        return len(dead)
 
     async def close(self) -> None:
-        """Close the Redis connection. Tokens outlive the process."""
-        await self._client.aclose()
+        """Close the client, but only if this store created it.
+
+        An application sharing one client between the cache and the token store
+        would otherwise lose the pool when either shuts down.
+        """
+        if self._owns_client:
+            await self._client.aclose()
 
     @staticmethod
     def _as_text(raw: bytes | str) -> str:

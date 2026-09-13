@@ -33,11 +33,13 @@ development environment avoids needing a worker at all; ``null`` discards them,
 which is what a smoke-test environment wants.
 """
 
-DEFAULT_PREFIX: Final = "keel"
+DEFAULT_PREFIX: Final = "keel:queue"
 """Namespace for queue keys.
 
 Non-empty for the reason the cache's is: a shared Redis holds other things, and
-an unnamespaced queue makes administrative operations dangerous.
+an unnamespaced queue makes administrative operations dangerous. A *sibling* of
+the cache's prefix rather than sharing it, so a cache flush cannot drain the
+queue.
 """
 
 

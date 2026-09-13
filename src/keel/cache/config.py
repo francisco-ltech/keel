@@ -33,12 +33,14 @@ Named after the subsystem rather than the framework, matching Laravel's
 meaningful if Keel is ever replaced.
 """
 
-DEFAULT_PREFIX: Final = "keel"
-"""Namespace applied when the environment does not specify one.
+DEFAULT_PREFIX: Final = "keel:cache"
 
-Not the empty string: an unnamespaced network store owns the server's entire
-keyspace, which makes ``flush()`` a destructive operation against anything else
-sharing it."""
+"""Namespace for cache keys.
+
+A *sibling* of the queue's and the token store's, never a parent. All three read
+the same ``REDIS_URL``, and ``flush()`` deletes everything under this prefix — so
+a cache rooted at ``keel`` makes clearing the cache also drain the queue and sign
+every user out. That is not hypothetical; it is what the flat prefix did."""
 
 KNOWN_DRIVERS: Final = frozenset({"redis", "array", "null"})
 """Drivers this package ships.

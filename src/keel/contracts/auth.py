@@ -122,14 +122,19 @@ class TokenStore(Protocol):
         ...
 
     async def purge_expired(self) -> int:
-        """Delete expired records.
+        """Reclaim whatever an expired token left behind.
 
-        Housekeeping for a backend that does not expire keys itself. A store
-        whose backend does is free to do nothing here — either way, an expired
-        token must already fail to resolve, so this only reclaims space.
+        Housekeeping only. An expired token must already fail to resolve without
+        this ever running, so calling it can never change an authentication
+        outcome — it reclaims space, and a live token must survive it untouched.
 
         Returns:
-            How many records were removed.
+            How many entries were reclaimed. **Not comparable between drivers**:
+            one backend expires records itself and leaves only index entries to
+            sweep, another holds the records until told. The contract suite
+            asserts the guarantee above rather than the number, because pinning
+            the number would mean pinning one backend's bookkeeping onto all of
+            them.
         """
         ...
 
