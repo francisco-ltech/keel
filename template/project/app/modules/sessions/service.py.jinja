@@ -1,0 +1,142 @@
+"""Business logic for sessions.
+
+The same two rules as every other service — ``uow()`` spans the atomic work, and
+what comes back is a schema — plus four that are specific to a login endpoint
+and are each the kind of thing that is invisible until it is a breach or an
+outage.
+
+**The miss costs what the hit costs.** When there is no such address, the stored
+hash passed to the verifier is ``None`` rather than the function returning
+early. Verifying nothing is instant and verifying Argon2 is not, so an early
+return answers "is this address registered?" to anyone with a stopwatch — and it
+answers it for every address, in a loop. :meth:`keel.auth.PasswordHasher.verify`
+hashes against a dummy instead and returns ``False``. The database round trips
+have to match too, which is why the row is read before the branch and the branch
+happens after the hash.
+
+**The reply says nothing either.** A wrong password and an unknown address
+produce the same 401 with the same message, for the same reason.
+
+**The hash runs on a thread, outside every unit of work.** Argon2 is ~40 ms of
+CPU on purpose. Called inline from ``async def`` it stalls the whole event loop
+for that long — every other request in the process, not just this one — and
+called inside ``uow()`` it does that while a pooled connection sits idle waiting
+for it. So this function reads the row, closes the block, hashes on a worker
+thread, and reopens a block only if there is a replacement to persist. Two
+transactions per request is normal (ADR 0002); a connection held across 40 ms of
+arithmetic is not.
+
+**Rehash on login.** Cost parameters get raised, and every password hashed
+before that stays cheap forever unless something notices.
+``verify_and_upgrade`` hands back a replacement when the stored hash is stale,
+and this is the one moment the plaintext exists to make it with.
+"""
+
+from __future__ import annotations
+
+import anyio
+from keel.auth import Identity, issue_token, password_hasher, require_identity, revoke_token
+from keel.database import uow
+
+from app.errors import AuthenticationError
+from app.modules.sessions.schemas import SessionRead, SignIn
+from app.modules.users.repository import UserRepository
+from app.modules.users.schemas import UserRead
+
+LABEL_MAX_LENGTH = 100
+"""Cap on the free text stored beside a token. It comes from a request header,
+and an uncapped header is an uncapped write to the token store."""
+
+INVALID_CREDENTIALS = "email or password is incorrect"
+"""One message for both failures. Two would be an enumeration oracle in prose."""
+
+
+async def sign_in(payload: SignIn, *, label: str | None = None) -> SessionRead:
+    """Exchange an email and password for a bearer token.
+
+    Args:
+        payload: The credentials.
+        label: What a "signed-in devices" listing should show for this token —
+            the user agent, typically. Truncated here rather than at the edge,
+            because this is the layer that decides what gets stored.
+
+    Returns:
+        The new session, including the token's only readable copy.
+
+    Raises:
+        AuthenticationError: If the credentials do not match, or the account is
+            disabled.
+    """
+    # One transaction and one query whether or not the address exists, and only
+    # values leave it: the row is detached the moment the block ends.
+    async with uow() as session:
+        user = await UserRepository(session).get_by_email(payload.email)
+        user_id = None if user is None else user.id
+        stored = None if user is None else user.hashed_password
+        is_active = user is not None and user.is_active
+
+    # `None`, not an early return: that is what makes an unknown address cost the
+    # same as a wrong password. On a thread, so it costs the loop nothing.
+    hasher = password_hasher()
+    matched, replacement = await anyio.to_thread.run_sync(
+        hasher.verify_and_upgrade, payload.password, stored
+    )
+    if user_id is None or not matched:
+        raise AuthenticationError(INVALID_CREDENTIALS)
+    if not is_active:
+        raise AuthenticationError("this account is disabled")
+
+    # A second unit of work, for the one case that writes. Conditional on the
+    # hash we verified: a password changed during those ~40ms must not be lost.
+    if replacement is not None and stored is not None:
+        async with uow() as session:
+            await UserRepository(session).replace_hash_if_unchanged(
+                user_id, expected=stored, new=replacement
+            )
+
+    # No claims: an `Identity` is copied into the token store per session, so a
+    # cached email address would go stale on the first change and read nothing.
+    issued = await issue_token(
+        Identity(id=user_id), label=None if label is None else label[:LABEL_MAX_LENGTH]
+    )
+    return SessionRead(access_token=issued.plaintext, expires_at=issued.expires_at)
+
+
+async def sign_out(token: str) -> None:
+    """Revoke one token, leaving the caller's other sessions alone.
+
+    No unit of work: this touches the token store and nothing in the database,
+    and opening a transaction to do nothing still borrows a connection. Nothing
+    is raised for a token that was already gone — the caller asked to be signed
+    out and they are.
+
+    Args:
+        token: The token as presented, not its digest. The store hashes it.
+    """
+    await revoke_token(token)
+
+
+async def current_user() -> UserRead:
+    """Return the signed-in user's own record.
+
+    Reads the caller from the context rather than taking it as an argument,
+    which is what makes the same call work unchanged inside a job running under
+    ``acting_as``.
+
+    Returns:
+        The caller's user record.
+
+    Raises:
+        AuthenticationError: If the row behind the token has since been deleted.
+            A 401 rather than a 404: the missing thing is the credential's
+            subject, so the credential is what stopped being valid.
+    """
+    identity = require_identity()
+    async with uow() as session:
+        user = await UserRepository(session).get(identity.id)
+        if user is None:
+            raise AuthenticationError("this account no longer exists")
+        return UserRead.model_validate(user)
+
+
+__all__ = ["INVALID_CREDENTIALS", "LABEL_MAX_LENGTH", "current_user", "sign_in", "sign_out"]

@@ -1,0 +1,21 @@
+"""The sessions domain — signing in, signing out, and who is asking.
+
+Three files where the other modules have five, and the two that are missing are
+the interesting part. There is no ``models.py`` and no ``repository.py``: a
+session here **is** a bearer token in Keel's token store, so there is no table
+for Alembic to create and nothing to query. The service borrows the users
+module's repository for the one row it needs, which is the sanctioned direction
+of coupling in this layout — sideways into a sibling, never upward into a
+router.
+
+* ``schemas`` — the credentials in, the token out.
+* ``service`` — verifies the password, issues and revokes the token.
+* ``router`` — HTTP, and nothing else.
+
+**Named ``sessions`` rather than ``auth``** because it is a resource with a
+lifetime: a client creates one and deletes one, and those are ``POST`` and
+``DELETE`` on a noun. ``POST /auth`` names an activity and gives the next
+endpoint nowhere to go.
+"""
+
+from __future__ import annotations

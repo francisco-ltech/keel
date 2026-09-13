@@ -12,12 +12,13 @@ The dependency points from the application to the library, never back.
 
 **Each subsystem carries its own prefix; there is no nested delimiter.** Every
 group below is a ``BaseSettings`` in its own right with an ``env_prefix``, so
-the variables read as ``DATABASE_URL``, ``DB_POOL_SIZE``, ``CACHE_STORE``{% if has_worker %},
-``QUEUE_DRIVER`` and ``WORKER_HEALTH_FILE``{% endif %} — the names a hosting
-platform injects. Adding a subsystem means a new ``<SUBSYSTEM>_*`` group, not a new
-top-level key. Setting ``env_nested_delimiter="__"`` on :class:`Settings`
-instead would silently ignore every one of those names, because
-``extra="ignore"`` means a variable that binds to nothing does not raise.
+the variables read as ``DATABASE_URL``, ``DB_POOL_SIZE``, ``CACHE_STORE``,
+``HASHING_TIME_COST``{% if has_api %}, ``TOKEN_DRIVER``{% endif %}{% if has_worker %}, ``QUEUE_DRIVER``,
+``WORKER_HEALTH_FILE``{% endif %} — the names a hosting platform injects. Adding a
+subsystem means a new ``<SUBSYSTEM>_*`` group, not a new top-level key. Setting
+``env_nested_delimiter="__"`` on :class:`Settings` instead would silently ignore
+every one of those names, because ``extra="ignore"`` means a variable that binds
+to nothing does not raise.
 """
 
 from __future__ import annotations
@@ -27,12 +28,13 @@ from functools import lru_cache
 from pathlib import Path
 {%- endif %}
 
+{% if has_api %}from keel.auth import DEFAULT_TOKEN_TTL, HashingConfig, TokenConfig{% else %}from keel.auth import HashingConfig{% endif %}
 from keel.cache import CacheConfig, StoreConfig
 from keel.database import DatabaseConfig
 {%- if has_worker %}
 from keel.queue import QueueConfig
 {%- endif %}
-from pydantic import AliasChoices, Field
+from pydantic import AliasChoices, Field{% if has_api %}, field_validator{% endif %}
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -68,9 +70,12 @@ class CacheSettings(BaseSettings):
 
     Attributes:
         store: ``redis``, ``array`` or ``null``.
-        prefix: The key namespace this application owns. Never empty on a shared
+        prefix: The key namespace this store owns. Never empty on a shared
             backend — an unnamespaced store's ``flush()`` takes everything else
-            with it.
+            with it — and never a *parent* of another subsystem's namespace,
+            which is why this is ``<slug>:cache`` and not ``<slug>``: the
+            queue's{% if has_api %} and the token store's{% endif %} keys would otherwise sit inside the
+            range ``flush()`` scans.
         redis_url: Connection URL for the ``redis`` driver.
         default_ttl: Lifetime applied when a caller does not specify one.
     """
@@ -78,7 +83,7 @@ class CacheSettings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="CACHE_", env_file=".env", extra="ignore")
 
     store: str = "redis"
-    prefix: str = "{{ project_slug }}"
+    prefix: str = "{{ project_slug }}:cache"
     redis_url: str = Field(
         default="redis://localhost:{{ redis_port }}/0",
         validation_alias=AliasChoices("REDIS_URL", "CACHE_REDIS_URL"),
@@ -89,6 +94,107 @@ class CacheSettings(BaseSettings):
     )
 
 
+class HashingSettings(BaseSettings):
+    """What a password hash costs.
+
+    Read by every entrypoint, because the users service hashes on create and on
+    a password change and a job may call it. The knobs exist for the test
+    suite: Argon2 at the recommended parameters costs tens of milliseconds by
+    design, and a suite that registers a user per test pays it per test.
+
+    Keel refuses parameters below the floors that make Argon2 memory-hard, at
+    load time. Those floors are not restated here — a second copy is a second
+    thing to drift.
+
+    Attributes:
+        time_cost: Iterations.
+        memory_cost: Memory per hash, in KiB.
+        parallelism: Lanes.
+    """
+
+    model_config = SettingsConfigDict(env_prefix="HASHING_", env_file=".env", extra="ignore")
+
+    time_cost: int = 3
+    memory_cost: int = 65536
+    parallelism: int = 4
+
+{% if has_api %}
+class TokenSettings(BaseSettings):
+    """Where bearer tokens live and how long they last.
+
+    Attributes:
+        driver: ``redis`` (survives a restart, shared by every replica) or
+            ``memory`` (a single process, and everyone is signed out when it
+            restarts). Keel registers a third, ``fake``, and this class refuses
+            it — see :meth:`_not_the_test_double`.
+        redis_url: Connection URL for the ``redis`` driver. The same
+            ``REDIS_URL`` the cache reads — one Redis, one variable.
+        prefix: Key namespace, a sibling of the cache's and the queue's.
+        ttl: Default lifetime in seconds, or ``None`` for tokens that never
+            expire. ``TOKEN_TTL=never`` is how a deployment asks for that,
+            spelled out, because an empty value meaning "forever" is the kind
+            of default nobody intends. Keel's own default, not a second copy of
+            the number.
+    """
+
+    model_config = SettingsConfigDict(env_prefix="TOKEN_", env_file=".env", extra="ignore")
+
+    driver: str = "redis"
+    redis_url: str = Field(
+        default="redis://localhost:{{ redis_port }}/0",
+        validation_alias=AliasChoices("REDIS_URL", "TOKEN_REDIS_URL"),
+    )
+    prefix: str = "{{ project_slug }}:tokens"
+    ttl: float | None = DEFAULT_TOKEN_TTL
+
+    @field_validator("driver")
+    @classmethod
+    def _not_the_test_double(cls, value: str) -> str:
+        """Refuse ``fake``, which is a recorder and not a deployment.
+
+        :class:`keel.auth.FakeTokenStore` decorates a working store and keeps
+        every issue, resolve and revoke in memory for a test to assert on.
+        Nothing prunes that, so a process configured this way leaks for as long
+        as it runs — and the environment variable that does it is one word away
+        from ``memory``. A test wanting the recorder asks for it in the test,
+        with ``keel.testing.fake_tokens()``.
+
+        Args:
+            value: The configured driver name.
+
+        Returns:
+            The value, unchanged.
+
+        Raises:
+            ValueError: If the fake was asked for through configuration.
+        """
+        if value.strip().lower() == "fake":
+            raise ValueError(
+                "TOKEN_DRIVER=fake is a test double, not a deployment; "
+                "use keel.testing.fake_tokens() in a test, or `memory` here"
+            )
+        return value
+
+    @field_validator("ttl", mode="before")
+    @classmethod
+    def _never_means_no_expiry(cls, value: object) -> object:
+        """Accept the same ``never`` spelling :meth:`keel.auth.TokenConfig.from_env` does.
+
+        Mirrored rather than left out, so a deployment that already sets
+        ``TOKEN_TTL=never`` does not get a validation error for using the
+        spelling Keel documents.
+
+        Args:
+            value: The raw value, before coercion.
+
+        Returns:
+            ``None`` for ``never``, otherwise the value unchanged.
+        """
+        if isinstance(value, str) and value.strip().lower() == "never":
+            return None
+        return value
+
+{% endif %}
 {% if has_worker %}class QueueSettings(BaseSettings):
     """Which queue driver to use, and how hard one worker pulls on it.
 
@@ -103,9 +209,10 @@ class CacheSettings(BaseSettings):
             worker at all), or ``null`` (discard).
         redis_url: Connection URL for the ``saq`` driver. The same
             ``REDIS_URL`` the cache reads — one Redis, one variable.
-        prefix: Key namespace, never empty, for the reason ``CACHE_PREFIX`` is
-            never empty: administrative operations on an unnamespaced queue
-            reach everything else sharing the backend.
+        prefix: Key namespace, never empty and a *sibling* of the cache's, for
+            the reason ``CACHE_PREFIX`` carries: nesting this inside the
+            cache's namespace puts every queued job in the range
+            ``cache.flush()`` deletes.
         default_queue: Where a job goes when it names none.
         concurrency: Jobs one worker process runs at once. Capped in practice by
             ``DB_POOL_SIZE`` — most jobs open a transaction, and a worker
@@ -120,7 +227,7 @@ class CacheSettings(BaseSettings):
         default="redis://localhost:{{ redis_port }}/0",
         validation_alias=AliasChoices("REDIS_URL", "QUEUE_REDIS_URL"),
     )
-    prefix: str = "{{ project_slug }}"
+    prefix: str = "{{ project_slug }}:queue"
     default_queue: str = "default"
     concurrency: int = Field(default=10, ge=1)
 
@@ -158,6 +265,10 @@ class WorkerSettings(BaseSettings):
         debug: Enables developer-facing behaviour. Never true in production.
         db: Database settings, from ``DATABASE_URL`` and ``DB_*``.
         cache: Cache settings, from ``REDIS_URL`` and ``CACHE_*``.
+        hashing: Password hashing cost, from ``HASHING_*``.
+{%- if has_api %}
+        token: Bearer token settings, from ``REDIS_URL`` and ``TOKEN_*``.
+{%- endif %}
 {%- if has_worker %}
         queue: Queue settings, from ``REDIS_URL`` and ``QUEUE_*``.
         worker: Worker settings, from ``WORKER_*``.
@@ -177,6 +288,10 @@ class WorkerSettings(BaseSettings):
     debug: bool = False
     db: DatabaseSettings = Field(default_factory=DatabaseSettings)
     cache: CacheSettings = Field(default_factory=CacheSettings)
+    hashing: HashingSettings = Field(default_factory=HashingSettings)
+{%- if has_api %}
+    token: TokenSettings = Field(default_factory=TokenSettings)
+{%- endif %}
 {%- if has_worker %}
     queue: QueueSettings = Field(default_factory=QueueSettings)
     worker: WorkerSettings = Field(default_factory=WorkerSettings)
@@ -217,6 +332,33 @@ class WorkerSettings(BaseSettings):
                 )
             },
         )
+
+    def hashing_config(self) -> HashingConfig:
+        """Translate the validated settings into Keel's hashing config.
+
+        Returns:
+            The plain dataclass :func:`keel.auth.hashing_lifespan` expects.
+        """
+        return HashingConfig(
+            time_cost=self.hashing.time_cost,
+            memory_cost=self.hashing.memory_cost,
+            parallelism=self.hashing.parallelism,
+        )
+{%- if has_api %}
+
+    def token_config(self) -> TokenConfig:
+        """Translate the validated settings into Keel's token config.
+
+        Returns:
+            The plain dataclass :func:`keel.auth.token_lifespan` expects.
+        """
+        return TokenConfig(
+            driver=self.token.driver,
+            url=self.token.redis_url,
+            prefix=self.token.prefix,
+            ttl=self.token.ttl,
+        )
+{%- endif %}
 {%- if has_worker %}
 
     def queue_config(self) -> QueueConfig:
@@ -256,10 +398,14 @@ def get_settings() -> Settings:
 __all__ = [
     "CacheSettings",
     "DatabaseSettings",
+    "HashingSettings",
 {%- if has_worker %}
     "QueueSettings",
 {%- endif %}
     "Settings",
+{%- if has_api %}
+    "TokenSettings",
+{%- endif %}
 {%- if has_worker %}
     "WorkerSettings",
 {%- endif %}

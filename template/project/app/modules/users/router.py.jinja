@@ -8,9 +8,28 @@ a change atomic, that is a sign the operation belongs in the service, not here.
 Every route carries a tag. Untagged routes land in FastAPI's ``default`` group
 in the generated documentation, which is where endpoints go to be forgotten.
 
-**No authentication yet.** There is no login endpoint, no JWT and no dependency
-guarding these routes — auth is Phase 4. Passwords are hashed from day one so
-that adding it later is a new module rather than a migration of every row.
+**One route is open, and the rest are not.** ``POST /users`` is registration and
+has to be reachable by somebody with no credential. Everything else takes
+``Caller`` or ``Owner`` from :mod:`app.security`, and the reasoning is worth
+keeping when you adapt this:
+
+* **The reads are behind a caller.** ``GET /users`` returns every registered
+  email address, which is the exact question ``POST /sessions`` spends ~40 ms
+  of Argon2 and a page of prose refusing to answer. An enumeration defence with
+  a JSON listing one route over is not a defence, and the cheap fix is the right
+  one. Open it up if your users are genuinely a public directory — but decide
+  that, rather than inherit it.
+* **The writes are behind ownership.** ``PATCH`` and ``DELETE`` change or remove
+  an account, so an unauthenticated one is account takeover: read an address
+  from the listing, set a password on it, sign in. ``Owner`` compares the path's
+  ``user_id`` with the caller and answers 403.
+* **The password has its own route** and demands the current one. A password
+  set through a general partial update is a takeover primitive even behind
+  authentication, because it needs no knowledge of the password it replaces.
+
+Registration remains a weaker oracle: a duplicate address is a 409. Closing that
+means a flow that answers identically either way and mails the difference, which
+is application policy and a table, not a parameter.
 """
 
 from __future__ import annotations
@@ -22,7 +41,8 @@ from fastapi import APIRouter, Query, status
 
 from app.modules.users import service
 from app.modules.users.repository import DEFAULT_PAGE_SIZE
-from app.modules.users.schemas import UserCreate, UserRead, UserUpdate
+from app.modules.users.schemas import PasswordChange, UserCreate, UserRead, UserUpdate
+from app.security import Caller, Owner
 
 router = APIRouter(prefix="/users", tags=["users"])
 
@@ -42,12 +62,15 @@ async def create_user(payload: UserCreate) -> UserRead:
 
 @router.get("", summary="List users")
 async def list_users(
+    _: Caller,
     limit: Annotated[int, Query(ge=1, le=200)] = DEFAULT_PAGE_SIZE,
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> list[UserRead]:
     """Return a page of users, oldest first.
 
     Args:
+        _: Declared for the dependency, not for the body. A listing of every
+            registered address is the answer the sign-in path refuses to give.
         limit: Maximum rows to return.
         offset: Rows to skip.
 
@@ -58,11 +81,15 @@ async def list_users(
 
 
 @router.get("/{user_id}", summary="Fetch a user")
-async def get_user(user_id: UUID) -> UserRead:
+async def get_user(user_id: UUID, _: Caller) -> UserRead:
     """Return one user.
+
+    Any caller may read any user: this is a directory, not a profile with
+    private fields. Narrow it to :data:`~app.security.Owner` if yours is.
 
     Args:
         user_id: The user's id.
+        _: Declared for the dependency.
 
     Returns:
         The user.
@@ -71,7 +98,7 @@ async def get_user(user_id: UUID) -> UserRead:
 
 
 @router.patch("/{user_id}", summary="Update a user")
-async def update_user(user_id: UUID, payload: UserUpdate) -> UserRead:
+async def update_user(user_id: UUID, payload: UserUpdate, _: Owner) -> UserRead:
     """Apply a partial update.
 
     ``PATCH`` rather than ``PUT`` because the payload is partial: omitted fields
@@ -79,7 +106,10 @@ async def update_user(user_id: UUID, payload: UserUpdate) -> UserRead:
 
     Args:
         user_id: The user's id.
-        payload: The fields to change.
+        payload: The fields to change. No password; see
+            :func:`change_password`.
+        _: Declared for the dependency — 401 without a token, 403 with somebody
+            else's.
 
     Returns:
         The updated user.
@@ -87,12 +117,33 @@ async def update_user(user_id: UUID, payload: UserUpdate) -> UserRead:
     return await service.update_user(user_id, payload)
 
 
+@router.put(
+    "/{user_id}/password",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Change a password",
+)
+async def change_password(user_id: UUID, payload: PasswordChange, _: Owner) -> None:
+    """Replace a password, given the current one, and sign every device out.
+
+    ``PUT`` on a sub-resource rather than a field on ``PATCH /users/{user_id}``:
+    it is a whole replacement with its own precondition, and separating it is
+    what makes the precondition unskippable.
+
+    Args:
+        user_id: The user's id.
+        payload: The current password and its replacement.
+        _: Declared for the dependency.
+    """
+    await service.change_password(user_id, payload)
+
+
 @router.delete("/{user_id}", status_code=status.HTTP_204_NO_CONTENT, summary="Delete a user")
-async def delete_user(user_id: UUID) -> None:
+async def delete_user(user_id: UUID, _: Owner) -> None:
     """Delete a user and everything they own.
 
     Args:
         user_id: The user's id.
+        _: Declared for the dependency.
     """
     await service.delete_user(user_id)
 

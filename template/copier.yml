@@ -21,11 +21,15 @@ _exclude:
   - ".git"
   - ".DS_Store"
   - ".svn"
-  # -- the API half: dropped from a worker-only service.
+  # -- the API half: dropped from a worker-only service. `security.py` and the
+  #    whole `sessions` module go with it: both are HTTP, and one imports FastAPI.
   - "{% if not has_api %}app/main.py{% endif %}"
+  - "{% if not has_api %}app/security.py{% endif %}"
+  - "{% if not has_api %}app/modules/sessions{% endif %}"
   - "{% if not has_api %}app/modules/users/router.py{% endif %}"
   - "{% if not has_api %}app/modules/items/router.py{% endif %}"
   - "{% if not has_api %}tests/test_health.py{% endif %}"
+  - "{% if not has_api %}tests/test_sessions.py{% endif %}"
   - "{% if not has_api %}tests/test_users.py{% endif %}"
   - "{% if not has_api %}tests/test_items.py{% endif %}"
   # -- the worker half: dropped from an API-only service. `0002` creates the

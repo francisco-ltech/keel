@@ -10,7 +10,7 @@ from __future__ import annotations
 import pytest
 from httpx import AsyncClient
 
-from tests.conftest import create_user
+from tests.conftest import bearer, create_user, signed_in
 
 pytestmark = pytest.mark.anyio
 
@@ -116,9 +116,9 @@ async def test_deleting_an_item(client: AsyncClient) -> None:
 
 async def test_deleting_an_owner_deletes_their_items(client: AsyncClient) -> None:
     """The foreign key cascades, so an item never outlives its owner."""
-    owner = await create_user(client)
+    owner, token = await signed_in(client)
     item = (await client.post(f"/users/{owner['id']}/items", json={"name": "Engine"})).json()
 
-    await client.delete(f"/users/{owner['id']}")
+    await client.delete(f"/users/{owner['id']}", headers=bearer(token))
 
     assert (await client.get(f"/users/{owner['id']}/items/{item['id']}")).status_code == 404

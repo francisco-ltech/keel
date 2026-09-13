@@ -12,7 +12,7 @@ not regenerating.
 `worker.py` and a `jobs.py`, not regenerating.
 {% endif %}
 Built on [Keel](https://github.com/francisco-ltech/keel), which supplies the
-cache, database and queue. The rules below come from Keel and are not
+cache, database, identity{% if has_worker %} and queue{% endif %}. The rules below come from Keel and are not
 stylistic — each one exists because the obvious alternative has a failure mode.
 
 ## Layout
@@ -26,7 +26,12 @@ app/modules/<domain>/
 {% if has_api %}  router.py       HTTP only; calls services
 {% endif %}{% if has_worker %}  jobs.py         job handlers; call the same services
 {% endif %}```
-
+{% if has_api %}
+`modules/sessions/` has no `models.py` and no `repository.py` on purpose: a
+session is a token in Keel's store, not a row here. `app/security.py` holds the
+bearer dependency — FastAPI vocabulary, so it stays in this project rather than
+in Keel, whose core imports no web framework.
+{% endif %}
 ## Rules
 
 **Never write a `get_session` dependency.** A session held across a request hits
@@ -46,7 +51,81 @@ next attribute access. Convert inside the block.
 
 **Eager-load relationships you will use.** Lazy loading raises under async
 rather than quietly issuing a query — `Repository.eager(...)`.
-{% if has_worker %}
+
+**Argon2 goes on a thread and outside `uow()`. Both, every time.** It is ~40 ms
+of deliberate CPU. Inline from `async def` it stalls every other request in the
+process; inside a transaction it does that while a pooled connection sits idle.
+`app/modules/users/service.py` has `hash_in_a_thread`; verifying looks the same:
+
+```python
+hasher = password_hasher()
+matched, replacement = await anyio.to_thread.run_sync(hasher.verify_and_upgrade, password, stored)
+```
+{% if has_api %}
+**Verify against `None` when the user does not exist. Never return early.**
+This is the one that gets written wrong:
+
+```python
+async with uow() as session:
+    user = await UserRepository(session).get_by_email(email)
+    stored = None if user is None else user.hashed_password  # values, not the row
+
+matched, replacement = await anyio.to_thread.run_sync(hasher.verify_and_upgrade, password, stored)
+if user is None or not matched:
+    raise AuthenticationError(INVALID_CREDENTIALS)
+```
+
+`if user is None: raise` above the verify would be shorter and would turn the
+endpoint into a user-enumeration oracle: hashing takes tens of milliseconds and
+returning early takes none, so a stopwatch answers "does this address have an
+account here?" for every address in a list. Passing `None` hashes against a
+dummy so the miss costs what a hit costs. The reply has to be uniform too — one
+message for a wrong password and an unknown address, and the same number of
+queries on the way there.
+
+**Persist the replacement hash when `verify_and_upgrade` returns one.** Signing
+in is the only moment the plaintext exists, so it is the only moment a password
+hashed at last year's cost can be upgraded. Dropping the value silently leaves
+those accounts cheap forever.
+
+**A password change needs the current password, and revokes every session.**
+`PUT /users/{user_id}/password`, never a field on `UserUpdate`: a password set
+without proving knowledge of the old one is account takeover wearing an update.
+After it lands, `token_store().revoke_subject(user_id)` — and the same after
+disabling or deleting an account, or the tokens issued before it still work.
+{% endif %}
+**An `Identity` is a value, never the `User` row.** It is frozen, serialisable
+and safe to put on a context variable or in a job payload; an ORM instance
+outlives its session and raises `DetachedInstanceError` somewhere far away.
+Build it at the edge from what you already know, and put nothing on it that has
+a source of truth elsewhere — `claims={"email": ...}` is a copy of a column in
+{% if has_api %}the token store{% else %}every job payload{% endif %}, stale from the first address change.
+
+**Read the caller with `require_identity()`, not from a parameter.** It works
+identically in a service, in a job running under `acting_as(...)`, and in an
+audit column. `current_identity()` is the form that returns `None`; there is no
+guest object, because a guest with an `id` looks like a caller everywhere the
+check is forgotten.
+{% if has_api %}
+**Guard an endpoint with `Caller` or `Owner`, not by checking inside it.**
+`app/security.py` exports three: `Caller` refuses the request without a valid
+token, `MaybeCaller` hands back `None` for endpoints that behave differently
+when signed in but do not require it, and `Owner` additionally 403s a caller
+whose id is not the `user_id` in the path. All bind `acting_as` for the whole
+request, and all must stay `async def` — a sync dependency runs in a threadpool,
+where a context variable set is invisible to the endpoint. A route that changes
+somebody's account and takes no caller is account takeover; the annotation is
+the whole fix.
+
+**A 401 carries `WWW-Authenticate`.** `handle_authentication_error` in
+`app/errors.py` does it; raise `AuthenticationError` and it is handled.
+
+**`AuthenticationRequiredError` is a 500, not a 401.** Keel raises it when
+`require_identity()` finds nothing bound, which means the edge never
+authenticated — a wiring bug. Mapping it to 401 tells a caller to retry with the
+credential that just worked, and hides the fault in the bucket nobody pages on.
+Do not register a handler for it. ADR 0007, section 8.
+{% endif %}{% if has_worker %}
 **`dispatch()` inside a transaction waits for the commit.** That is the default
 and it is correct: pushing immediately means a worker acting on a row that was
 rolled back. Do not pass `after_commit=False` to "fix" a timing problem.
@@ -61,9 +140,16 @@ be idempotent; at-least-once is the only guarantee a queue can make.
 **Soft-deleted rows are filtered globally.** You do not add `WHERE deleted_at IS
 NULL`. To include them, `with_deleted(...)` explicitly.
 
-**Test with the fakes.** `fake_queue()` records dispatches without running them;
-`fake_cache()` does the same for the cache. Asserting a job was enqueued and
-testing what the job does are two different tests.
+**Test with the fakes.** {% if has_worker %}`fake_queue()` records dispatches without running
+them and `fake_cache()` does the same for the cache. Asserting a job was
+enqueued and testing what the job does are two different tests.{% else %}`fake_cache()` records what was
+cached without a Redis behind it.{% endif %}{% if has_api %} `fake_tokens()` is the exception that proves the
+rule — it records *and* works, because a test that signs in has to be able to
+use the credential it was handed.{% endif %}
+
+**The test suite hashes cheaply on purpose.** `HASHING_*` is turned down in
+`tests/conftest.py`, not in `.env.example`. Argon2 is slow by design and that
+slowness is the defence; a suite that creates a user per test pays it per test.
 
 **Tests run against real Postgres inside a transaction that is rolled back.**
 There is no fake database — the queries are the part most likely to be wrong.

@@ -17,6 +17,20 @@ raises on access, and because it usually *is* loaded in development, the failure
 arrives in production on the one code path that lazily touched a relationship.
 Validating into a :class:`~app.modules.users.schemas.UserRead` inside the block
 makes that class of bug unrepresentable.
+
+**Hashing comes from Keel.** :class:`keel.auth.PasswordHasher` uses the cost
+parameters bound by ``hashing_lifespan`` at startup, so they are configuration
+rather than a constant compiled into this module — which is what lets the test
+suite turn them down without moving the production default. It also brings the
+two things a hand-rolled pair leaves out: a constant-cost miss, and
+rehash-on-login.
+
+**Argon2 never runs on the event loop, and never inside ``uow()``.** It is tens
+of milliseconds of deliberate CPU work: run inline it stalls every other request
+in the process, and run inside a transaction it does that *while* holding a
+pooled connection that needs nothing from the database. Both are fixed by the
+same two words — ``to_thread`` outside the block — and :func:`hash_in_a_thread`
+is where that lives. ADR 0002, rule 3.
 """
 
 from __future__ import annotations
@@ -24,49 +38,29 @@ from __future__ import annotations
 from typing import Any
 from uuid import UUID
 
+import anyio
+from keel.auth import password_hasher{% if has_api %}, token_store{% endif %}
 from keel.database import uow
-from pwdlib import PasswordHash
 
-from app.errors import ConflictError, NotFoundError
+from app.errors import ConflictError, ForbiddenError, NotFoundError
 from app.modules.users.repository import DEFAULT_PAGE_SIZE, UserRepository
-from app.modules.users.schemas import UserCreate, UserRead, UserUpdate
-
-_password_hash = PasswordHash.recommended()
-"""Argon2id with pwdlib's current recommended parameters.
-
-Built once: constructing it per call re-reads the parameters for no benefit, and
-the cost that matters — the hash itself — is per call regardless.
-"""
+from app.modules.users.schemas import PasswordChange, UserCreate, UserRead, UserUpdate
 
 
-def hash_password(plaintext: str) -> str:
-    """Hash a password for storage.
+async def hash_in_a_thread(plaintext: str) -> str:
+    """Hash a password without blocking the loop or holding a connection.
+
+    The hasher is resolved here, on the loop, and only the hashing itself is
+    handed to a worker thread — so a test that swaps the bound hasher still sees
+    its own, whatever the thread's context turns out to carry.
 
     Args:
-        plaintext: The password as the user typed it.
+        plaintext: The password as typed.
 
     Returns:
-        An Argon2 hash, self-describing enough to be verified later without
-        storing the parameters separately.
+        The hash to store.
     """
-    return _password_hash.hash(plaintext)
-
-
-def verify_password(plaintext: str, hashed: str) -> bool:
-    """Check a password against a stored hash.
-
-    Unused by any route today — there is no login endpoint until Phase 4 — but
-    it lives here rather than in the future auth module because it is the other
-    half of :func:`hash_password`, and the two must agree about the algorithm.
-
-    Args:
-        plaintext: The password as the user typed it.
-        hashed: The stored hash.
-
-    Returns:
-        Whether they match.
-    """
-    return _password_hash.verify(plaintext, hashed)
+    return await anyio.to_thread.run_sync(password_hasher().hash, plaintext)
 
 
 async def create_user(payload: UserCreate) -> UserRead:
@@ -83,6 +77,10 @@ async def create_user(payload: UserCreate) -> UserRead:
             transaction, which narrows but does not close the race; the unique
             index on the column is what actually guarantees it.
     """
+    # Before the block, not inside it: hashing needs no database, and a
+    # duplicate address costs the same as a new one either way.
+    hashed = await hash_in_a_thread(payload.password)
+
     async with uow() as session:
         users = UserRepository(session)
         if await users.get_by_email(payload.email) is not None:
@@ -91,7 +89,7 @@ async def create_user(payload: UserCreate) -> UserRead:
         user = await users.create(
             email=payload.email,
             full_name=payload.full_name,
-            hashed_password=hash_password(payload.password),
+            hashed_password=hashed,
         )
         return UserRead.model_validate(user)
 
@@ -133,6 +131,9 @@ async def get_user(user_id: UUID) -> UserRead:
 async def update_user(user_id: UUID, payload: UserUpdate) -> UserRead:
     """Apply a partial update.
 
+    Carries no password: replacing one is :func:`change_password`, which demands
+    the current password first. See :class:`~app.modules.users.schemas.UserUpdate`.
+
     Args:
         user_id: The primary key.
         payload: The fields to change. Unset fields are left alone.
@@ -154,12 +155,6 @@ async def update_user(user_id: UUID, payload: UserUpdate) -> UserRead:
         # something different from omitting it, and a partial update needs both.
         changes: dict[str, Any] = payload.model_dump(exclude_unset=True)
 
-        # Translate the wire field into the column. The repository never sees a
-        # plaintext password, and `password` is not a column in any case.
-        plaintext = changes.pop("password", None)
-        if plaintext is not None:
-            changes["hashed_password"] = hash_password(plaintext)
-
         email = changes.get("email")
         if email is not None and email != user.email:
             clash = await users.get_by_email(email)
@@ -167,7 +162,71 @@ async def update_user(user_id: UUID, payload: UserUpdate) -> UserRead:
                 raise ConflictError(f"a user with email {email!r} already exists")
 
         updated = await users.update(user, changes)
-        return UserRead.model_validate(updated)
+        result = UserRead.model_validate(updated)
+{%- if has_api %}
+
+    # After the commit and outside the block: revoking is a token-store round
+    # trip, and an account whose tokens still work has not been disabled.
+    if changes.get("is_active") is False:
+        await token_store().revoke_subject(user_id)
+{%- endif %}
+
+    return result
+
+
+async def change_password(user_id: UUID, payload: PasswordChange) -> None:
+    """Replace a password, having proved knowledge of the one in force.
+
+    The current password is required even though the caller is already
+    authenticated. A bearer token can be stolen; the password is the second
+    factor that makes the theft insufficient to lock the owner out, and it is
+    the reason this is not a field on :class:`~app.modules.users.schemas.UserUpdate`.
+
+    Three units of work would be wrong here and there are two: the row is read,
+    the block closes for the hashing, and a second block writes the replacement.
+    Nothing between them can leave the account without a password — the write is
+    a single ``UPDATE``.
+
+    Args:
+        user_id: Whose password to change.
+        payload: The current password and its replacement.
+
+    Returns:
+        Nothing. The new password is not echoed and no new session is issued;
+        the caller signs in again, which is the point of revoking the old ones.
+
+    Raises:
+        NotFoundError: If there is no such user.
+        ForbiddenError: If the current password does not match. A 403 rather
+            than a 401 for the reason ADR 0007 gives about not answering a
+            working credential with a challenge: the *token* was accepted, and
+            telling a client to re-authenticate would sign the caller out over a
+            typo.
+    """
+    async with uow() as session:
+        user = await UserRepository(session).get(user_id)
+        if user is None:
+            raise NotFoundError(f"no user with id {user_id}")
+        stored = user.hashed_password
+
+    hasher = password_hasher()
+    matched = await anyio.to_thread.run_sync(hasher.verify, payload.current_password, stored)
+    if not matched:
+        raise ForbiddenError("the current password is incorrect")
+    hashed = await hash_in_a_thread(payload.new_password)
+
+    async with uow() as session:
+        users = UserRepository(session)
+        user = await users.get(user_id)
+        if user is None:
+            raise NotFoundError(f"no user with id {user_id}")
+        await users.update(user, {"hashed_password": hashed})
+{%- if has_api %}
+
+    # Every device that was signed in with the old password stops working. A
+    # password change that leaves a stolen token live has changed nothing.
+    await token_store().revoke_subject(user_id)
+{%- endif %}
 
 
 async def delete_user(user_id: UUID) -> None:
@@ -185,14 +244,20 @@ async def delete_user(user_id: UUID) -> None:
         if user is None:
             raise NotFoundError(f"no user with id {user_id}")
         await users.delete(user)
+{%- if has_api %}
+
+    # The row is gone; the tokens naming it are not, and one would still resolve
+    # to an identity that passes an ownership check.
+    await token_store().revoke_subject(user_id)
+{%- endif %}
 
 
 __all__ = [
+    "change_password",
     "create_user",
     "delete_user",
     "get_user",
-    "hash_password",
+    "hash_in_a_thread",
     "list_users",
     "update_user",
-    "verify_password",
 ]

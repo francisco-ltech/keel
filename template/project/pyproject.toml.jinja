@@ -6,8 +6,8 @@ readme = "README.md"
 requires-python = ">={{ python_version }}"
 dependencies = [
     # Keel is a path dependency: nothing here is published to an index. The extras
-    # track the shape — `queue` pulls in SAQ, which only a job process ever uses.
-    "keel[postgres{% if has_worker %},queue{% endif %}]",
+    # track the shape — `auth` pulls in Argon2, `queue` the worker runtime SAQ.
+    "keel[auth,postgres{% if has_worker %},queue{% endif %}]",
 {%- if has_api %}
     "fastapi>=0.115",
 {%- endif %}
@@ -18,13 +18,9 @@ dependencies = [
 {%- if has_api %}
     "uvicorn[standard]>=0.30",
 {%- endif %}
-{%- if has_worker %}
-    # The worker's task group and signal handling. FastAPI would bring this in
-    # transitively; a worker-only process has no FastAPI, so it asks directly.
+    # `to_thread.run_sync` keeps Argon2 off the event loop{% if has_worker %}, and the worker's
+    # task group and signal handling are here too{% endif %}. Asked for, not inherited.
     "anyio>=4.0",
-{%- endif %}
-    # Argon2 password hashing. No JWT, no login endpoint — see app/modules/users.
-    "pwdlib[argon2]>=0.2",
 ]
 
 [dependency-groups]

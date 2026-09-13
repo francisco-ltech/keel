@@ -5,8 +5,8 @@
 Built on **Keel** (`{{ keel_path }}`, a path dependency) — {% if has_api %}a FastAPI application{% else %}a queue worker{% endif %} with the
 batteries already wired: a database subsystem with a unit-of-work idiom, a cache
 with a swappable driver and a recording fake,{% if has_worker %} a queue whose dispatches wait
-for the commit,{% endif %} and a test suite that runs against a real Postgres and undoes
-itself.
+for the commit,{% endif %} Argon2 password hashing{% if has_api %} behind a bearer-token login{% endif %}, and a
+test suite that runs against a real Postgres and undoes itself.
 
 ## One service, {% if service_shape == 'both' %}two entrypoints{% else %}one entrypoint today{% endif %}
 
@@ -16,7 +16,7 @@ a command rather than a project.
 
 | | command | what it does |
 |---|---|---|
-{% if has_api %}| API | `uvicorn app.main:app` | serves HTTP, dispatches jobs |
+{% if has_api %}| API | `uvicorn app.main:app` | serves HTTP{% if has_worker %}, dispatches jobs{% endif %} |
 {% endif %}{% if has_worker %}| Worker | `python -m app.worker` | consumes jobs, runs the schedule |
 {% endif %}
 {% if not has_worker %}Adding the worker half later is `copier update --trust -d service_shape=both` —
@@ -49,14 +49,16 @@ and the layers inside it point one way only.
 
 ```
 app/
-{% if has_api %}  main.py          app factory; lifespan wires the database, cache{% if has_worker %} and queue{% endif %}
-{% endif %}{% if has_worker %}  worker.py        the worker entrypoint; same lifespans, no HTTP
+{% if has_api %}  main.py          app factory; the lifespan wires every subsystem
+{% endif %}{% if has_worker %}  worker.py        the worker entrypoint{% if has_api %}; the same lifespans, minus tokens{% else %}; the same lifespans as a script{% endif %}
   healthcheck.py   `python -m app.healthcheck` — the worker's exec probe
 {% endif %}  settings.py      pydantic-settings -> Keel's plain dataclass configs
   errors.py        the error taxonomy{% if has_api %}, and RFC 9457 problem+json for it{% endif %}
-  modules/
+{% if has_api %}  security.py      the bearer-token dependency: Caller and MaybeCaller
+{% endif %}  modules/
     __init__.py    the registry: {% if has_api %}MODULES{% if has_worker %} and JOBS{% endif %}{% else %}JOBS{% endif %}
-    users/         models · schemas · repository · service{% if has_api %} · router{% endif %}
+{% if has_api %}    sessions/      sign in, sign out, who am I — no table of its own
+{% endif %}    users/         models · schemas · repository · service{% if has_api %} · router{% endif %}
     items/         the same files{% if has_worker %}, plus jobs.py{% endif %}, scoped by owner_id
   migrations/      async Alembic, target_metadata = Model.metadata
 tests/             rollback-per-test against a real Postgres
@@ -102,7 +104,87 @@ async def create_user(payload: UserCreate) -> UserRead:
         return UserRead.model_validate(user)  # closes here, before the response
 ```
 
-{% if has_worker %}## The queue
+{% if has_api %}## Signing in
+
+Three endpoints, on a resource rather than on three verbs:
+
+| | | |
+|---|---|---|
+| `POST /sessions` | sign in | returns a bearer token, once |
+| `GET /sessions/current` | who am I | the caller's own user record |
+| `DELETE /sessions/current` | sign out | revokes that one token |
+
+A token is 256 bits of `secrets` output and the store keeps only its SHA-256, so
+nothing — including this application — can hand a working credential back. That
+is the opposite rule from passwords, which are hashed with Argon2 precisely
+*because* they are guessable, and it is deliberate: a slow hash on every
+authenticated request would buy nothing against a value with no dictionary
+behind it.
+
+Guarding an endpoint is one annotation:
+
+```python
+from app.security import Caller, MaybeCaller
+
+
+@router.get("/drafts")
+async def list_drafts(caller: Caller) -> list[DraftRead]:  # 401 without a token
+    ...
+
+
+@router.get("/posts")
+async def list_posts(caller: MaybeCaller) -> list[PostRead]:  # None is fine
+    ...
+```
+
+Both bind the caller on a context variable for the whole request, so a service
+or a job reads it with `require_identity()` instead of receiving it as an
+argument. What is bound is a Keel `Identity` — a frozen value with an id, roles
+and claims — and never the `User` row, which would be detached from its session
+the moment the transaction closed.
+
+**The sign-in path has one rule that is easy to get wrong**, and
+`app/modules/sessions/service.py` is commented for it: when there is no such
+address, the stored hash handed to the verifier is `None` rather than the
+function returning early. Verifying nothing is instant and verifying Argon2 is
+not, so an early return lets anyone with a stopwatch ask which addresses have
+accounts. The reply is uniform for the same reason — a wrong password and an
+unknown address get the same 401 with the same message.
+
+The verifier also hands back a replacement hash when the stored one was made
+with older cost parameters, and the service persists it. Signing in is the only
+moment the plaintext exists to do that with.
+
+**The hash itself runs on a worker thread, outside every unit of work.** Argon2
+is ~40 ms of CPU by design; called inline from `async def` it stalls every other
+request in the process for that long, and called inside `uow()` it does so while
+holding a pooled connection that needs nothing from the database. So `sign_in`
+reads the row, closes the block, `await anyio.to_thread.run_sync(...)`, then
+reopens a block only when there is an upgraded hash to persist. Two transactions
+per request is normal; a connection parked across 40 ms of arithmetic is not.
+
+## Who may call what
+
+`POST /users` is registration and is open. Everything else under `/users` takes
+`Caller` or `Owner` from `app/security.py`:
+
+| | | |
+|---|---|---|
+| `GET /users`, `GET /users/{id}` | `Caller` | a listing of every address is the enumeration answer |
+| `PATCH`, `DELETE /users/{id}` | `Owner` | changing or removing an account |
+| `PUT /users/{id}/password` | `Owner` + the current password | |
+
+`Owner` compares the path's `user_id` with the caller and answers 403. The
+password lives on its own route rather than in `UserUpdate` because a password
+set without proving knowledge of the old one is a takeover primitive even behind
+authentication.
+
+Changing a password revokes every session the user has, and so does disabling or
+deleting the account: `token_store().revoke_subject(user_id)`. A credential
+change that leaves already-issued tokens working has changed nothing that an
+attacker holding one would notice.
+
+{% endif %}{% if has_worker %}## The queue
 
 `app/modules/items/jobs.py` is the example worth reading. Three things in it are
 the whole convention:
@@ -141,18 +223,35 @@ table nightly through `SCHEDULE`, which is also where recurring work goes.
 ## Configuration
 
 `pydantic-settings`. Each subsystem carries its own prefix rather than a nested
-delimiter, so the variables read as `DATABASE_URL`, `CACHE_STORE`{% if has_worker %}, `QUEUE_DRIVER`
-and `WORKER_HEALTH_FILE`{% endif %} — the names a hosting platform injects. Keel's own
+delimiter, so the variables read as `DATABASE_URL`, `CACHE_STORE`,
+`HASHING_TIME_COST`{% if has_api %}, `TOKEN_DRIVER`{% endif %}, `QUEUE_DRIVER`
+and `WORKER_HEALTH_FILE` — the names a hosting platform injects. Keel's own
 configs are plain frozen dataclasses — the library takes no configuration-stack
 dependency — so `app/settings.py` is the one place that translates between the
 two. See `.env.example`.
-{% else %}## Configuration
+
+`CACHE_PREFIX`{% if has_api %}, `TOKEN_PREFIX`{% endif %} and `QUEUE_PREFIX` are **siblings**
+(`{{ project_slug }}:cache`{% if has_api %}, `{{ project_slug }}:tokens`{% endif %}, `{{ project_slug }}:queue`) and must stay
+that way. They share one Redis, and `cache.flush()` scans its whole prefix — so
+a cache namespaced at `{{ project_slug }}` would delete the others' keys. Keel shipped
+exactly that bug for two phases.
+{% if not has_api %}
+There is no bearer-token block: this shape serves no HTTP, so it issues and
+resolves no tokens. A job that acts on someone's behalf still can —
+`acting_as(identity)` publishes an `Identity` and needs nothing bound.
+{% endif %}{% else %}## Configuration
 
 `pydantic-settings`. Each subsystem carries its own prefix rather than a nested
-delimiter, so the variables read as `DATABASE_URL` and `CACHE_STORE` — the names
-a hosting platform injects. Keel's own configs are plain frozen dataclasses — the
-library takes no configuration-stack dependency — so `app/settings.py` is the one
-place that translates between the two. See `.env.example`.
+delimiter, so the variables read as `DATABASE_URL`, `CACHE_STORE`,
+`HASHING_TIME_COST` and `TOKEN_DRIVER` — the names a hosting platform injects.
+Keel's own configs are plain frozen dataclasses — the library takes no
+configuration-stack dependency — so `app/settings.py` is the one place that
+translates between the two. See `.env.example`.
+
+`CACHE_PREFIX` and `TOKEN_PREFIX` are **siblings** (`{{ project_slug }}:cache` and
+`{{ project_slug }}:tokens`) and must stay that way. They share one Redis, and
+`cache.flush()` scans its whole prefix — so a cache namespaced at `{{ project_slug }}`
+would delete every token. Keel shipped exactly that bug for two phases.
 {% endif %}
 ## Migrations
 
@@ -191,7 +290,11 @@ Two things follow from that and will eventually surprise someone:
   is the transaction timestamp. Assert on sets, not on timestamp order.
 * The cache is switched to the in-process `array` driver, so the suite needs
   Postgres but not Redis. Use `keel.testing.fake_cache` to assert on caching.
-{% if has_worker %}* The queue is switched to `null`, which is a different choice for a different
+{% if has_api %}* The token store is switched to `memory` for the same reason, and
+  `HASHING_*` is turned down to the cheapest parameters Keel accepts. Argon2 at
+  production cost is tens of milliseconds and every test that needs a user pays
+  it — which is what those knobs are for.
+{% endif %}{% if has_worker %}* The queue is switched to `null`, which is a different choice for a different
   reason: `keel.testing.fake_queue` records dispatches without running them, so
   "did this enqueue the job?" and "does the job work?" stay two tests. See
   `tests/test_jobs.py`.
@@ -219,10 +322,19 @@ deployment file rather than a development one.
 
 ## What is deliberately not here yet
 
-* **Authentication.** Passwords are hashed with Argon2 from day one, but there is
-  no login endpoint and no JWT — that is Phase 4, and it arrives as a new module
-  rather than as a migration of every row.
-* **A generic base repository.** Two modules is not enough evidence to know which
+* **Authorization.** There is a caller{% if has_api %} and a way to require one{% endif %}, and an
+  `Identity` carries `roles`, but nothing here decides what a role may *do*.
+  Policies are the next question — Strategy per resource or a chain of
+  responsibility — and answering it before there is a second protected resource
+  would be scaffolding for one case.
+{% if has_api %}* **Refresh tokens.** `revoke` plus `issue` composes rotation today. Pairing
+  them is a decision about session policy, not about storage.
+* **A password reset flow, and roles on the user row.** Both are application
+  policy rather than framework: an email, a table, and a decision about
+  expiry. `PUT /users/{user_id}/password` is the *change* path and needs the
+  current password; a *reset* is the one that does not, and it needs a
+  single-use token delivered out of band before it is safe.
+{% endif %}* **A generic base repository.** Two modules is not enough evidence to know which
   methods genuinely repeat. Phase 2.
 * **Soft deletes and audit columns.** Listed in the ADR rather than stubbed here;
   a half-built mixin is worse than an absent one.

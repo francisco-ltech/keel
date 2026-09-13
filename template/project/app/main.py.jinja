@@ -2,20 +2,26 @@
 
 Three things are worth reading closely.
 
-**Wiring is one lifespan.** ``database_lifespan``{% if has_worker %}, ``cache_lifespan`` and
-``queue_lifespan``{% else %} and ``cache_lifespan``{% endif %} are plain async context
-managers — Keel takes no dependency on FastAPI — so they compose in a single
-``async with`` and the same {% if has_worker %}three{% else %}two{% endif %} lines wire a worker process or a
-management command.{% if has_worker %} They are, literally: see ``app.worker.serve``, which
-opens the same three in the same order.{% endif %} All of them close their pools on the
-way out, which is the part that is forgotten until a few hundred restarts have
-leaked it.
+**Wiring is one lifespan.** ``database_lifespan``, ``cache_lifespan``,
+``hashing_lifespan``{% if has_worker %}, ``token_lifespan`` and ``queue_lifespan``{% else %} and ``token_lifespan``{% endif %} are plain
+async context managers — Keel takes no dependency on FastAPI — so they compose
+in a single ``async with`` and the same lines wire a worker process or a
+management command.{% if has_worker %} They very nearly are: see ``app.worker.serve``, which
+opens the same ones in the same order, minus the token store.{% endif %} All of them close
+their pools on the way out, which is the part that is forgotten until a few
+hundred restarts have leaked it.
 {% if has_worker %}
 **This process dispatches; it does not consume.** Binding the queue is what
 makes ``dispatch()`` work inside a service — the API half of a queue is the push
 side. No worker runtime is imported here: ``keel.queue`` exports ``Worker``
 lazily, so an API replica pays for none of it.
 {% endif %}
+
+**The caller is bound per request, not here.** The lifespan binds the *token
+store*; turning a header into an identity is :mod:`app.security`'s job, and it
+happens per request in a dependency. Which is also why the bearer dependency is
+in this project rather than in Keel: it is FastAPI vocabulary, and the core
+imports no web framework.
 
 **No session is held across a request.** There is no ``get_session`` dependency
 to import and this module does not invent one. A route receives nothing but its
@@ -34,6 +40,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
+from keel.auth import hashing_lifespan, token_lifespan
 from keel.cache import cache_lifespan
 from keel.database import current_database, database_lifespan
 {%- if has_worker %}
@@ -64,10 +71,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
-        """Bind the database{% if has_worker %}, the cache and the queue{% else %} and the cache{% endif %} for the life of the process."""
+        """Bind every subsystem for the life of the process."""
         async with (
             database_lifespan(config.database_config()),
             cache_lifespan(config.cache_config()),
+            hashing_lifespan(config.hashing_config()),
+            token_lifespan(config.token_config()),
 {%- if has_worker %}
             queue_lifespan(config.queue_config()),
 {%- endif %}

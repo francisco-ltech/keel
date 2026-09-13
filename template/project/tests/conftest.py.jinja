@@ -32,9 +32,9 @@ calls, its failure modes — while claiming to test the code that dispatched it.
 written. See ``tests/test_jobs.py``.
 {% endif %}
 {% if has_api and has_worker %}**Two runtimes, one set of subsystems.** ``client`` drives the real application
-through its lifespan; ``rolled_back`` binds the same three subsystems with no
-HTTP at all, which is the environment a worker process runs in. Both undo
-themselves the same way.
+through its lifespan; ``rolled_back`` binds the same subsystems with no HTTP at
+all, which is the environment a worker process runs in. Both undo themselves the
+same way.
 {% endif %}"""
 
 from __future__ import annotations
@@ -48,6 +48,7 @@ import pytest
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 {%- endif %}
+from keel.auth import MINIMUM_MEMORY_COST, hashing_lifespan
 from keel.cache import cache_lifespan
 from keel.database import Database, Model, current_database, database_lifespan
 {%- if has_worker %}
@@ -60,7 +61,17 @@ from app.main import create_app
 {% endif -%}
 from app.modules.users import service as users_service
 from app.modules.users.schemas import UserCreate, UserRead
-from app.settings import CacheSettings, {% if has_worker %}QueueSettings, {% endif %}Settings
+from app.settings import (
+    CacheSettings,
+    HashingSettings,
+{%- if has_worker %}
+    QueueSettings,
+{%- endif %}
+    Settings,
+{%- if has_api %}
+    TokenSettings,
+{%- endif %}
+)
 
 DEFAULT_USER = {
     "email": "ada@example.com",
@@ -78,11 +89,25 @@ def anyio_backend() -> str:
 
 @pytest.fixture(scope="session")
 def settings() -> Settings:
-    """Settings for the suite: the real database, an in-process cache{% if has_worker %}, no queue{% endif %}."""
+    """Settings for the suite: the real database, and everything else in-process.
+
+    The hashing cost is the one override that is about speed rather than
+    isolation. Argon2 at the production parameters takes tens of milliseconds
+    *by design*, and every test that needs a user pays it — which is exactly
+    what ``HASHING_*`` exists for. The floor Keel enforces is still respected;
+    this is the cheapest configuration it will accept, named rather than
+    restated so raising the floor does not leave a stale literal here.
+    """
     base = Settings()
     overrides: dict[str, Any] = {
-        "cache": CacheSettings(store="array", prefix="test", default_ttl=60.0)
+        "cache": CacheSettings(store="array", prefix="test:cache", default_ttl=60.0),
+        "hashing": HashingSettings(time_cost=1, memory_cost=MINIMUM_MEMORY_COST, parallelism=1),
     }
+{%- if has_api %}
+    # `memory`, so the suite needs Postgres but not Redis — and so one test's
+    # tokens cannot resolve in another's.
+    overrides["token"] = TokenSettings(driver="memory", prefix="test:tokens")
+{%- endif %}
 {%- if has_worker %}
     overrides["queue"] = QueueSettings(driver="null")
 {%- endif %}
@@ -119,13 +144,16 @@ def _schema(settings: Settings) -> None:
 async def runtime(settings: Settings) -> AsyncIterator[None]:
     """Bind the subsystems with no HTTP in front of them.
 
-    The same {% if has_worker %}three{% else %}two{% endif %} lifespans {% if has_worker %}``app.worker.serve``{% else %}``app.main``{% endif %} opens, in the same order.
+    The lifespans {% if has_worker %}``app.worker.serve``{% else %}``app.main``{% endif %} opens, in the same order{% if has_api %} — minus the
+    token store, which only an HTTP edge issues and resolves. A test that needs
+    tokens wants the ``client`` fixture below, or ``keel.testing.fake_tokens``{% endif %}.
     A test using this fixture is running in the environment a {% if has_worker %}worker{% else %}management
     command{% endif %} lives in.
     """
     async with (
         database_lifespan(settings.database_config()),
         cache_lifespan(settings.cache_config()),
+        hashing_lifespan(settings.hashing_config()),
 {%- if has_worker %}
         queue_lifespan(settings.queue_config()),
 {%- endif %}
@@ -198,4 +226,54 @@ async def create_user(client: AsyncClient, **overrides: str) -> dict[str, str]:
     assert response.status_code == 201, response.text
     body: dict[str, str] = response.json()
     return body
+
+
+async def signed_in(client: AsyncClient, **overrides: str) -> tuple[dict[str, str], str]:
+    """Create a user, sign them in, and return both halves.
+
+    Most routes under ``/users`` need a caller *and* the record's id, and
+    fetching the id back needs the token — so handing over both is what stops
+    every test starting with the same four lines.
+
+    Args:
+        client: The HTTP client.
+        **overrides: Fields to change on :data:`DEFAULT_USER`.
+
+    Returns:
+        The created user, and a token for them.
+    """
+    payload = DEFAULT_USER | overrides
+    created = await create_user(client, **overrides)
+    response = await client.post(
+        "/sessions", json={"email": payload["email"], "password": payload["password"]}
+    )
+    assert response.status_code == 201, response.text
+    token: str = response.json()["access_token"]
+    return created, token
+
+
+async def sign_in(client: AsyncClient, **overrides: str) -> str:
+    """Create a user, sign them in, and return the bearer token.
+
+    Args:
+        client: The HTTP client.
+        **overrides: Fields to change on :data:`DEFAULT_USER`.
+
+    Returns:
+        The token, ready for an ``Authorization`` header.
+    """
+    _, token = await signed_in(client, **overrides)
+    return token
+
+
+def bearer(token: str) -> dict[str, str]:
+    """Build the header a signed-in client sends.
+
+    Args:
+        token: The token from :func:`sign_in`.
+
+    Returns:
+        The ``Authorization`` header.
+    """
+    return {"Authorization": f"Bearer {token}"}
 {% endif -%}

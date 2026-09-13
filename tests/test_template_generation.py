@@ -22,6 +22,7 @@ change to ``keel.database``, ``keel.cache`` or ``keel.queue``'s public surface.
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
@@ -123,6 +124,8 @@ class Shape:
         variables: Extra ``.env.example`` entries, with probe values.
         processes: The services ``docker-compose.yml`` must define beyond the
             two backing stores, one per entrypoint this shape scaffolds.
+        undocumented: Strings the shipped prose must not contain, because they
+            name a subsystem this shape does not have.
     """
 
     name: str
@@ -132,6 +135,7 @@ class Shape:
     uninstallable: tuple[str, ...] = ()
     variables: dict[str, str] = field(default_factory=dict)
     processes: tuple[str, ...] = ()
+    undocumented: tuple[str, ...] = ()
 
 
 ALWAYS = (
@@ -152,7 +156,17 @@ ALWAYS = (
 tuple is what it means concretely — the domain, the settings and the migrations
 do not vary with the entrypoint."""
 
-API_FILES = ("app/main.py", "app/modules/users/router.py", "app/modules/items/router.py")
+API_FILES = (
+    "app/main.py",
+    # The bearer dependency and the login surface are HTTP, so they are the API
+    # half — a worker-only project importing either would import FastAPI.
+    "app/security.py",
+    "app/modules/sessions/service.py",
+    "app/modules/sessions/router.py",
+    "app/modules/users/router.py",
+    "app/modules/items/router.py",
+    "tests/test_sessions.py",
+)
 WORKER_FILES = (
     "app/worker.py",
     "app/healthcheck.py",
@@ -169,33 +183,55 @@ QUEUE_VARIABLES = {
     "WORKER_HEALTH_MAX_AGE": "29",
 }
 
+TOKEN_VARIABLES = {
+    "TOKEN_DRIVER": "memory",
+    "TOKEN_PREFIX": "probe-tokens",
+    # A number rather than `never`: the settings object holds `None` for that
+    # spelling, so it would not survive the round trip this test asserts on.
+    # `tests/test_sessions.py` in the generated project covers `never`.
+    "TOKEN_TTL": "3607",
+}
+"""Bearer tokens are the API half's: a worker issues and resolves none."""
+
+TOKEN_PROSE = ("TOKEN_", "fake_tokens", "issue_token")
+"""Names only an HTTP edge has. A worker-only project issues no bearer token, so
+prose mentioning one sends its reader looking for a subsystem that is not there."""
+
+QUEUE_PROSE = ("fake_queue", "dispatch", "QUEUE_")
+"""The mirror image, for a project with no worker."""
+
 SHAPES = (
     Shape(
         name="api",
         present=API_FILES,
         absent=WORKER_FILES,
-        importable=("fastapi", "uvicorn"),
+        # `pwdlib` arrives through the `keel[auth]` extra rather than directly,
+        # and every shape hashes: the users service does it on create.
+        importable=("fastapi", "uvicorn", "pwdlib"),
         # The point of the question. `saq` is a worker runtime, and a replica
         # that only serves HTTP should not ship one.
         uninstallable=("saq",),
+        variables=TOKEN_VARIABLES,
         processes=("api",),
+        undocumented=QUEUE_PROSE,
     ),
     Shape(
         name="worker",
         present=WORKER_FILES,
         absent=API_FILES,
-        importable=("saq",),
+        importable=("saq", "pwdlib"),
         # Not merely unused: nothing in a worker-only project may import
         # FastAPI, so a shared module that quietly does fails here.
         uninstallable=("fastapi", "uvicorn"),
         variables=QUEUE_VARIABLES,
         processes=("worker",),
+        undocumented=TOKEN_PROSE,
     ),
     Shape(
         name="both",
         present=API_FILES + WORKER_FILES,
-        importable=("fastapi", "uvicorn", "saq"),
-        variables=QUEUE_VARIABLES,
+        importable=("fastapi", "uvicorn", "saq", "pwdlib"),
+        variables=QUEUE_VARIABLES | TOKEN_VARIABLES,
         processes=("api", "worker"),
     ),
 )
@@ -380,6 +416,24 @@ def test_an_api_process_does_not_import_a_worker_runtime(generated: Path, shape:
     )
 
 
+def test_no_shape_documents_a_subsystem_it_does_not_have(generated: Path, shape: Shape) -> None:
+    """The prose is conditioned on the shape too, and nothing else checks it.
+
+    Code that mentions an absent half fails to import; prose that mentions one
+    just misleads, so it rots quietly. It had rotted in four places at once: a
+    worker README describing a lifespan "minus tokens" and refresh-token
+    rotation via ``revoke`` plus ``issue``, and a worker ``CLAUDE.md`` carrying
+    the whole verify-against-``None`` rule and a ``fake_tokens()`` rule
+    justified by "a test that signs in" — in a project that cannot sign in. Two
+    more instances had been fixed by eye in the same pass; the two halves of
+    that outcome are the argument for checking it mechanically.
+    """
+    for name in ("README.md", "CLAUDE.md"):
+        prose = (generated / name).read_text()
+        found = [marker for marker in shape.undocumented if marker in prose]
+        assert not found, f"{shape.name}: {name} mentions {found}, which it does not have"
+
+
 def test_the_generated_project_keeps_models_and_schemas_apart(generated: Path) -> None:
     """The one layout rule worth enforcing mechanically.
 
@@ -453,6 +507,37 @@ def test_autogenerating_after_the_shipped_migration_finds_no_drift(generated: Pa
     assert "op.add_column" not in body, f"models and shipped migration have drifted:\n{body}"
 
 
+def test_no_subsystem_namespace_nests_inside_another(generated: Path) -> None:
+    """One Redis, several subsystems, and ``flush()`` scans a whole prefix.
+
+    The cache, the queue and the token store all read the same ``REDIS_URL``, so
+    a namespace that is a *parent* of another's — ``<slug>`` against
+    ``<slug>:queue`` — means clearing the cache deletes every pending job and
+    signs everybody out. Keel's own defaults shipped that way from Phase 3 until
+    an adversarial review found it, and the template inherited it; this is the
+    guard that keeps it fixed.
+    """
+    probe = "\n".join(
+        [
+            "import json, os",
+            "from app.settings import Settings",
+            "os.environ.pop('DATABASE_URL', None)",
+            "groups = Settings(_env_file=None).model_dump(mode='json')",
+            "print(json.dumps({name: group['prefix'] for name, group in groups.items()",
+            "                  if isinstance(group, dict) and 'prefix' in group}))",
+        ]
+    )
+    result = run(["uv", "run", "python", "-c", probe], cwd=generated)
+    assert result.returncode == 0, explain("namespace probe", result)
+
+    prefixes: dict[str, str] = json.loads(result.stdout)
+    assert "cache" in prefixes, f"no namespaced subsystem found: {prefixes}"
+    for name, value in prefixes.items():
+        others = [other for key, other in prefixes.items() if key != name]
+        nested = [other for other in others if value == other or value.startswith(f"{other}:")]
+        assert not nested, f"{name}'s namespace {value!r} sits inside {nested}: {prefixes}"
+
+
 def test_every_documented_environment_variable_is_actually_read(
     generated: Path, shape: Shape
 ) -> None:
@@ -496,6 +581,11 @@ def test_every_documented_environment_variable_is_actually_read(
         "CACHE_STORE": "null",
         "CACHE_PREFIX": "probe-prefix",
         "CACHE_TTL": "13",
+        "HASHING_TIME_COST": "2",
+        # Above Keel's memory-hardness floor: the config refuses anything lower,
+        # so a probe below it would fail at load rather than prove anything.
+        "HASHING_MEMORY_COST": "9216",
+        "HASHING_PARALLELISM": "1",
         "APP_NAME": "Probe App",
         "DEBUG": "true",
         **shape.variables,
@@ -512,6 +602,13 @@ def test_every_documented_environment_variable_is_actually_read(
     )
 
     rendered = changed.stdout
-    expected_values = ("probe-prefix", "17", "6399", "Probe App", *shape.variables.values())
+    expected_values = (
+        "probe-prefix",
+        "17",
+        "6399",
+        "9216",
+        "Probe App",
+        *shape.variables.values(),
+    )
     for expected in expected_values:
         assert expected in rendered, f"{expected!r} did not reach the settings object:\n{rendered}"

@@ -1,0 +1,254 @@
+"""Signing in, signing out, and calling something as somebody.
+
+The two assertions worth reading twice are the pair about an unknown address.
+A login endpoint that answers "no such user" differently from "wrong password"
+is a way to enumerate who has an account here, whether the difference is in the
+body, the status code or the time it takes. The body and the status are pinned
+below; the timing is pinned by the service passing ``None`` to the verifier
+instead of returning early, which is the line that comment in
+`app/modules/sessions/service.py` is guarding.
+
+Three more assertions here are about what happens *around* the hash rather than
+in it: that it does not run inside a transaction, that a password change and a
+disabled account revoke the tokens already issued, and that an unbound identity
+is a 500 rather than a 401.
+"""
+
+from __future__ import annotations
+
+import pytest
+from fastapi import FastAPI
+from httpx import AsyncClient
+from keel.auth import PasswordHasher, require_identity, use_password_hasher
+from keel.database.hooks import in_transaction
+from pydantic import ValidationError
+
+from app.settings import Settings, TokenSettings
+from tests.conftest import DEFAULT_USER, bearer, create_user, sign_in, signed_in
+
+pytestmark = pytest.mark.anyio
+
+CREDENTIALS = {"email": DEFAULT_USER["email"], "password": DEFAULT_USER["password"]}
+
+
+async def test_signing_in_returns_a_token(client: AsyncClient) -> None:
+    await create_user(client)
+
+    response = await client.post("/sessions", json=CREDENTIALS)
+
+    assert response.status_code == 201, response.text
+    body = response.json()
+    assert body["access_token"]
+    assert body["token_type"] == "bearer"
+    assert body["expires_at"]
+
+
+async def test_the_password_is_not_echoed_back(client: AsyncClient) -> None:
+    await create_user(client)
+
+    body = (await client.post("/sessions", json=CREDENTIALS)).json()
+
+    assert DEFAULT_USER["password"] not in str(body)
+
+
+async def test_a_wrong_password_is_rejected(client: AsyncClient) -> None:
+    await create_user(client)
+
+    response = await client.post("/sessions", json={**CREDENTIALS, "password": "not-the-one"})
+
+    assert response.status_code == 401
+    assert response.headers["content-type"].startswith("application/problem+json")
+    # RFC 9110: a 401 that does not say how to authenticate is not a legal 401.
+    assert response.headers["www-authenticate"] == "Bearer"
+    assert response.json()["type"].endswith("/unauthorized")
+
+
+async def test_an_unknown_email_is_rejected(client: AsyncClient) -> None:
+    response = await client.post(
+        "/sessions", json={"email": "nobody@example.com", "password": "correct-horse-battery"}
+    )
+
+    assert response.status_code == 401
+
+
+async def test_an_unknown_email_and_a_wrong_password_are_indistinguishable(
+    client: AsyncClient,
+) -> None:
+    """The property the endpoint exists to have, asserted rather than assumed."""
+    await create_user(client)
+
+    wrong = await client.post("/sessions", json={**CREDENTIALS, "password": "not-the-one"})
+    unknown = await client.post(
+        "/sessions", json={"email": "nobody@example.com", "password": "not-the-one"}
+    )
+
+    assert wrong.status_code == unknown.status_code
+    assert wrong.json()["detail"] == unknown.json()["detail"]
+
+
+async def test_a_disabled_account_cannot_sign_in(client: AsyncClient) -> None:
+    """Disabling goes through the owner's own token now, not an open PATCH."""
+    created, token = await signed_in(client)
+
+    disabled = await client.patch(
+        f"/users/{created['id']}", json={"is_active": False}, headers=bearer(token)
+    )
+    response = await client.post("/sessions", json=CREDENTIALS)
+
+    assert disabled.status_code == 200
+    assert response.status_code == 401
+
+
+async def test_a_token_authenticates_a_request(client: AsyncClient) -> None:
+    """The whole point: a header goes in, and the service finds a caller."""
+    token = await sign_in(client)
+
+    response = await client.get("/sessions/current", headers=bearer(token))
+
+    assert response.status_code == 200, response.text
+    assert response.json()["email"] == DEFAULT_USER["email"]
+
+
+async def test_an_unauthenticated_request_is_refused(client: AsyncClient) -> None:
+    response = await client.get("/sessions/current")
+
+    assert response.status_code == 401
+    assert response.headers["www-authenticate"] == "Bearer"
+
+
+async def test_a_garbage_token_is_refused(client: AsyncClient) -> None:
+    """An unresolvable token is the same as no token, not a 500."""
+    response = await client.get("/sessions/current", headers=bearer("not-a-real-token"))
+
+    assert response.status_code == 401
+
+
+async def test_signing_out_stops_the_token_working(client: AsyncClient) -> None:
+    token = await sign_in(client)
+
+    signed_out = await client.delete("/sessions/current", headers=bearer(token))
+
+    assert signed_out.status_code == 204
+    assert (await client.get("/sessions/current", headers=bearer(token))).status_code == 401
+
+
+async def test_signing_out_twice_is_not_an_error(client: AsyncClient) -> None:
+    """DELETE is idempotent; the second call is asking for a state that already holds."""
+    token = await sign_in(client)
+
+    await client.delete("/sessions/current", headers=bearer(token))
+
+    assert (await client.delete("/sessions/current", headers=bearer(token))).status_code == 204
+
+
+async def test_signing_out_leaves_another_session_alone(client: AsyncClient) -> None:
+    """Revoking one device must not sign out the others."""
+    await create_user(client)
+    first = (await client.post("/sessions", json=CREDENTIALS)).json()["access_token"]
+    second = (await client.post("/sessions", json=CREDENTIALS)).json()["access_token"]
+
+    await client.delete("/sessions/current", headers=bearer(first))
+
+    assert (await client.get("/sessions/current", headers=bearer(second))).status_code == 200
+
+
+async def test_changing_a_password_revokes_existing_sessions(client: AsyncClient) -> None:
+    """A password change that leaves a stolen token working has changed nothing."""
+    created, token = await signed_in(client)
+    other = (await client.post("/sessions", json=CREDENTIALS)).json()["access_token"]
+
+    changed = await client.put(
+        f"/users/{created['id']}/password",
+        json={"current_password": DEFAULT_USER["password"], "new_password": "a-new-password"},
+        headers=bearer(token),
+    )
+
+    assert changed.status_code == 204
+    assert (await client.get("/sessions/current", headers=bearer(token))).status_code == 401
+    assert (await client.get("/sessions/current", headers=bearer(other))).status_code == 401
+
+
+async def test_disabling_an_account_revokes_its_sessions(client: AsyncClient) -> None:
+    """Refusing a *new* sign-in is half of it; the tokens already out are the other."""
+    created, token = await signed_in(client)
+
+    disabled = await client.patch(
+        f"/users/{created['id']}", json={"is_active": False}, headers=bearer(token)
+    )
+
+    assert disabled.status_code == 200
+    assert (await client.get("/sessions/current", headers=bearer(token))).status_code == 401
+
+
+async def test_signing_in_does_not_hold_a_connection_across_the_hash(
+    client: AsyncClient, settings: Settings
+) -> None:
+    """ADR 0002, rule 3: anything that does not need the database happens outside it.
+
+    Argon2 is ~40ms of CPU. Run inside ``uow()`` it parks a pooled connection for
+    the whole of it while querying nothing — invisible in p99, fatal to
+    throughput, and exactly the failure that ADR describes. The probe reads
+    Keel's active-session context variable from inside the worker thread, which
+    anyio populates from the caller's context: a transaction still open at that
+    moment shows up here and nowhere else.
+    """
+    await create_user(client)
+    observed: list[bool] = []
+
+    class Watching(PasswordHasher):
+        """Records whether a unit of work was open while the hash ran."""
+
+        def verify_and_upgrade(self, plaintext: str, hashed: str | None) -> tuple[bool, str | None]:
+            """Note the transaction state, then hash as usual."""
+            observed.append(in_transaction())
+            return super().verify_and_upgrade(plaintext, hashed)
+
+    with use_password_hasher(Watching(settings.hashing_config())):
+        response = await client.post("/sessions", json=CREDENTIALS)
+
+    assert response.status_code == 201, response.text
+    assert observed == [False], "Argon2 ran inside uow(), holding a pooled connection"
+
+
+async def test_an_unbound_identity_is_a_server_error_not_a_401(
+    app: FastAPI, client: AsyncClient
+) -> None:
+    """ADR 0007, section 8. A route nobody guarded is a wiring bug, not a login prompt.
+
+    ``require_identity()`` raising means the edge never bound a caller. Answering
+    401 would tell a client to retry with the credential that just worked, and
+    would file the fault in the bucket nobody is paged for.
+    """
+
+    @app.get("/_unguarded")
+    async def unguarded() -> dict[str, str]:
+        return {"caller": str(require_identity().id)}
+
+    response = await client.get("/_unguarded")
+
+    assert response.status_code == 500
+    assert response.json()["type"].endswith("/subsystem-failure")
+    assert "www-authenticate" not in response.headers
+
+
+def test_the_fake_token_driver_is_refused_by_configuration() -> None:
+    """The recording double is a test tool, and `.env` is not a test.
+
+    `TOKEN_DRIVER=fake` is one word from `memory` and keeps every issue and
+    resolve in memory for the life of the process. A test that wants it asks in
+    the test, with `keel.testing.fake_tokens()`.
+    """
+    assert TokenSettings.model_validate({"driver": "memory"}).driver == "memory"
+    with pytest.raises(ValidationError, match="test double"):
+        TokenSettings.model_validate({"driver": "fake"})
+
+
+def test_token_ttl_accepts_never() -> None:
+    """The spelling Keel documents has to survive the pydantic-settings layer.
+
+    An empty value meaning "forever" is the kind of default nobody intends, so
+    a permanent credential has to be asked for by name — and asking for it by
+    name has to work here as well as in `TokenConfig.from_env`.
+    """
+    assert TokenSettings.model_validate({"ttl": "never"}).ttl is None
+    assert TokenSettings.model_validate({"ttl": "3600"}).ttl == 3600.0

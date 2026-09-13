@@ -1,10 +1,10 @@
 """HTTP for items.
 
 Items are addressed under their owner — ``/users/{owner_id}/items`` — so the
-scope is in the path rather than in a query parameter a client can forget. When
-Phase 4 adds authentication, ``owner_id`` becomes a value read from the
-authenticated principal and these signatures barely change; the service calls
-below already take it as an argument.
+scope is in the path rather than in a query parameter a client can forget. To
+scope them to the caller instead, take ``caller: Caller`` from
+:mod:`app.security` and pass ``caller.id`` where ``owner_id`` goes — the service
+calls below already take it as an argument, so nothing beneath this file moves.
 
 Every route carries a tag, and no route touches a session or a repository.
 """

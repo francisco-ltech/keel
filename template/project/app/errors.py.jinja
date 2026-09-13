@@ -20,9 +20,15 @@ Three families are mapped here:
 
 * :class:`AppError` — what this application raises on purpose. Carries its own
   status and title.
-* :class:`keel.exceptions.KeelError` — anything the framework raises. A
-  :class:`~keel.exceptions.ConfigurationError` is a wiring bug and is reported
-  as a 500; it should have surfaced at startup.
+* :class:`keel.exceptions.KeelError` — anything the framework raises, reported
+  as a 500 because it should have been impossible. That deliberately includes
+  :class:`~keel.exceptions.AuthenticationRequiredError`: ``require_identity()``
+  reaching a route nobody guarded means the edge did not bind a caller, which is
+  a wiring bug and not a rejected credential. Mapping it to 401 would tell a
+  client to retry with the token that just worked, and would hide the fault in
+  the bucket nobody pages on. ADR 0007, section 8. The 401 this application does
+  return is :class:`AuthenticationError`, raised at the edge by
+  :mod:`app.security` before any service runs.
 * FastAPI's own validation and HTTP exceptions, re-dressed so a 422 looks like
   every other error.
 {% endif %}
@@ -93,6 +99,33 @@ class NotFoundError(AppError):
     slug = "not-found"
 
 
+class AuthenticationError(AppError):
+    """The caller is not who they say they are, or did not say.
+
+    Deliberately vague in its message on the sign-in path: "no such address" and
+    "wrong password" are the same answer, or the endpoint becomes a way to ask
+    which addresses are registered.
+    """
+
+    status = 401
+    title = "Unauthorized"
+    slug = "unauthorized"
+
+
+class ForbiddenError(AppError):
+    """The caller is who they say they are and still may not do this.
+
+    Distinct from :class:`AuthenticationError` on purpose: a 401 tells a client
+    to present a credential and a 403 tells it not to bother, and answering the
+    second with the first sends a signed-in caller round a retry loop that can
+    never succeed.
+    """
+
+    status = 403
+    title = "Forbidden"
+    slug = "forbidden"
+
+
 class ConflictError(AppError):
     """The request collides with the current state — a duplicate email, say."""
 
@@ -120,6 +153,7 @@ class ValidationError(AppError):
     title: str,
     detail: str,
     problem_type: str = "about:blank",
+    headers: dict[str, str] | None = None,
     **extra: Any,
 ) -> JSONResponse:
     """Build an RFC 9457 problem response.
@@ -130,6 +164,8 @@ class ValidationError(AppError):
         title: A short, stable summary of the problem type.
         detail: What went wrong with this particular request.
         problem_type: A URI identifying the problem type.
+        headers: Response headers. A 401 needs ``WWW-Authenticate`` to be a
+            legal 401 at all (RFC 9110), and nothing else here needs headers.
         **extra: Additional members. RFC 9457 allows them, and a client that
             does not know about one must ignore it.
 
@@ -144,7 +180,7 @@ class ValidationError(AppError):
         "instance": request.url.path,
     }
     body.update(extra)
-    return JSONResponse(status_code=status, content=body, media_type=PROBLEM_JSON)
+    return JSONResponse(status_code=status, content=body, media_type=PROBLEM_JSON, headers=headers)
 
 
 async def handle_app_error(request: Request, exc: Exception) -> JSONResponse:
@@ -169,6 +205,35 @@ async def handle_app_error(request: Request, exc: Exception) -> JSONResponse:
     )
 
 
+async def handle_authentication_error(request: Request, exc: Exception) -> JSONResponse:
+    """Report a missing or unusable credential as a 401 that says how to fix it.
+
+    Registered for this application's :class:`AuthenticationError` only.
+    Keel's :class:`~keel.exceptions.AuthenticationRequiredError` is deliberately
+    *not* routed here: it means nothing bound a caller, which is a fault in this
+    process rather than in the request, and it falls through to
+    :func:`handle_keel_error` as a 500. ADR 0007, section 8.
+
+    Args:
+        request: The request being answered.
+        exc: The exception.
+
+    Returns:
+        The problem response, carrying the ``WWW-Authenticate`` challenge a 401
+        is required to carry.
+    """
+    # Guaranteed by the registration in register_error_handlers.
+    assert isinstance(exc, AuthenticationError)
+    return problem(
+        request,
+        status=401,
+        title="Unauthorized",
+        detail=exc.detail,
+        problem_type=f"{PROBLEM_BASE}/unauthorized",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+
+
 async def handle_keel_error(request: Request, exc: Exception) -> JSONResponse:
     """Report a framework failure.
 
@@ -176,6 +241,11 @@ async def handle_keel_error(request: Request, exc: Exception) -> JSONResponse:
     means the application is wired wrongly and should have failed at startup, so
     it is reported as a server error and its message is kept: it names the
     binding that is missing, which is exactly what the operator needs.
+
+    :class:`~keel.exceptions.AuthenticationRequiredError` lands here for the
+    same reason and keeps the generic message: a route that reaches
+    ``require_identity()`` with nothing bound was never guarded, and an alarm is
+    the only useful answer.
 
     Args:
         request: The request being answered.
@@ -251,6 +321,7 @@ def register_error_handlers(app: FastAPI) -> None:
         app: The application to install handlers on.
     """
     app.add_exception_handler(AppError, handle_app_error)
+    app.add_exception_handler(AuthenticationError, handle_authentication_error)
     app.add_exception_handler(KeelError, handle_keel_error)
     app.add_exception_handler(RequestValidationError, handle_request_validation_error)
     app.add_exception_handler(StarletteHTTPException, handle_http_exception)
@@ -262,7 +333,9 @@ def register_error_handlers(app: FastAPI) -> None:
     "PROBLEM_JSON",
 {%- endif %}
     "AppError",
+    "AuthenticationError",
     "ConflictError",
+    "ForbiddenError",
     "NotFoundError",
     "ValidationError",
 {%- if has_api %}

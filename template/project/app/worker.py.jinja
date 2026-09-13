@@ -7,11 +7,20 @@ settings, opens the same lifespans in the same order, and calls into the same
 service functions the routers call. A deployment picks a command; it does not
 pick a project.
 
-**Wiring is three context managers, and that is the whole of it.** Keel's
+**Wiring is a handful of context managers, and that is the whole of it.** Keel's
 lifespans are plain async context managers rather than FastAPI plugins, so the
-lines below are the same three that ``app.main`` composes — which is the
-property that makes "one image, two entrypoints" true rather than aspirational.
+lines below are the same ones ``app.main`` composes — which is the property that
+makes "one image, two entrypoints" true rather than aspirational.
 {% if has_api %}Compare ``create_app``'s ``lifespan``: same configs, same order.{% endif %}
+
+**One of them is missing, deliberately.** There is no ``token_lifespan`` here: a
+worker issues no credentials and reads no ``Authorization`` header, so binding a
+token store would be a Redis client per replica that nothing calls. A job still
+knows who it is acting for — ``acting_as`` publishes an
+:class:`~keel.auth.Identity` on a context variable and needs nothing bound.
+``hashing_lifespan`` *is* here, because the users service a job can call hashes
+a password on create, and an unbound hasher is a ``ConfigurationError`` on the
+first invite that gets processed.
 
 **Readiness without HTTP.** A worker serves no requests, so there is no endpoint
 to probe. It refreshes the mtime of a heartbeat file while
@@ -52,6 +61,7 @@ from pathlib import Path
 from typing import Any, ClassVar, Final
 
 import anyio
+from keel.auth import hashing_lifespan
 from keel.cache import cache_lifespan
 from keel.database import database_lifespan, uow
 from keel.queue import (
@@ -212,6 +222,9 @@ async def serve(settings: Settings | None = None) -> None:
     async with (
         database_lifespan(config.database_config()),
         cache_lifespan(config.cache_config()),
+        # Hashing but no token store: a job may create a user, none issues a
+        # credential, and `acting_as` needs nothing bound to carry a caller.
+        hashing_lifespan(config.hashing_config()),
         queue_lifespan(queue_config),
     ):
         # The default error handler discards listener failures: a worker that stopped

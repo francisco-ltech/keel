@@ -3,16 +3,32 @@
 Every test here writes rows and none of them clean up: the transaction the
 `client` fixture opens is rolled back when the test ends, which is why the email
 uniqueness assertions do not interfere with each other.
+
+**Registration is the only open route, and the tests read that way.** Everything
+else carries an `Authorization` header, because everything else takes `Caller`
+or `Owner`. The three that matter most are at the bottom: a caller is required
+to change a password, one caller cannot touch another's account, and a password
+change has to prove knowledge of the password it replaces. Each of those was a
+live account-takeover path while these routes were open.
 """
 
 from __future__ import annotations
 
-import pytest
-from httpx import AsyncClient
+from typing import get_args, get_type_hints
+from uuid import UUID
 
-from tests.conftest import create_user
+import pytest
+from fastapi import params
+from httpx import AsyncClient
+from keel.database import uow
+
+from app.modules.users.repository import UserRepository
+from app.security import require_owner
+from tests.conftest import DEFAULT_USER, bearer, create_user, signed_in
 
 pytestmark = pytest.mark.anyio
+
+MISSING_ID = "00000000-0000-4000-8000-000000000000"
 
 
 async def test_creating_a_user_returns_it(
@@ -66,32 +82,32 @@ async def test_a_short_password_is_rejected(
 
 
 async def test_fetching_a_user(client: AsyncClient) -> None:
-    created = await create_user(client)
+    created, token = await signed_in(client)
 
-    response = await client.get(f"/users/{created['id']}")
+    response = await client.get(f"/users/{created['id']}", headers=bearer(token))
 
     assert response.status_code == 200
     assert response.json() == created
 
 
 async def test_fetching_an_unknown_user_is_a_problem_document(client: AsyncClient) -> None:
-    missing = "00000000-0000-4000-8000-000000000000"
+    token = (await signed_in(client))[1]
 
-    response = await client.get(f"/users/{missing}")
+    response = await client.get(f"/users/{MISSING_ID}", headers=bearer(token))
 
     assert response.status_code == 404
     problem = response.json()
     assert problem["status"] == 404
     assert problem["type"].endswith("/not-found")
-    assert missing in problem["detail"]
+    assert MISSING_ID in problem["detail"]
 
 
 async def test_listing_users(client: AsyncClient) -> None:
     """Asserted as a set: every row in one test shares a transaction timestamp."""
-    await create_user(client, email="ada@example.com")
+    token = (await signed_in(client, email="ada@example.com"))[1]
     await create_user(client, email="grace@example.com")
 
-    response = await client.get("/users")
+    response = await client.get("/users", headers=bearer(token))
 
     assert response.status_code == 200
     emails = {user["email"] for user in response.json()}
@@ -99,18 +115,33 @@ async def test_listing_users(client: AsyncClient) -> None:
 
 
 async def test_listing_users_respects_the_page_size(client: AsyncClient) -> None:
-    await create_user(client, email="ada@example.com")
+    token = (await signed_in(client, email="ada@example.com"))[1]
     await create_user(client, email="grace@example.com")
 
-    response = await client.get("/users", params={"limit": 1})
+    response = await client.get("/users", params={"limit": 1}, headers=bearer(token))
 
     assert len(response.json()) == 1
 
 
-async def test_updating_a_user(client: AsyncClient) -> None:
+async def test_reading_users_requires_a_caller(client: AsyncClient) -> None:
+    """`GET /users` is the address book the sign-in path spends 40ms hiding.
+
+    Argon2 against a dummy hash, a uniform 401 and one message for both failures
+    are all defences against enumerating who has an account here. An open
+    listing answers the same question as JSON, in one request, for everybody.
+    """
     created = await create_user(client)
 
-    response = await client.patch(f"/users/{created['id']}", json={"full_name": "Augusta Ada King"})
+    assert (await client.get("/users")).status_code == 401
+    assert (await client.get(f"/users/{created['id']}")).status_code == 401
+
+
+async def test_updating_a_user(client: AsyncClient) -> None:
+    created, token = await signed_in(client)
+
+    response = await client.patch(
+        f"/users/{created['id']}", json={"full_name": "Augusta Ada King"}, headers=bearer(token)
+    )
 
     assert response.status_code == 200
     body = response.json()
@@ -118,42 +149,209 @@ async def test_updating_a_user(client: AsyncClient) -> None:
     assert body["email"] == created["email"], "an unset field must be left alone"
 
 
-async def test_updating_a_password_does_not_return_it(client: AsyncClient) -> None:
-    created = await create_user(client)
+async def test_a_partial_update_cannot_carry_a_password(client: AsyncClient) -> None:
+    """`password` is not a field on UserUpdate, and extra keys are ignored.
+
+    Belt and braces for the takeover this route used to allow: even sent by the
+    account's owner, the value must not reach the column — a password change
+    goes through the route that demands the current one.
+    """
+    created, token = await signed_in(client)
 
     response = await client.patch(
-        f"/users/{created['id']}", json={"password": "a-different-password"}
+        f"/users/{created['id']}", json={"password": "a-different-password"}, headers=bearer(token)
     )
 
     assert response.status_code == 200
     assert "password" not in response.json()
+    replaced = await client.post(
+        "/sessions", json={"email": created["email"], "password": "a-different-password"}
+    )
+    assert replaced.status_code == 401, "PATCH set a password"
 
 
 async def test_updating_to_a_taken_email_is_a_conflict(client: AsyncClient) -> None:
     await create_user(client, email="ada@example.com")
-    other = await create_user(client, email="grace@example.com")
+    other, token = await signed_in(client, email="grace@example.com")
 
-    response = await client.patch(f"/users/{other['id']}", json={"email": "ada@example.com"})
+    response = await client.patch(
+        f"/users/{other['id']}", json={"email": "ada@example.com"}, headers=bearer(token)
+    )
 
     assert response.status_code == 409
 
 
-async def test_updating_an_unknown_user_is_not_found(client: AsyncClient) -> None:
-    missing = "00000000-0000-4000-8000-000000000000"
+async def test_updating_an_unknown_user_is_forbidden(client: AsyncClient) -> None:
+    """403 before 404: ownership is decided in the dependency, before any query."""
+    token = (await signed_in(client))[1]
 
-    response = await client.patch(f"/users/{missing}", json={"full_name": "Nobody"})
+    response = await client.patch(
+        f"/users/{MISSING_ID}", json={"full_name": "Nobody"}, headers=bearer(token)
+    )
 
-    assert response.status_code == 404
+    assert response.status_code == 403
 
 
 async def test_deleting_a_user(client: AsyncClient) -> None:
+    """Asserted through a second caller: deleting revokes the deleted user's tokens."""
+    created, token = await signed_in(client, email="ada@example.com")
+    observer = (await signed_in(client, email="grace@example.com"))[1]
+
+    deleted = await client.delete(f"/users/{created['id']}", headers=bearer(token))
+    gone = await client.get(f"/users/{created['id']}", headers=bearer(observer))
+
+    assert deleted.status_code == 204
+    assert gone.status_code == 404
+
+
+async def test_a_caller_cannot_modify_another_users_account(client: AsyncClient) -> None:
+    """The takeover this scaffold used to ship, asserted from the attacker's side.
+
+    Read an address from the listing, PATCH a password onto it, sign in as them.
+    Every step below is one an unauthenticated request could once complete.
+    """
+    victim = (await signed_in(client, email="ada@example.com"))[0]
+    attacker = (await signed_in(client, email="mallory@example.com"))[1]
+    headers = bearer(attacker)
+
+    disabled = await client.patch(
+        f"/users/{victim['id']}", json={"is_active": False}, headers=headers
+    )
+    repassworded = await client.put(
+        f"/users/{victim['id']}/password",
+        json={"current_password": "irrelevant", "new_password": "attacker-chosen"},
+        headers=headers,
+    )
+    removed = await client.delete(f"/users/{victim['id']}", headers=headers)
+    victim_signs_in = await client.post(
+        "/sessions", json={"email": "ada@example.com", "password": DEFAULT_USER["password"]}
+    )
+
+    assert disabled.status_code == 403
+    assert repassworded.status_code == 403
+    assert removed.status_code == 403
+    assert victim_signs_in.status_code == 201, "the attacker changed something"
+
+
+async def test_a_write_without_a_caller_is_refused(client: AsyncClient) -> None:
+    """Anonymously: no PATCH, no password, no DELETE. 401, before ownership."""
     created = await create_user(client)
 
-    assert (await client.delete(f"/users/{created['id']}")).status_code == 204
-    assert (await client.get(f"/users/{created['id']}")).status_code == 404
+    disabled = await client.patch(f"/users/{created['id']}", json={"is_active": False})
+    repassworded = await client.put(
+        f"/users/{created['id']}/password",
+        json={"current_password": "x", "new_password": "attacker-chosen"},
+    )
+    removed = await client.delete(f"/users/{created['id']}")
+
+    assert disabled.status_code == 401
+    assert repassworded.status_code == 401
+    assert removed.status_code == 401
 
 
-async def test_deleting_an_unknown_user_is_not_found(client: AsyncClient) -> None:
-    missing = "00000000-0000-4000-8000-000000000000"
+async def test_changing_a_password_requires_the_caller(client: AsyncClient) -> None:
+    """No token, no password change — and the old one still signs in afterwards."""
+    created = await create_user(client)
 
-    assert (await client.delete(f"/users/{missing}")).status_code == 404
+    response = await client.put(
+        f"/users/{created['id']}/password",
+        json={"current_password": DEFAULT_USER["password"], "new_password": "attacker-chosen"},
+    )
+
+    assert response.status_code == 401
+    assert response.headers["www-authenticate"] == "Bearer"
+    unchanged = await client.post(
+        "/sessions", json={"email": created["email"], "password": DEFAULT_USER["password"]}
+    )
+    assert unchanged.status_code == 201
+
+
+async def test_changing_a_password_requires_the_current_one(client: AsyncClient) -> None:
+    """A bearer token can be stolen; the password in force is what a thief lacks.
+
+    403 rather than 401: the token presented was accepted, and answering a
+    working credential with a challenge signs the caller out over a typo.
+    """
+    created, token = await signed_in(client)
+
+    response = await client.put(
+        f"/users/{created['id']}/password",
+        json={"current_password": "not-the-one", "new_password": "a-new-password"},
+        headers=bearer(token),
+    )
+
+    assert response.status_code == 403
+    assert response.json()["type"].endswith("/forbidden")
+    unchanged = await client.post(
+        "/sessions", json={"email": created["email"], "password": DEFAULT_USER["password"]}
+    )
+    assert unchanged.status_code == 201
+
+
+async def test_changing_a_password_replaces_it(client: AsyncClient) -> None:
+    created, token = await signed_in(client)
+
+    response = await client.put(
+        f"/users/{created['id']}/password",
+        json={"current_password": DEFAULT_USER["password"], "new_password": "a-new-password"},
+        headers=bearer(token),
+    )
+
+    assert response.status_code == 204
+    assert not response.content, "the new password must not be echoed back"
+    with_old = await client.post(
+        "/sessions", json={"email": created["email"], "password": DEFAULT_USER["password"]}
+    )
+    assert with_old.status_code == 401
+    with_new = await client.post(
+        "/sessions", json={"email": created["email"], "password": "a-new-password"}
+    )
+    assert with_new.status_code == 201
+
+
+def test_owner_reads_the_path_and_only_the_path() -> None:
+    """`Owner`'s id parameter must be pinned to the path with `Path()`.
+
+    FastAPI sources a scalar dependency parameter from the **query string** on
+    any route whose path does not declare that name. Unpinned, mounting `Owner`
+    on a route spelled `/accounts/{id}` lets a caller pass `?user_id=<their own>`
+    and clear the ownership check against somebody else's record.
+
+    Asserted structurally rather than through a request: every shipped route
+    spells the parameter `user_id`, so on those the path always wins and an
+    end-to-end probe would pass whether or not the annotation is there.
+    """
+    hint = get_type_hints(require_owner, include_extras=True)["user_id"]
+
+    assert any(isinstance(marker, params.Path) for marker in get_args(hint)[1:]), (
+        "require_owner's user_id is not pinned to the path, so a renamed route "
+        "would read it from the query string"
+    )
+
+
+async def test_a_rehash_on_login_cannot_overwrite_a_newer_password(
+    client: AsyncClient,
+) -> None:
+    """A sign-in hashes outside its transaction, so the row can move underneath.
+
+    Rehash-on-login writes a hash of the password it was given, computed ~40ms
+    earlier. A blind write reverts a password change committed during that
+    window — the owner sees 204 and their sessions revoked, while the old
+    password keeps working. The write is a compare-and-set for that reason.
+    """
+    user = await create_user(client, email="racer@example.com")
+    user_id = UUID(user["id"])
+
+    async with uow() as session:
+        users = UserRepository(session)
+        row = await users.get(user_id)
+        assert row is not None
+        current = row.hashed_password
+        await users.update(row, {"hashed_password": "changed-by-somebody-else"})
+
+    async with uow() as session:
+        swapped = await UserRepository(session).replace_hash_if_unchanged(
+            user_id, expected=current, new="the-stale-rehash"
+        )
+
+    assert not swapped, "a stale rehash overwrote a newer password"

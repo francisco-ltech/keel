@@ -1,0 +1,182 @@
+"""The bearer-token dependency: who is calling, and whether they must be.
+
+**Why this is here and not in Keel.** Keel's core imports no web framework —
+that is the property that lets the same error taxonomy, the same services and
+the same jobs run in a process with no HTTP at all. A dependency is FastAPI's
+vocabulary: ``Depends``, ``HTTPBearer``, the OpenAPI security scheme. Moving it
+into the library would mean either a framework import in the core or a
+``keel[fastapi]`` integration package, and one consumer is not enough evidence
+to design an integration package around — the same reasoning that declined the
+guard chain in ADR 0007. When a second application wants exactly this file,
+that is when it earns a home in the library.
+
+What Keel does supply is everything underneath: ``resolve_token`` turns a
+plaintext into an :class:`~keel.auth.Identity` or ``None``, and ``acting_as``
+publishes it. This module is thirty lines of translation on top.
+
+**Binding happens in a dependency with ``yield``, and that is not the pattern
+ADR 0002 forbids.** What must never be held across a request is a *pooled
+resource* — a database session, whose connection is then still checked out
+during response-model validation. A ``ContextVar`` is not pooled and costs
+nothing to hold; binding it around the whole request is the point, so that an
+audit column written deep inside a service can find the caller without it being
+threaded through every signature.
+
+The dependency must be ``async def``. FastAPI runs a *sync* dependency in a
+threadpool, and a context variable set there is invisible to the endpoint.
+
+**Two forms, because most endpoints want one or the other.** :data:`Caller`
+refuses the request without a valid token; :data:`MaybeCaller` hands back
+``None`` and lets the endpoint decide — a listing that shows more to a signed-in
+reader wants to know who is asking without demanding it. Both resolve the same
+underlying dependency, which FastAPI caches per request, so asking for both
+costs one lookup.
+
+**:data:`Owner` is authorization, and it is here rather than in a service on
+purpose.** It reads ``user_id`` from the path, compares it with the caller and
+answers 403, so ``PATCH /users/{user_id}`` cannot be written without deciding
+who may call it. That is the simplest possible policy — *you may act on
+yourself* — and it is deliberately not a framework: an admin role, or a resource
+that several people share, is where a policy object earns its place (ADR 0007,
+decision 7). Until then, one dependency is the whole rule and it composes with
+``Caller`` rather than replacing it, so the 401 still happens before the 403.
+"""
+
+from __future__ import annotations
+
+from collections.abc import AsyncIterator
+from typing import Annotated, Final
+from uuid import UUID
+
+from fastapi import Depends, Path
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from keel.auth import Identity, acting_as, resolve_token
+
+from app.errors import AuthenticationError, ForbiddenError
+
+bearer_scheme: Final = HTTPBearer(
+    scheme_name="Bearer",
+    description="A token from `POST /sessions`.",
+    # `auto_error=False` so a missing header is `None` rather than FastAPI's own
+    # 403: the endpoints below answer with this application's problem document.
+    auto_error=False,
+)
+"""The ``Authorization: Bearer ...`` scheme, and the Authorize button in the docs."""
+
+Credentials = Annotated[HTTPAuthorizationCredentials | None, Depends(bearer_scheme)]
+"""Whatever was in the ``Authorization`` header, unresolved."""
+
+
+async def resolve_caller(credentials: Credentials) -> AsyncIterator[Identity | None]:
+    """Resolve the presented token and publish the caller for the whole request.
+
+    An unknown, expired or revoked token is the same as no token at all here.
+    Turning it into a 401 is :func:`require_caller`'s job, so that an endpoint
+    which merely *prefers* a caller is not broken by a stale one.
+
+    Args:
+        credentials: The parsed ``Authorization`` header, if there was one.
+
+    Yields:
+        The caller, or ``None``.
+    """
+    identity = None if credentials is None else await resolve_token(credentials.credentials)
+    with acting_as(identity):
+        yield identity
+
+
+MaybeCaller = Annotated[Identity | None, Depends(resolve_caller)]
+"""The caller if there is one. For endpoints that behave differently when signed
+in but do not require it."""
+
+
+async def require_caller(caller: MaybeCaller) -> Identity:
+    """Return the caller, refusing the request when there is none.
+
+    Args:
+        caller: The resolved caller.
+
+    Returns:
+        The caller.
+
+    Raises:
+        AuthenticationError: If no valid token was presented.
+    """
+    if caller is None:
+        raise AuthenticationError("a valid bearer token is required")
+    return caller
+
+
+Caller = Annotated[Identity, Depends(require_caller)]
+"""The caller, guaranteed. The dependency 401s before the endpoint runs."""
+
+
+async def require_owner(user_id: Annotated[UUID, Path()], caller: Caller) -> Identity:
+    """Return the caller, refusing them the account of anybody else.
+
+    ``Path()`` is load-bearing, not decoration. Without it FastAPI sources a
+    scalar from the **query string** on any route whose path does not declare
+    ``user_id`` — so mounting this on ``/accounts/{id}`` would let a caller pass
+    ``?user_id=<their own>`` and pass the check against somebody else's record.
+    Pinned, such a route fails with a 422 that names the mistake.
+
+    A route guarding a differently-named resource wants its own dependency
+    rather than a parameter added here.
+
+    Args:
+        user_id: The account being acted on, from the path.
+        caller: The authenticated caller.
+
+    Returns:
+        The caller.
+
+    Raises:
+        ForbiddenError: If the caller is somebody else. A 403 rather than a 404:
+            the caller already knows the id — they put it in the URL — so hiding
+            existence here buys nothing that ``GET`` does not already give away.
+    """
+    if caller.id != user_id:
+        raise ForbiddenError("you may only act on your own account")
+    return caller
+
+
+Owner = Annotated[Identity, Depends(require_owner)]
+"""The caller, guaranteed to own the ``user_id`` in the path."""
+
+
+async def require_bearer_token(credentials: Credentials) -> str:
+    """Return the presented token itself, for the one endpoint that revokes it.
+
+    Signing out needs the plaintext rather than the identity: the store is keyed
+    by the token's digest, and the identity does not say which of a person's
+    devices asked.
+
+    Args:
+        credentials: The parsed ``Authorization`` header, if there was one.
+
+    Returns:
+        The token as presented.
+
+    Raises:
+        AuthenticationError: If no token was presented.
+    """
+    if credentials is None:
+        raise AuthenticationError("a valid bearer token is required")
+    return credentials.credentials
+
+
+BearerToken = Annotated[str, Depends(require_bearer_token)]
+"""The presented token, unresolved."""
+
+__all__ = [
+    "BearerToken",
+    "Caller",
+    "Credentials",
+    "MaybeCaller",
+    "Owner",
+    "bearer_scheme",
+    "require_bearer_token",
+    "require_caller",
+    "require_owner",
+    "resolve_caller",
+]

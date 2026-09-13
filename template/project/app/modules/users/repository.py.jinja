@@ -16,7 +16,7 @@ from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from app.modules.users.models import User
 
@@ -125,6 +125,31 @@ class UserRepository:
             setattr(user, key, value)
         await self._session.flush()
         return user
+
+    async def replace_hash_if_unchanged(self, user_id: UUID, *, expected: str, new: str) -> bool:
+        """Swap a stored password hash, but only if it is still the one seen.
+
+        A compare-and-set rather than a read-then-write, because the caller read
+        that hash before spending ~40ms hashing outside the transaction. A blind
+        write would silently revert a password change committed during it.
+
+        Args:
+            user_id: Whose row to update.
+            expected: The hash the caller verified against.
+            new: The replacement.
+
+        Returns:
+            Whether the row still held *expected* and was updated. ``False``
+            means someone else changed it first, and the caller should leave it
+            alone — a rehash is an optimisation, not a race to win.
+        """
+        result = await self._session.execute(
+            update(User)
+            .where(User.id == user_id, User.hashed_password == expected)
+            .values(hashed_password=new)
+            .returning(User.id)
+        )
+        return result.scalar_one_or_none() is not None
 
     async def delete(self, user: User) -> None:
         """Delete a user.

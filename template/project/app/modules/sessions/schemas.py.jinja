@@ -1,0 +1,53 @@
+"""The wire types for sessions.
+
+Pydantic only, like every other ``schemas`` module.
+
+:class:`SessionRead` is the only place a token's plaintext ever appears. The
+store keeps a digest and nothing can reverse it, so a client that loses the
+value signs in again rather than asking for it back — which is also why there is
+no endpoint that returns an existing token.
+"""
+
+from __future__ import annotations
+
+from datetime import datetime
+from typing import Literal
+
+from pydantic import BaseModel, EmailStr, Field
+
+from app.modules.users.schemas import PASSWORD_MAX_LENGTH
+
+
+class SignIn(BaseModel):
+    """What a client sends to create a session.
+
+    Attributes:
+        email: The address to sign in as.
+        password: The password as typed. Bounded above, because an unbounded
+            password is an unbounded amount of hashing — but deliberately not
+            bounded *below*: a password stored before the minimum length rose
+            must still be able to sign in and be rehashed, and rejecting it
+            here would lock the account out with a 422.
+    """
+
+    email: EmailStr
+    password: str = Field(max_length=PASSWORD_MAX_LENGTH)
+
+
+class SessionRead(BaseModel):
+    """A newly created session.
+
+    Attributes:
+        access_token: The bearer token. Present exactly once, here.
+        token_type: Always ``bearer``. Named as the ``Authorization`` header
+            spells it, so a client can build the header without a lookup table.
+        expires_at: When the token stops working, or ``None`` if it does not
+            expire — which only happens when ``TOKEN_TTL`` is set to ``never``.
+    """
+
+    access_token: str
+    token_type: Literal["bearer"] = "bearer"
+    expires_at: datetime | None
+
+
+__all__ = ["SessionRead", "SignIn"]

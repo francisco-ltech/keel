@@ -1,0 +1,71 @@
+"""HTTP for sessions.
+
+Status codes, paths and headers; nothing else. Every handler is one call into
+:mod:`app.modules.sessions.service`.
+
+The routes are ``POST``, ``GET`` and ``DELETE`` on a noun rather than
+``/login``, ``/me`` and ``/logout``, because a session has a lifetime and the
+methods already describe it. Signing in creates one and signing out deletes it,
+which also makes ``DELETE`` idempotent for free: asking twice is not an error.
+"""
+
+from __future__ import annotations
+
+from typing import Annotated
+
+from fastapi import APIRouter, Header, status
+
+from app.modules.sessions import service
+from app.modules.sessions.schemas import SessionRead, SignIn
+from app.modules.users.schemas import UserRead
+from app.security import BearerToken, Caller
+
+router = APIRouter(prefix="/sessions", tags=["sessions"])
+
+
+@router.post("", status_code=status.HTTP_201_CREATED, summary="Sign in")
+async def sign_in(
+    payload: SignIn,
+    user_agent: Annotated[str | None, Header()] = None,
+) -> SessionRead:
+    """Exchange credentials for a bearer token.
+
+    Args:
+        payload: The email and password.
+        user_agent: Translated into the token's label, which is what a
+            "signed-in devices" listing shows. The service decides what to keep
+            of it; this layer only knows it came from a header.
+
+    Returns:
+        The new session. The token is readable here and nowhere else.
+    """
+    return await service.sign_in(payload, label=user_agent)
+
+
+@router.get("/current", summary="The signed-in user")
+async def current_session(_: Caller) -> UserRead:
+    """Return the caller's own user record.
+
+    Args:
+        _: Declared for the dependency rather than for the body — it is what
+            makes this a 401 before any query runs, and what puts the padlock on
+            the endpoint in the generated documentation. The service reads the
+            caller from the context, exactly as a job would.
+
+    Returns:
+        The caller's user record.
+    """
+    return await service.current_user()
+
+
+@router.delete("/current", status_code=status.HTTP_204_NO_CONTENT, summary="Sign out")
+async def sign_out(token: BearerToken) -> None:
+    """Revoke the presented token, leaving the caller's other sessions alone.
+
+    Args:
+        token: The token from the ``Authorization`` header.
+    """
+    await service.sign_out(token)
+
+
+__all__ = ["router"]
