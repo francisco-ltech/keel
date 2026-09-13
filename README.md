@@ -44,10 +44,11 @@ docs/adr/          why things are shaped the way they are
 | `keel.testing` | `fake_cache()` and `rolled_back_database()`. |
 | `keel.database` (Phase 2) | Generic repository, UUIDv7 keys, soft deletes as a global query scope, keyset pagination, model observers that fire after commit, factories and seeders, advisory-locked migrations with drift detection. |
 | `keel.queue` (Phase 3) | Jobs as Commands, dispatch that waits for the transaction to commit, SAQ driver, a supervised worker with graceful shutdown and orphan recovery, durable failed jobs, and cron guarded by an advisory lock. |
+| `keel.auth` (Phase 4) | The current-identity context, Argon2 password hashing with rehash-on-login, and hashed-at-rest bearer tokens. Drivers: Redis, in-memory. Recording fake. No guards or policies yet. |
 | `template/` | Generates a service in three shapes — API, worker, or both — with domain modules, Alembic, tests and Docker. |
 
-Auth, mail and storage are not in the box yet. [The roadmap](docs/roadmap.md)
-says what is coming and in what order.
+Authorization, mail and storage are not in the box yet.
+[The roadmap](docs/roadmap.md) says what is coming and in what order.
 
 ## Getting started
 
@@ -96,6 +97,9 @@ starves. See [ADR 0002](docs/adr/0002-the-unit-of-work.md).
   this rather than depending on Advanced-Alchemy.
 - [ADR 0004 — two type checkers](docs/adr/0004-two-type-checkers.md): ty for the
   inner loop, mypy as the gate, and the criteria for dropping one.
+- [ADR 0007 — identity and tokens](docs/adr/0007-identity-and-tokens.md): the
+  current-user context, why there is no guest, hashed-at-rest bearer tokens, and
+  the guard protocol and user provider that were declined.
 - [ADR 0006 — the queue](docs/adr/0006-the-queue.md): jobs as Commands, dispatch
   after commit, why the cache's shape did not transfer, and why Keel sweeps for
   orphans itself instead of using SAQ's.

@@ -5,12 +5,15 @@ fakes are for *applications built on Keel*, not only for Keel's own tests. A
 battery whose test double lives in the framework's private test directory is a
 battery nobody else can test against.
 
-The two helpers here are deliberately different in kind, and the difference is
+The helpers here are deliberately different in kind, and the difference is
 the point:
 
 * :func:`fake_cache` swaps the cache for a recording double. Faking is right for
   a cache because the real thing is remote and slow, and because what a test
   wants to know is *what the code did to it*.
+* :func:`fake_tokens` does the same for bearer tokens, and for the same reason:
+  the credential still works, because a test that signs in has to be able to use
+  what it was given.
 * :func:`rolled_back_database` does the opposite — it gives you the **real**
   database and throws away the changes. Faking a database means not testing the
   queries, which are the part most likely to be wrong.
@@ -27,6 +30,10 @@ from typing import TYPE_CHECKING
 
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
+from keel.auth.binding import use_token_manager
+from keel.auth.config import TokenConfig
+from keel.auth.fake import FakeTokenStore
+from keel.auth.manager import TokenManager
 from keel.cache.config import CacheConfig, StoreConfig
 from keel.cache.fake import FakeStore
 from keel.cache.manager import CacheManager
@@ -177,4 +184,35 @@ def fake_queue(*, driver: str = "fake") -> Iterator[FakeQueue]:
         yield recorder
 
 
-__all__ = ["fake_cache", "fake_queue", "rolled_back_database"]
+@contextmanager
+def fake_tokens(*, driver: str = "fake", ttl: float | None = None) -> Iterator[FakeTokenStore]:
+    """Replace the bound token store with a recording fake for the duration of a block.
+
+    Records every issue, resolve and revocation *and* performs it for real — see
+    :mod:`keel.auth.fake` for why this one decorates a working store where
+    :func:`fake_queue` only records. Code under test can sign in and then use the
+    credential it was handed, which is the whole shape of an authentication test.
+
+    Example:
+        >>> with fake_tokens() as tokens:  # doctest: +SKIP
+        ...     await sessions.sign_in(email, password)
+        ...     tokens.assert_issued(user.id, label="web")
+
+    Args:
+        driver: The driver name to bind under. Rarely worth changing.
+        ttl: The lifetime applied when the code under test does not specify one.
+            ``None`` — tokens that outlive the test — is the default because a
+            test asserting on expiry passes its own, and every other test would
+            rather not think about the clock.
+
+    Yields:
+        The fake, for assertions.
+    """
+    manager = TokenManager(TokenConfig(driver=driver, ttl=ttl))
+    recorder = FakeTokenStore(name=driver, ttl=ttl)
+    manager.extend(driver, lambda _name: recorder)
+    with use_token_manager(manager):
+        yield recorder
+
+
+__all__ = ["fake_cache", "fake_queue", "fake_tokens", "rolled_back_database"]

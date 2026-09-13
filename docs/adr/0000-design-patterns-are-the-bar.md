@@ -61,12 +61,12 @@ for the queue after it earned its place in the cache.
 | Bridge | `cache.Store` (implementor) / `cache.Repository` (abstraction) |
 | Strategy | Cache drivers; serializers; backoff policies |
 | Template Method | `Repository.remember`; the worker loop |
-| Abstract Factory | `Manager[T]`, `CacheManager`, `QueueManager` |
-| Decorator | `EventfulStore`, `FakeStore` |
+| Abstract Factory | `Manager[T]`, `CacheManager`, `QueueManager`, `TokenManager` |
+| Decorator | `EventfulStore`, `FakeStore`, `FakeTokenStore` |
 | Virtual Proxy | `CacheProxy`, the `dispatch()` facade |
-| Null Object | `NullStore`, `NullLock` |
+| Null Object | `NullStore`, `NullLock` — and declined for a guest `Identity`, ADR 0007 |
 | Observer | `EventDispatcher`; model observers; job lifecycle events |
-| Test Spy | `FakeStore`, `FakeQueue` |
+| Test Spy | `FakeStore`, `FakeQueue`, `FakeTokenStore` |
 | Command | `Job` — an operation with its parameters, serialised and executed later |
 | Chain of Responsibility | *Planned* for job middleware; not built, because one middleware is not a chain |
 
@@ -76,10 +76,11 @@ for the queue after it earned its place in the cache.
 |---|---|---|
 | Singleton | Managers, `Database` | Lifetimes belong to the container and the lifespan, not to classes deciding to be unique. Memoisation is not Singleton; it can be reset. |
 | Service Locator | Application code | The facade is a convenience at the edges. Services take what they need as arguments. |
-| Bridge | The queue | Earned its place in the cache because `remember` is substantial. A queue's dispatch side is `push`/`later`/`bulk` — a second layer would be ceremony. |
+| Bridge | The queue, and the token store | Earned its place in the cache because `remember` is substantial. A queue's dispatch side is `push`/`later`/`bulk`, and a token store's surface *is* the primitives — a second layer would be ceremony. |
 | Abstract Base Classes for drivers | `Store`, `Queue` | Protocols instead, so a third-party driver needs no dependency on Keel to satisfy the contract. |
 | A general DI container | Everywhere | Solves a team-coordination problem this project does not have. |
 | A symmetrical consume contract | The queue | The worker is one implementation. An interface with a single implementor is indirection pretending to be design. |
+| A guard protocol, and a user provider | Auth | One implementation until sessions exist beside tokens; and the principal's row is the application's schema, not Keel's. ADR 0007. |
 | Decorator over a real backend, for the fake | `FakeQueue` | Works for the cache, where behaviour is cheap to have for real. Running a job would make the test exercise the handler while claiming to test the dispatcher. |
 
 ## Note

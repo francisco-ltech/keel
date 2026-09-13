@@ -22,32 +22,43 @@ it was the cheapest place to find out whether the shape was right before three
 more subsystems were built on it. ADR 0001 records what transferred and what
 did not.
 
-## Next
+## In progress
 
 ### Phase 4 — auth and authz
 
-The largest remaining gap against Laravel, and the one three other decisions are
-waiting on.
+The largest remaining gap against Laravel, and the one three other decisions
+were waiting on. [ADR 0007](adr/0007-identity-and-tokens.md).
 
-Scope: password hashing and verification (Argon2 is already a dependency),
-sessions or tokens, a current-user context, and authorization as policies
-against a resource. Both halves of the shape apply — a driver seam for *how* a
-caller is identified, and a fake for tests.
+**Shipped:**
 
-It unblocks:
+* The **current-identity context** — a frozen `Identity` value on a ContextVar,
+  never the application's user row, and no guest object.
+* **Password hashing** — Argon2id with rehash-on-login and a constant-cost miss,
+  so a login endpoint cannot be used to enumerate addresses.
+* **The bearer token store** — hashed at rest, expiry checked on read, per-subject
+  revocation. Redis and in-memory drivers, a recording fake, one contract suite.
+
+**Left:** authorization as policies against a resource, and the template
+integration that puts a login endpoint into a generated service.
+
+**Declined, with reasons in the ADR:** a guard protocol and a user provider —
+Laravel's two seams here. A guard that cannot see a request is one function, and
+a chain with one link is the ceremony ADR 0006 already refused for job
+middleware. The principal's row is the application's schema, and Keel building an
+interface over it would put a model dependency in the core.
+
+**Still open:** whether a policy is a Strategy per resource or a Chain of
+Responsibility. Answering it before a second resource exists would be
+scaffolding for one case.
+
+**What it unblocked:**
 
 * **Audit columns** (`created_by`, `updated_by`), deferred by ADR 0003 because a
   column that is always `NULL` is worse than no column.
 * **Multi-tenancy**, whose mechanism is the global query scope the soft-delete
   listener already demonstrates.
-* The generated template's own README, which tells users authentication arrives
-  as a new module rather than as a migration of every row.
 
-Open questions to settle in its ADR: where the current user lives (a ContextVar,
-the way `keel.database.hooks` publishes the active session, is the obvious
-candidate and the pattern already exists); and whether a policy is a Strategy
-per resource or a Chain of Responsibility — the latter being the pattern ADR
-0006 earmarked for job middleware and declined for having only one case.
+## Next
 
 ### Phase 5 — observability
 

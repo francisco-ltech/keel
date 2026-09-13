@@ -126,19 +126,22 @@ class RedisTokenStore:
         self._owns_client = owns_client
 
     @classmethod
-    def from_url(cls, url: str, config: TokenConfig) -> RedisTokenStore:
+    def from_url(cls, url: str, config: TokenConfig, *, name: str = "redis") -> RedisTokenStore:
         """Build a store from a connection URL.
 
         Args:
             url: The Redis URL.
             config: The namespace and default lifetime to use.
+            name: The driver name this store was resolved under. Passed
+                explicitly rather than read from ``config.driver``, which names
+                the *default* driver and is wrong for any other.
 
         Returns:
             A store owning its own client.
         """
         return cls(
             Redis.from_url(url, decode_responses=False),
-            name=config.driver,
+            name=name,
             namespace=KeyNamespace(config.prefix),
             ttl=config.ttl,
             owns_client=True,
