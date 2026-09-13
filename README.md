@@ -31,7 +31,6 @@ the library by path.
 ```
 packages/keel/     the core library
 template/          copier template for new applications
-examples/          a small FastAPI app used as an end-to-end test
 docs/adr/          why things are shaped the way they are
 ```
 
@@ -44,9 +43,10 @@ docs/adr/          why things are shaped the way they are
 | `keel.testing` | `fake_cache()` and `rolled_back_database()`. |
 | `keel.database` (Phase 2) | Generic repository, UUIDv7 keys, soft deletes as a global query scope, keyset pagination, model observers that fire after commit, factories and seeders, advisory-locked migrations with drift detection. |
 | `keel.queue` (Phase 3) | Jobs as Commands, dispatch that waits for the transaction to commit, SAQ driver, a supervised worker with graceful shutdown and orphan recovery, durable failed jobs, and cron guarded by an advisory lock. |
-| `template/` | Generates an API service with domain modules, Alembic, tests and Docker. Worker and API+worker shapes arrive with Phase 3. |
+| `template/` | Generates a service in three shapes — API, worker, or both — with domain modules, Alembic, tests and Docker. |
 
-Queues, mail, storage, auth and the rest are on the roadmap, not in the box.
+Auth, mail and storage are not in the box yet. [The roadmap](docs/roadmap.md)
+says what is coming and in what order.
 
 ## Getting started
 
@@ -79,6 +79,9 @@ production outages attached, and the failure is invisible at p99 while the pool
 starves. See [ADR 0002](docs/adr/0002-the-unit-of-work.md).
 
 ## Design notes
+
+- [The roadmap](docs/roadmap.md): the phases, what each one delivered, and what
+  Phase 4 unblocks.
 
 - [ADR 0000 — design patterns are the bar](docs/adr/0000-design-patterns-are-the-bar.md):
   the standing rule this codebase is held to, including the patterns

@@ -19,6 +19,8 @@ describing it move in the same commit:
 optional. Name the pattern you use, justify what it buys in one sentence, and
 record what you declined. "This should just be a function" is a valid finding.
 
+`docs/roadmap.md` is what the phase numbers in the ADRs refer to.
+
 The other ADRs carry the reasoning per subsystem. Link to them; never restate
 them, or the copy drifts and starts lying.
 
