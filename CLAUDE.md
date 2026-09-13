@@ -13,6 +13,11 @@ describing it move in the same commit:
 - `keel-review` — the adversarial review brief, and what it has caught before
 - `keel-template` — changing `template/` safely, and the traps already hit
 
+`.claude/agents/keel-reviewer.md` is the QA half of the loop. Non-trivial work
+gets built by one agent and reviewed by that one — read-only, adversarial, and
+never the agent that wrote the code. On the token store the author reported all
+gates green and the reviewer found six defects, two of them critical.
+
 ## Read before designing anything
 
 `docs/adr/0000-design-patterns-are-the-bar.md` is the standing rule and is not

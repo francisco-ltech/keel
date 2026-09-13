@@ -9,6 +9,10 @@ Three of these have run. Each found a real defect that lint, both type checkers
 and a green suite had missed. It is the highest-yield step in the loop, so run
 it before an ADR is written rather than after.
 
+Run it as the `keel-reviewer` agent (`.claude/agents/keel-reviewer.md`), which
+is read-only by construction and must never be the agent that wrote the code.
+The brief below is what that agent carries; give it the target and adapt.
+
 ## Standing brief
 
 Give the reviewer this, adapted:

@@ -76,5 +76,10 @@ just quick          # lint + ty + mypy
 just test           # ~16s
 ```
 
+Then a review by the `keel-reviewer` agent, which is read-only and is not you.
+Your suite passing proves your code matches your understanding of the problem;
+it cannot tell you that understanding was wrong. On the token store that gap was
+six defects wide.
+
 Then the ADR. It must include the patterns declined and why, and anything the
 contract suite caught — those are the parts a future reader cannot reconstruct.
