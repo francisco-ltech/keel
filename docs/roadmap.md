@@ -15,6 +15,7 @@ which is Phase 4"), so they are stable once assigned.
 | 0 | **The skeleton.** The copier template, settings, the async engine, and `uow()` — session lifetime decided before anything was built on it. | [0002](adr/0002-the-unit-of-work.md) |
 | 2 | **The data layer.** Generic repository, UUIDv7 keys, soft deletes as a global scope, keyset pagination, observers after commit, factories and seeders, advisory-locked migrations. | [0003](adr/0003-the-data-layer.md) |
 | 3 | **The queue.** Jobs as Commands, dispatch that waits for the commit, the SAQ driver, a supervised worker with orphan recovery, durable failed jobs, and cron. | [0006](adr/0006-the-queue.md) |
+| 4 | **Auth and authz.** The current-identity context, Argon2 hashing, bearer tokens, and authorization policies. Detail below. | [0007](adr/0007-identity-and-tokens.md), [0008](adr/0008-authorization-policies.md) |
 
 Phase 1 ran before Phase 0 on purpose. The cache is the smallest subsystem that
 still needs every part of the shape — facade, driver, fake, contract suite — so
@@ -22,41 +23,32 @@ it was the cheapest place to find out whether the shape was right before three
 more subsystems were built on it. ADR 0001 records what transferred and what
 did not.
 
-## In progress
-
-### Phase 4 — auth and authz
+### Phase 4 in detail
 
 The largest remaining gap against Laravel, and the one three other decisions
-were waiting on. [ADR 0007](adr/0007-identity-and-tokens.md).
-
-**Shipped:**
+were waiting on.
 
 * The **current-identity context** — a frozen `Identity` value on a ContextVar,
   never the application's user row, and no guest object.
-* **Password hashing** — Argon2id with rehash-on-login and a constant-cost miss,
-  so a login endpoint cannot be used to enumerate addresses.
-* **The bearer token store** — hashed at rest, expiry checked on read, per-subject
+* **Password hashing** — Argon2id with rehash-on-login and a constant-cost miss.
+* **Bearer tokens** — hashed at rest, expiry checked on read, per-subject
   revocation. Redis and in-memory drivers, a recording fake, one contract suite.
+* **Authorization policies** — a function per resource type, registered by exact
+  type, checked in the service rather than the router.
 
-**Left:** authorization as policies against a resource, and the template
-integration that puts a login endpoint into a generated service.
+**Declined:** a guard protocol and a user provider (Laravel's two seams here),
+and a Chain of Responsibility for policies. The ADRs carry the reasoning and the
+condition that would change each.
 
-**Declined, with reasons in the ADR:** a guard protocol and a user provider —
-Laravel's two seams here. A guard that cannot see a request is one function, and
-a chain with one link is the ceremony ADR 0006 already refused for job
-middleware. The principal's row is the application's schema, and Keel building an
-interface over it would put a model dependency in the core.
+**Known limits, recorded rather than fixed:** the equal-cost login holds only
+while stored hashes share the current cost parameters; revocation cannot reach a
+sign-in already in flight; nothing is rate-limited. ADR 0007, "What this does
+not do".
 
-**Still open:** whether a policy is a Strategy per resource or a Chain of
-Responsibility. Answering it before a second resource exists would be
-scaffolding for one case.
-
-**What it unblocked:**
-
-* **Audit columns** (`created_by`, `updated_by`), deferred by ADR 0003 because a
-  column that is always `NULL` is worse than no column.
-* **Multi-tenancy**, whose mechanism is the global query scope the soft-delete
-  listener already demonstrates.
+**What it unblocked:** audit columns (`created_by`, `updated_by`), deferred by
+ADR 0003 because they needed a current-user context, and multi-tenancy, whose
+mechanism is the global query scope the soft-delete listener demonstrates.
+Neither is built.
 
 ## Next
 

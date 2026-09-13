@@ -10,8 +10,15 @@ in the generated documentation, which is where endpoints go to be forgotten.
 
 **One route is open, and the rest are not.** ``POST /users`` is registration and
 has to be reachable by somebody with no credential. Everything else takes
-``Caller`` or ``Owner`` from :mod:`app.security`, and the reasoning is worth
-keeping when you adapt this:
+``Caller`` from :mod:`app.security`, which answers 401 when there is no valid
+token — and that is *all* this file decides.
+
+**Which caller may do what is not here.** It is a policy in ``app/policies.py``,
+asked by the service. So the annotations below are uniform where they used to be
+a mix of ``Caller`` and ``Owner``: the question "is somebody there" is the
+router's, and "may that somebody" belongs with the operation, where a job or a
+management command reaching the same function gets the same answer. The
+reasoning behind each rule is worth keeping when you adapt this:
 
 * **The reads are behind a caller.** ``GET /users`` returns every registered
   email address, which is the exact question ``POST /sessions`` spends ~40 ms
@@ -19,13 +26,14 @@ keeping when you adapt this:
   a JSON listing one route over is not a defence, and the cheap fix is the right
   one. Open it up if your users are genuinely a public directory — but decide
   that, rather than inherit it.
-* **The writes are behind ownership.** ``PATCH`` and ``DELETE`` change or remove
-  an account, so an unauthenticated one is account takeover: read an address
-  from the listing, set a password on it, sign in. ``Owner`` compares the path's
-  ``user_id`` with the caller and answers 403.
-* **The password has its own route** and demands the current one. A password
-  set through a general partial update is a takeover primitive even behind
-  authentication, because it needs no knowledge of the password it replaces.
+* **The writes are behind ownership**, decided by ``account_policy``. ``PATCH``
+  and ``DELETE`` change or remove an account, so an unauthenticated one is
+  account takeover: read an address from the listing, set a password on it, sign
+  in. The policy answers 403 for anybody but the owner or an admin.
+* **The password has its own route**, demands the current one, and is the
+  owner's alone — an admin is refused it too. A password set through a general
+  partial update is a takeover primitive even behind authentication, because it
+  needs no knowledge of the password it replaces.
 
 Registration remains a weaker oracle: a duplicate address is a 409. Closing that
 means a flow that answers identically either way and mails the difference, which
@@ -42,7 +50,7 @@ from fastapi import APIRouter, Query, status
 from app.modules.users import service
 from app.modules.users.repository import DEFAULT_PAGE_SIZE
 from app.modules.users.schemas import PasswordChange, UserCreate, UserRead, UserUpdate
-from app.security import Caller, Owner
+from app.security import Caller
 
 router = APIRouter(prefix="/users", tags=["users"])
 
@@ -85,7 +93,8 @@ async def get_user(user_id: UUID, _: Caller) -> UserRead:
     """Return one user.
 
     Any caller may read any user: this is a directory, not a profile with
-    private fields. Narrow it to :data:`~app.security.Owner` if yours is.
+    private fields. Narrow it by changing ``account_policy``'s ``view`` arm in
+    ``app/policies.py`` — no route changes, which is the point of the seam.
 
     Args:
         user_id: The user's id.
@@ -98,7 +107,7 @@ async def get_user(user_id: UUID, _: Caller) -> UserRead:
 
 
 @router.patch("/{user_id}", summary="Update a user")
-async def update_user(user_id: UUID, payload: UserUpdate, _: Owner) -> UserRead:
+async def update_user(user_id: UUID, payload: UserUpdate, _: Caller) -> UserRead:
     """Apply a partial update.
 
     ``PATCH`` rather than ``PUT`` because the payload is partial: omitted fields
@@ -108,8 +117,8 @@ async def update_user(user_id: UUID, payload: UserUpdate, _: Owner) -> UserRead:
         user_id: The user's id.
         payload: The fields to change. No password; see
             :func:`change_password`.
-        _: Declared for the dependency — 401 without a token, 403 with somebody
-            else's.
+        _: Declared for the dependency: 401 without a token. The 403 for
+            somebody else's account comes from the service's policy.
 
     Returns:
         The updated user.
@@ -122,7 +131,7 @@ async def update_user(user_id: UUID, payload: UserUpdate, _: Owner) -> UserRead:
     status_code=status.HTTP_204_NO_CONTENT,
     summary="Change a password",
 )
-async def change_password(user_id: UUID, payload: PasswordChange, _: Owner) -> None:
+async def change_password(user_id: UUID, payload: PasswordChange, _: Caller) -> None:
     """Replace a password, given the current one, and sign every device out.
 
     ``PUT`` on a sub-resource rather than a field on ``PATCH /users/{user_id}``:
@@ -138,7 +147,7 @@ async def change_password(user_id: UUID, payload: PasswordChange, _: Owner) -> N
 
 
 @router.delete("/{user_id}", status_code=status.HTTP_204_NO_CONTENT, summary="Delete a user")
-async def delete_user(user_id: UUID, _: Owner) -> None:
+async def delete_user(user_id: UUID, _: Caller) -> None:
     """Delete a user and everything they own.
 
     Args:

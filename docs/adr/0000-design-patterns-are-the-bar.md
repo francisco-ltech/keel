@@ -59,7 +59,7 @@ for the queue after it earned its place in the cache.
 | Pattern | Where |
 |---|---|
 | Bridge | `cache.Store` (implementor) / `cache.Repository` (abstraction) |
-| Strategy | Cache drivers; serializers; backoff policies |
+| Strategy | Cache drivers; serializers; backoff policies; authorization policies, selected by resource type |
 | Template Method | `Repository.remember`; the worker loop |
 | Abstract Factory | `Manager[T]`, `CacheManager`, `QueueManager`, `TokenManager` |
 | Decorator | `EventfulStore`, `FakeStore`, `FakeTokenStore` |
@@ -68,7 +68,7 @@ for the queue after it earned its place in the cache.
 | Observer | `EventDispatcher`; model observers; job lifecycle events |
 | Test Spy | `FakeStore`, `FakeQueue`, `FakeTokenStore` |
 | Command | `Job` — an operation with its parameters, serialised and executed later |
-| Chain of Responsibility | *Planned* for job middleware; not built, because one middleware is not a chain |
+| Chain of Responsibility | *Declined twice* — job middleware and authorization. One link is not a chain. ADR 0006, ADR 0008 |
 
 **Declined, deliberately**
 
@@ -79,6 +79,8 @@ for the queue after it earned its place in the cache.
 | Bridge | The queue, and the token store | Earned its place in the cache because `remember` is substantial. A queue's dispatch side is `push`/`later`/`bulk`, and a token store's surface *is* the primitives — a second layer would be ceremony. |
 | Abstract Base Classes for drivers | `Store`, `Queue` | Protocols instead, so a third-party driver needs no dependency on Keel to satisfy the contract. |
 | A general DI container | Everywhere | Solves a team-coordination problem this project does not have. |
+| A policy class per resource | Authorization | A policy is one function with no state. `getattr(policy, action)` is the same string, resolved across an object's whole attribute surface. ADR 0008. |
+| A default (Null Object) policy | Authorization | Permissive is a hole; an unregistered type raises instead, because a forgotten registration answering 403 is indistinguishable from a real refusal. ADR 0008. |
 | A symmetrical consume contract | The queue | The worker is one implementation. An interface with a single implementor is indirection pretending to be design. |
 | A guard protocol, and a user provider | Auth | One implementation until sessions exist beside tokens; and the principal's row is the application's schema, not Keel's. ADR 0007. |
 | Decorator over a real backend, for the fake | `FakeQueue` | Works for the cache, where behaviour is cheap to have for real. Running a job would make the test exercise the handler while claiming to test the dispatcher. |

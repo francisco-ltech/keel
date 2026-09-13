@@ -41,6 +41,9 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from typing import Any
+{%- if has_api %}
+from uuid import uuid4
+{%- endif %}
 
 import anyio
 import pytest
@@ -48,7 +51,7 @@ import pytest
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 {%- endif %}
-from keel.auth import MINIMUM_MEMORY_COST, hashing_lifespan
+from keel.auth import MINIMUM_MEMORY_COST{% if has_api %}, Identity{% endif %}, hashing_lifespan{% if has_api %}, issue_token{% endif %}
 from keel.cache import cache_lifespan
 from keel.database import Database, Model, current_database, database_lifespan
 {%- if has_worker %}
@@ -276,4 +279,25 @@ def bearer(token: str) -> dict[str, str]:
         The ``Authorization`` header.
     """
     return {"Authorization": f"Bearer {token}"}
+
+
+async def admin_bearer() -> dict[str, str]:
+    """Mint a token for a caller holding the ``admin`` role.
+
+    Nothing in this scaffold *issues* roles: ``sign_in`` builds an ``Identity``
+    with none, because this domain has no column or table to read them from. So
+    an administrator is made here exactly the way an application that had one
+    would make it — the roles go onto the ``Identity`` at the moment the token
+    is minted, and the store carries them to every later request. Swap this for
+    your own source and every rule in ``app/policies.py`` starts applying.
+
+    Needs the token store bound, so call it from a test using the ``client``
+    fixture. The identity matches no user row, which is the point: an admin
+    acting on somebody else's resource is not that resource's owner.
+
+    Returns:
+        The ``Authorization`` header for an administrator.
+    """
+    issued = await issue_token(Identity(id=uuid4(), roles=frozenset({"admin"})))
+    return bearer(issued.plaintext)
 {% endif -%}

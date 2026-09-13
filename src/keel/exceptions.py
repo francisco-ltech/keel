@@ -8,6 +8,11 @@ reason one level down.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from uuid import UUID
+
 
 class KeelError(Exception):
     """Base class for every error raised by Keel."""
@@ -75,6 +80,37 @@ class AuthenticationRequiredError(KeelError):
     Rejecting a *missing or bad* credential is the edge's own error to raise,
     at the edge, before any service runs.
     """
+
+
+class AuthorizationDeniedError(KeelError):
+    """Raised when a known caller is refused an action on a resource.
+
+    The counterpart to :class:`AuthenticationRequiredError` and deliberately a
+    different class, because the two mean opposite things to an edge. This one
+    is an **ordinary answer**: the request was understood, the caller was
+    identified — or identified as nobody — and the rule said no. An edge maps it
+    to **403**. The other one means the edge itself is broken and maps to 500.
+    Collapsing them loses the distinction between "you may not" and "this
+    service never asked who you are", which is the difference between a metric
+    and an alarm.
+
+    Carries the resource's *type name* rather than the resource. An exception
+    outlives the block that raised it, and holding an ORM object in one holds
+    its session open with it.
+
+    Args:
+        action: The ability that was refused, as the call site named it.
+        resource: What it was refused on. Only its type name is retained.
+        subject: The refused principal's id, or ``None`` when nobody was
+            authenticated. Present so an audit line needs no second lookup.
+    """
+
+    def __init__(self, action: str, resource: object, subject: UUID | None = None) -> None:
+        self.action = action
+        self.resource_type = type(resource).__name__
+        self.subject = subject
+        who = "an unauthenticated caller" if subject is None else f"identity {subject}"
+        super().__init__(f"{who} may not {action} {self.resource_type}")
 
 
 class UnsupportedHashError(KeelError):

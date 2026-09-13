@@ -9,6 +9,12 @@ that fails for either reason and says which for neither.
 None of this needs a worker, a Redis or an HTTP client. A job is an object with
 a handler; the queue is what moves it between processes, and that part is
 Keel's to test rather than this application's.
+
+**Every call into a service names a caller**, with ``acting_as``. The services
+authorize, so a test driving them directly is in the position a job handler is
+in: no request, no header, and a rule that still has to be satisfied. That is
+not test scaffolding to work around — it is the property being tested, and
+``IndexItem.handle`` does exactly the same thing for itself.
 """
 
 from __future__ import annotations
@@ -16,6 +22,7 @@ from __future__ import annotations
 from uuid import UUID
 
 import pytest
+from keel.auth import Identity, acting_as, current_identity
 from keel.cache import cache
 from keel.queue import PermanentFailureError
 from keel.testing import fake_queue
@@ -34,7 +41,7 @@ MISSING_ID = "00000000-0000-4000-8000-000000000000"
 async def test_creating_an_item_dispatches_the_index_job(rolled_back: None) -> None:
     owner = await make_user()
 
-    with fake_queue() as queued:
+    with fake_queue() as queued, acting_as(Identity(id=owner.id)):
         item = await items_service.create_item(owner.id, ItemCreate(name="Engine"))
 
     queued.assert_pushed(IndexItem, item_id=str(item.id), owner_id=str(owner.id))
@@ -49,7 +56,9 @@ async def test_a_failed_creation_dispatches_nothing(rolled_back: None) -> None:
     not exist, and would usually win the race and dead-letter looking like
     corrupted data.
     """
-    with fake_queue() as queued:
+    # Acting as the absent owner: the policy permits it, so the test reaches the
+    # 404 it is about rather than stopping at a 403.
+    with fake_queue() as queued, acting_as(Identity(id=UUID(MISSING_ID))):
         with pytest.raises(NotFoundError):
             await items_service.create_item(UUID(MISSING_ID), ItemCreate(name="Orphan"))
 
@@ -58,7 +67,8 @@ async def test_a_failed_creation_dispatches_nothing(rolled_back: None) -> None:
 
 async def test_the_index_job_caches_a_card(rolled_back: None) -> None:
     owner = await make_user()
-    item = await items_service.create_item(owner.id, ItemCreate(name="Engine"))
+    with acting_as(Identity(id=owner.id)):
+        item = await items_service.create_item(owner.id, ItemCreate(name="Engine"))
 
     await IndexItem(item_id=str(item.id), owner_id=str(owner.id)).handle()
 
@@ -72,7 +82,8 @@ async def test_the_index_job_caches_a_card(rolled_back: None) -> None:
 async def test_the_index_job_is_idempotent(rolled_back: None) -> None:
     """At-least-once is the only delivery guarantee, so running twice must be safe."""
     owner = await make_user()
-    item = await items_service.create_item(owner.id, ItemCreate(name="Engine"))
+    with acting_as(Identity(id=owner.id)):
+        item = await items_service.create_item(owner.id, ItemCreate(name="Engine"))
     job = IndexItem(item_id=str(item.id), owner_id=str(owner.id))
 
     await job.handle()
@@ -99,7 +110,26 @@ async def test_another_owners_item_is_permanently_unindexable(rolled_back: None)
     """The job asks the scoped question, so it cannot read across owners."""
     ada = await make_user(email="ada@example.com")
     grace = await make_user(email="grace@example.com")
-    item = await items_service.create_item(ada.id, ItemCreate(name="Engine"))
+    with acting_as(Identity(id=ada.id)):
+        item = await items_service.create_item(ada.id, ItemCreate(name="Engine"))
 
     with pytest.raises(PermanentFailureError):
         await IndexItem(item_id=str(item.id), owner_id=str(grace.id)).handle()
+
+
+async def test_the_job_runs_with_the_owners_authority_and_no_more(rolled_back: None) -> None:
+    """`handle` publishes its own caller, and it is the payload's owner.
+
+    Two claims in one test. The handler needs no ambient identity — nothing is
+    bound when it is awaited here, exactly as in a worker — and the identity it
+    builds carries no roles, so a job can never reach further than the person it
+    acts for. The second half is what stops a queue becoming an escalation path.
+    """
+    ada = await make_user(email="ada@example.com")
+    with acting_as(Identity(id=ada.id)):
+        item = await items_service.create_item(ada.id, ItemCreate(name="Engine"))
+
+    await IndexItem(item_id=str(item.id), owner_id=str(ada.id)).handle()
+
+    assert current_identity() is None, "the job leaked its caller into the process"
+    assert await cache.get(card_key(item.id)) is not None

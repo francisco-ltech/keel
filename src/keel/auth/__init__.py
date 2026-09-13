@@ -1,12 +1,18 @@
 """The auth subsystem.
 
-Phase 4: who the caller is, how a password is stored, and how a bearer token is
-issued and revoked. Guards and policies come next; see ``docs/roadmap.md``.
+Phase 4: who the caller is, how a password is stored, how a bearer token is
+issued and revoked, and whether the caller may do this to this thing. Guards are
+declined; see ``docs/adr/0007-identity-and-tokens.md``.
 
     from keel.auth import Identity, acting_as, current_identity
 
     with acting_as(Identity(id=user_id, roles=frozenset({"admin"}))):
         ...  # audit columns and policies can now find the caller
+
+Authorization is a rule per resource type, asked through one function:
+
+    register_policy(Account, account_policy)      # at start-up
+    authorize("update", Account(user_id))         # raises AuthorizationDeniedError
 
 Tokens are wired like every other subsystem, with one context manager:
 
@@ -14,15 +20,19 @@ Tokens are wired like every other subsystem, with one context manager:
         issued = await issue_token(identity, label="web")
         identity = await resolve_token(issued.plaintext)
 
-Three parts that deliberately do not depend on each other. :mod:`keel.auth.identity`
-is pure Python and always available, because audit columns and authorization need
-it whether or not the service has passwords at all. Hashing needs pwdlib, which is
-the ``auth`` extra, so it is exported lazily through ``__getattr__`` (PEP 562) —
-an eager import would make ``import keel.auth`` fail for a service that
-authenticates by token and stores no password. Tokens are lazy for the weaker but
-still real reason that a service using only ``acting_as`` should not import a
-store, a factory and a Redis adapter to get it. The names stay declared under
-``TYPE_CHECKING`` so editors and both type checkers resolve them normally.
+Four parts that deliberately do not depend on each other.
+:mod:`keel.auth.identity` and :mod:`keel.auth.policies` are pure Python and
+always available, because audit columns and authorization need them whether or
+not the service has passwords at all — and because a worker authorizes too: a
+job acting for someone asks the same question a route does.
+
+Hashing needs pwdlib, which is the ``auth`` extra, so it is exported lazily
+through ``__getattr__`` (PEP 562) — an eager import would make ``import
+keel.auth`` fail for a service that authenticates by token and stores no
+password. Tokens are lazy for the weaker but still real reason that a service
+using only ``acting_as`` should not import a store, a factory and a Redis
+adapter to get it. The names stay declared under ``TYPE_CHECKING`` so editors
+and both type checkers resolve them normally.
 
 ``token_lifespan`` therefore lives in :mod:`keel.auth.binding` rather than here,
 where ``queue_lifespan`` sits in its package's ``__init__``: defining it here
@@ -36,6 +46,15 @@ from importlib import import_module
 from typing import TYPE_CHECKING, Any, Final
 
 from keel.auth.identity import Identity, acting_as, current_identity, require_identity
+from keel.auth.policies import (
+    Policy,
+    PolicyRegistry,
+    allows,
+    authorize,
+    policy_registry,
+    register_policy,
+    use_policies,
+)
 
 # -- lazily exported (rationale in the module docstring) ------------------
 
@@ -141,12 +160,16 @@ __all__ = [
     "Identity",
     "IssuedToken",
     "PasswordHasher",
+    "Policy",
+    "PolicyRegistry",
     "TokenAssertionError",
     "TokenConfig",
     "TokenManager",
     "TokenRecord",
     "TokenStore",
     "acting_as",
+    "allows",
+    "authorize",
     "bound_password_hasher",
     "bound_token_manager",
     "current_identity",
@@ -154,6 +177,8 @@ __all__ = [
     "hashing_lifespan",
     "issue_token",
     "password_hasher",
+    "policy_registry",
+    "register_policy",
     "require_identity",
     "resolve_token",
     "revoke_token",
@@ -163,6 +188,7 @@ __all__ = [
     "token_manager",
     "token_store",
     "use_password_hasher",
+    "use_policies",
     "use_token_manager",
     "verify_password",
 ]

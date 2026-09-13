@@ -1,8 +1,17 @@
-"""The items endpoints, and the scoping that makes them safe.
+"""The items endpoints, and the two rules that keep them apart.
 
-The tests worth reading are the ones that ask for another owner's item: the
-answer is 404, not 403, because "this exists but is not yours" is itself
-information.
+**Authorization**, which is new: these routes were open, and they are the reason
+the policy layer exists. ``Caller`` on the route answers 401 for a request with
+no token; ``items_policy`` answers 403 for a caller who is not the owner. The
+tests worth reading first are the anonymous one and the stranger one — between
+them they are every request that used to succeed.
+
+**Scoping**, which is older: an item belonging to someone else, asked for under
+*your own* path, is a 404 rather than a 403, because "this exists but is not
+yours" is itself information. The two answers are not in tension. A stranger
+asking about somebody else's collection is told 403 — they already know whose
+id they typed — while a legitimate owner asking about an id that is not in their
+collection is told nothing at all.
 """
 
 from __future__ import annotations
@@ -10,19 +19,116 @@ from __future__ import annotations
 import pytest
 from httpx import AsyncClient
 
-from tests.conftest import bearer, create_user, signed_in
+from tests.conftest import admin_bearer, bearer, signed_in
 
 pytestmark = pytest.mark.anyio
 
 MISSING_ID = "00000000-0000-4000-8000-000000000000"
 
 
-async def test_creating_an_item(client: AsyncClient) -> None:
-    owner = await create_user(client)
+async def test_every_items_route_refuses_an_anonymous_caller(client: AsyncClient) -> None:
+    """The scaffold used to ship all five of these open.
+
+    401 and not 403: there is no credential to judge yet, so the answer is
+    "present one" rather than "you may not".
+    """
+    owner, token = await signed_in(client)
+    item = (
+        await client.post(
+            f"/users/{owner['id']}/items", json={"name": "Engine"}, headers=bearer(token)
+        )
+    ).json()
+    base = f"/users/{owner['id']}/items"
+
+    assert (await client.post(base, json={"name": "Anonymous"})).status_code == 401
+    assert (await client.get(base)).status_code == 401
+    assert (await client.get(f"{base}/{item['id']}")).status_code == 401
+    assert (await client.patch(f"{base}/{item['id']}", json={"name": "x"})).status_code == 401
+    assert (await client.delete(f"{base}/{item['id']}")).status_code == 401
+
+
+async def test_a_stranger_may_not_touch_another_owners_items(client: AsyncClient) -> None:
+    """The rule the old ownership dependency could not be mounted here to make.
+
+    Every one of these is 403 rather than 404: the caller chose the owner id
+    themselves, so refusing to confirm it exists hides nothing they did not
+    already know.
+    """
+    ada, ada_token = await signed_in(client, email="ada@example.com")
+    stranger = bearer((await signed_in(client, email="mallory@example.com"))[1])
+    base = f"/users/{ada['id']}/items"
+    item = (await client.post(base, json={"name": "Engine"}, headers=bearer(ada_token))).json()
+
+    assert (await client.post(base, json={"name": "Theirs"}, headers=stranger)).status_code == 403
+    assert (await client.get(base, headers=stranger)).status_code == 403
+    assert (await client.get(f"{base}/{item['id']}", headers=stranger)).status_code == 403
+    patched = await client.patch(f"{base}/{item['id']}", json={"name": "x"}, headers=stranger)
+    assert patched.status_code == 403
+    assert (await client.delete(f"{base}/{item['id']}", headers=stranger)).status_code == 403
+
+    intact = await client.get(f"{base}/{item['id']}", headers=bearer(ada_token))
+    assert intact.json()["name"] == "Engine", "a refused request changed something"
+
+
+async def test_a_refusal_is_a_problem_document(client: AsyncClient) -> None:
+    """Keel's denial is a 403 in the same shape as every other error.
+
+    It descends from ``KeelError``, which this application otherwise reports as
+    a 500 — so this asserts the one handler that has to exist for the three auth
+    outcomes to stay three different statuses.
+    """
+    ada = (await signed_in(client, email="ada@example.com"))[0]
+    stranger = bearer((await signed_in(client, email="mallory@example.com"))[1])
+
+    response = await client.get(f"/users/{ada['id']}/items", headers=stranger)
+
+    assert response.status_code == 403
+    problem = response.json()
+    assert problem["type"].endswith("/forbidden")
+    assert problem["status"] == 403
+    assert response.headers["content-type"].startswith("application/problem+json")
+
+
+async def test_ownership_cannot_be_smuggled_through_the_query_string(client: AsyncClient) -> None:
+    """The hazard that sank the previous mechanism, pinned at the new seam.
+
+    A dependency reading a scalar named ``user_id`` was sourced from the query
+    string on any route whose path did not declare it. The rule now takes the
+    owner the *service* was called with, which came from the path, so there is
+    nowhere for a second value to be read from.
+    """
+    ada = (await signed_in(client, email="ada@example.com"))[0]
+    mallory, mallory_token = await signed_in(client, email="mallory@example.com")
+
+    response = await client.get(
+        f"/users/{ada['id']}/items",
+        params={"owner_id": mallory["id"]},
+        headers=bearer(mallory_token),
+    )
+
+    assert response.status_code == 403
+
+
+async def test_an_admin_may_write_anybodys_items(client: AsyncClient) -> None:
+    """A role beating ownership, which the path comparison could never express."""
+    ada = (await signed_in(client, email="ada@example.com"))[0]
+    administrator = await admin_bearer()
+    base = f"/users/{ada['id']}/items"
+
+    created = await client.post(base, json={"name": "Filed by support"}, headers=administrator)
+
+    assert created.status_code == 201
+    assert created.json()["owner_id"] == ada["id"]
+    assert (await client.get(base, headers=administrator)).status_code == 200
+
+
+async def test_the_owner_creates_an_item(client: AsyncClient) -> None:
+    owner, token = await signed_in(client)
 
     response = await client.post(
         f"/users/{owner['id']}/items",
         json={"name": "Analytical Engine", "description": "Not finished."},
+        headers=bearer(token),
     )
 
     assert response.status_code == 201
@@ -32,44 +138,71 @@ async def test_creating_an_item(client: AsyncClient) -> None:
 
 
 async def test_creating_an_item_for_an_unknown_owner_is_not_found(client: AsyncClient) -> None:
-    response = await client.post(f"/users/{MISSING_ID}/items", json={"name": "Orphan"})
+    """404 rather than 403 — but only for a caller the policy already allowed.
+
+    An administrator is the only caller who can reach this branch, which is the
+    ordering the service exists to guarantee: authorization first, so a stranger
+    cannot use the 404 to find out which ids are registered.
+    """
+    response = await client.post(
+        f"/users/{MISSING_ID}/items", json={"name": "Orphan"}, headers=await admin_bearer()
+    )
 
     assert response.status_code == 404
     assert MISSING_ID in response.json()["detail"]
 
 
 async def test_items_are_listed_per_owner(client: AsyncClient) -> None:
-    ada = await create_user(client, email="ada@example.com")
-    grace = await create_user(client, email="grace@example.com")
-    await client.post(f"/users/{ada['id']}/items", json={"name": "Engine"})
-    await client.post(f"/users/{grace['id']}/items", json={"name": "Compiler"})
+    ada, ada_token = await signed_in(client, email="ada@example.com")
+    grace, grace_token = await signed_in(client, email="grace@example.com")
+    await client.post(
+        f"/users/{ada['id']}/items", json={"name": "Engine"}, headers=bearer(ada_token)
+    )
+    await client.post(
+        f"/users/{grace['id']}/items", json={"name": "Compiler"}, headers=bearer(grace_token)
+    )
 
-    ada_items = (await client.get(f"/users/{ada['id']}/items")).json()
+    ada_items = (await client.get(f"/users/{ada['id']}/items", headers=bearer(ada_token))).json()
 
     assert [item["name"] for item in ada_items] == ["Engine"]
 
 
 async def test_fetching_another_owners_item_is_not_found(client: AsyncClient) -> None:
-    ada = await create_user(client, email="ada@example.com")
-    grace = await create_user(client, email="grace@example.com")
-    item = (await client.post(f"/users/{ada['id']}/items", json={"name": "Engine"})).json()
+    """Existence must not leak, even to a caller who is allowed to ask.
 
-    response = await client.get(f"/users/{grace['id']}/items/{item['id']}")
+    Grace asks *her own* collection for Ada's item id, so the policy permits the
+    question and the scoping answers it: 404, with no hint that the id is real.
+    """
+    ada, ada_token = await signed_in(client, email="ada@example.com")
+    grace, grace_token = await signed_in(client, email="grace@example.com")
+    item = (
+        await client.post(
+            f"/users/{ada['id']}/items", json={"name": "Engine"}, headers=bearer(ada_token)
+        )
+    ).json()
+
+    response = await client.get(
+        f"/users/{grace['id']}/items/{item['id']}", headers=bearer(grace_token)
+    )
 
     assert response.status_code == 404, "existence must not leak across owners"
 
 
 async def test_updating_an_item(client: AsyncClient) -> None:
-    owner = await create_user(client)
+    owner, token = await signed_in(client)
+    headers = bearer(token)
     item = (
         await client.post(
             f"/users/{owner['id']}/items",
             json={"name": "Engine", "description": "Draft."},
+            headers=headers,
         )
     ).json()
 
     response = await client.patch(
-        f"/users/{owner['id']}/items/{item['id']}", json={"name": "Analytical Engine"}
+        f"/users/{owner['id']}/items/{item['id']}",
+        json={"name": "Analytical Engine"},
+        headers=headers,
     )
 
     assert response.status_code == 200
@@ -80,45 +213,78 @@ async def test_updating_an_item(client: AsyncClient) -> None:
 
 async def test_an_update_can_clear_the_description(client: AsyncClient) -> None:
     """`exclude_unset` is what makes an explicit null different from an omission."""
-    owner = await create_user(client)
+    owner, token = await signed_in(client)
+    headers = bearer(token)
     item = (
         await client.post(
-            f"/users/{owner['id']}/items", json={"name": "Engine", "description": "Draft."}
+            f"/users/{owner['id']}/items",
+            json={"name": "Engine", "description": "Draft."},
+            headers=headers,
         )
     ).json()
 
     response = await client.patch(
-        f"/users/{owner['id']}/items/{item['id']}", json={"description": None}
+        f"/users/{owner['id']}/items/{item['id']}", json={"description": None}, headers=headers
     )
 
     assert response.json()["description"] is None
 
 
 async def test_updating_another_owners_item_is_not_found(client: AsyncClient) -> None:
-    ada = await create_user(client, email="ada@example.com")
-    grace = await create_user(client, email="grace@example.com")
-    item = (await client.post(f"/users/{ada['id']}/items", json={"name": "Engine"})).json()
+    """Grace's own collection does not contain Ada's item, so: 404."""
+    ada, ada_token = await signed_in(client, email="ada@example.com")
+    grace, grace_token = await signed_in(client, email="grace@example.com")
+    item = (
+        await client.post(
+            f"/users/{ada['id']}/items", json={"name": "Engine"}, headers=bearer(ada_token)
+        )
+    ).json()
 
     response = await client.patch(
-        f"/users/{grace['id']}/items/{item['id']}", json={"name": "Stolen"}
+        f"/users/{grace['id']}/items/{item['id']}",
+        json={"name": "Stolen"},
+        headers=bearer(grace_token),
     )
 
     assert response.status_code == 404
 
 
 async def test_deleting_an_item(client: AsyncClient) -> None:
-    owner = await create_user(client)
-    item = (await client.post(f"/users/{owner['id']}/items", json={"name": "Engine"})).json()
+    owner, token = await signed_in(client)
+    headers = bearer(token)
+    item = (
+        await client.post(f"/users/{owner['id']}/items", json={"name": "Engine"}, headers=headers)
+    ).json()
+    path = f"/users/{owner['id']}/items/{item['id']}"
 
-    assert (await client.delete(f"/users/{owner['id']}/items/{item['id']}")).status_code == 204
-    assert (await client.get(f"/users/{owner['id']}/items/{item['id']}")).status_code == 404
+    assert (await client.delete(path, headers=headers)).status_code == 204
+    assert (await client.get(path, headers=headers)).status_code == 404
 
 
 async def test_deleting_an_owner_deletes_their_items(client: AsyncClient) -> None:
     """The foreign key cascades, so an item never outlives its owner."""
     owner, token = await signed_in(client)
-    item = (await client.post(f"/users/{owner['id']}/items", json={"name": "Engine"})).json()
+    headers = bearer(token)
+    item = (
+        await client.post(f"/users/{owner['id']}/items", json={"name": "Engine"}, headers=headers)
+    ).json()
+
+    await client.delete(f"/users/{owner['id']}", headers=headers)
+
+    administrator = await admin_bearer()
+    gone = await client.get(f"/users/{owner['id']}/items/{item['id']}", headers=administrator)
+    assert gone.status_code == 404
+
+
+async def test_a_deleted_owners_token_stops_working(client: AsyncClient) -> None:
+    """Deleting an account revokes its tokens, so the caller cannot read on.
+
+    Without this the previous test's cleanup would prove nothing: a 404 from a
+    dead credential looks the same as a 404 from a deleted row.
+    """
+    owner, token = await signed_in(client)
 
     await client.delete(f"/users/{owner['id']}", headers=bearer(token))
 
-    assert (await client.get(f"/users/{owner['id']}/items/{item['id']}")).status_code == 404
+    after = await client.get(f"/users/{owner['id']}/items", headers=bearer(token))
+    assert after.status_code == 401

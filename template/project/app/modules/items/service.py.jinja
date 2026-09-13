@@ -10,6 +10,14 @@ direction of coupling in this layout: a module may reach into a *sibling's*
 service or repository, but nothing reaches upward into a router. Doing the check
 explicitly rather than letting the foreign key fail turns a 500 with an
 ``IntegrityError`` in the logs into a 404 that says which user is missing.
+
+**Every function opens with ``authorize``, before ``uow()``.** The rule lives in
+``app/policies.py``; this layer only says which ability is being exercised on
+whose items. It is here rather than in the router because this is the seam every
+entrypoint goes through — the router,
+{% if has_worker %}a job handler, {% endif %}a management command, a test — and a guard on the HTTP edge
+protects only the callers that arrive over HTTP. Refusing before the block also
+means a denied request opens no transaction and borrows no connection.
 {% if has_worker %}
 This module is also where the two entrypoints meet. ``create_item`` dispatches
 :class:`app.modules.items.jobs.IndexItem` from inside its unit of work, so the
@@ -23,6 +31,7 @@ from __future__ import annotations
 from typing import Any
 from uuid import UUID
 
+from keel.auth import authorize
 from keel.database import uow
 {%- if has_worker %}
 from keel.queue import dispatch
@@ -32,6 +41,7 @@ from app.errors import NotFoundError
 from app.modules.items.repository import DEFAULT_PAGE_SIZE, ItemRepository
 from app.modules.items.schemas import ItemCreate, ItemRead, ItemUpdate
 from app.modules.users.repository import UserRepository
+from app.policies import ItemsOf
 
 
 async def create_item(owner_id: UUID, payload: ItemCreate) -> ItemRead:
@@ -45,8 +55,12 @@ async def create_item(owner_id: UUID, payload: ItemCreate) -> ItemRead:
         The created item.
 
     Raises:
+        AuthorizationDeniedError: If the caller may not add to this owner's
+            items. Raised before the owner is looked up, so a stranger cannot
+            use a 404 to learn which ids are registered.
         NotFoundError: If the owner does not exist.
     """
+    authorize("create", ItemsOf(owner_id))
 {%- if has_worker %}
     # Deferred because `jobs` imports this module: a module-level import back would
     # be a cycle. By the first request this is only a `sys.modules` lookup.
@@ -87,7 +101,11 @@ async def list_items(
 
     Returns:
         The page, as schemas.
+
+    Raises:
+        AuthorizationDeniedError: If the caller may not read this owner's items.
     """
+    authorize("view", ItemsOf(owner_id))
     async with uow() as session:
         found = await ItemRepository(session).list(owner_id, limit=limit, offset=offset)
         return [ItemRead.model_validate(item) for item in found]
@@ -108,8 +126,10 @@ async def get_item(item_id: UUID, owner_id: UUID) -> ItemRead:
         The item.
 
     Raises:
+        AuthorizationDeniedError: If the caller may not read this owner's items.
         NotFoundError: If there is no such item for that owner.
     """
+    authorize("view", ItemsOf(owner_id))
     async with uow() as session:
         item = await ItemRepository(session).get_for_owner(item_id, owner_id)
         if item is None:
@@ -131,8 +151,10 @@ async def update_item(item_id: UUID, owner_id: UUID, payload: ItemUpdate) -> Ite
         The updated item.
 
     Raises:
+        AuthorizationDeniedError: If the caller may not write this owner's items.
         NotFoundError: If there is no such item for that owner.
     """
+    authorize("update", ItemsOf(owner_id))
     async with uow() as session:
         items = ItemRepository(session)
         item = await items.get_for_owner(item_id, owner_id)
@@ -152,8 +174,10 @@ async def delete_item(item_id: UUID, owner_id: UUID) -> None:
         owner_id: The owner it must belong to.
 
     Raises:
+        AuthorizationDeniedError: If the caller may not write this owner's items.
         NotFoundError: If there is no such item for that owner.
     """
+    authorize("delete", ItemsOf(owner_id))
     async with uow() as session:
         items = ItemRepository(session)
         item = await items.get_for_owner(item_id, owner_id)

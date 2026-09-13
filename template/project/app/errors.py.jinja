@@ -29,6 +29,12 @@ Three families are mapped here:
   the bucket nobody pages on. ADR 0007, section 8. The 401 this application does
   return is :class:`AuthenticationError`, raised at the edge by
   :mod:`app.security` before any service runs.
+* :class:`keel.exceptions.AuthorizationDeniedError` — the **one** Keel error
+  that is not a 500. A policy refused the caller, which is an ordinary answer
+  about this request rather than a fault in this process, so it is a 403. It
+  needs its own handler precisely because it descends from ``KeelError`` and
+  would otherwise be swept into the 500 above: three auth outcomes, three
+  statuses, and collapsing any pair of them loses the alarm.
 * FastAPI's own validation and HTTP exceptions, re-dressed so a 422 looks like
   every other error.
 {% endif %}
@@ -46,7 +52,7 @@ from typing import {% if has_api %}TYPE_CHECKING, Any, {% endif %}Final
 {% if has_api %}
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
-from keel.exceptions import ConfigurationError, KeelError
+from keel.exceptions import AuthorizationDeniedError, ConfigurationError, KeelError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 if TYPE_CHECKING:
@@ -234,6 +240,32 @@ async def handle_authentication_error(request: Request, exc: Exception) -> JSONR
     )
 
 
+async def handle_authorization_denied(request: Request, exc: Exception) -> JSONResponse:
+    """Report a refused action as a 403, not as the 500 its base class implies.
+
+    The detail names the action and nothing else. ``exc`` also carries
+    ``resource_type`` and ``subject`` — the class of thing and who was refused —
+    which belong in an audit log rather than in a reply to the person who was
+    just told no.
+
+    Args:
+        request: The request being answered.
+        exc: The exception.
+
+    Returns:
+        The problem response.
+    """
+    # Guaranteed by the registration in register_error_handlers.
+    assert isinstance(exc, AuthorizationDeniedError)
+    return problem(
+        request,
+        status=403,
+        title="Forbidden",
+        detail=f"you may not {exc.action} this resource",
+        problem_type=f"{PROBLEM_BASE}/forbidden",
+    )
+
+
 async def handle_keel_error(request: Request, exc: Exception) -> JSONResponse:
     """Report a framework failure.
 
@@ -245,7 +277,9 @@ async def handle_keel_error(request: Request, exc: Exception) -> JSONResponse:
     :class:`~keel.exceptions.AuthenticationRequiredError` lands here for the
     same reason and keeps the generic message: a route that reaches
     ``require_identity()`` with nothing bound was never guarded, and an alarm is
-    the only useful answer.
+    the only useful answer. So does a resource type with no policy registered,
+    which arrives as a :class:`~keel.exceptions.ConfigurationError` and keeps
+    its message, because that message names the registration to add.
 
     Args:
         request: The request being answered.
@@ -322,6 +356,7 @@ def register_error_handlers(app: FastAPI) -> None:
     """
     app.add_exception_handler(AppError, handle_app_error)
     app.add_exception_handler(AuthenticationError, handle_authentication_error)
+    app.add_exception_handler(AuthorizationDeniedError, handle_authorization_denied)
     app.add_exception_handler(KeelError, handle_keel_error)
     app.add_exception_handler(RequestValidationError, handle_request_validation_error)
     app.add_exception_handler(StarletteHTTPException, handle_http_exception)

@@ -108,9 +108,9 @@ without anything depending on it in production.
   its schema is the application's. Keel's `Identity` is built at the edge from
   whatever the service already knows, which is also what keeps the core free of
   a model dependency.
-* **Policies.** The roadmap's open question — Strategy per resource, or Chain of
-  Responsibility — is still open, and answering it before there is a second
-  resource would be scaffolding for one case.
+* **Policies**, at the time this was written — the Strategy-versus-chain question
+  needed a second resource before it could be answered honestly. It has one now,
+  and [ADR 0008](0008-authorization-policies.md) answers it.
 * **Token rotation / refresh pairs.** Real, and a decision about session policy
   rather than storage. `revoke` plus `issue` composes it today.
 

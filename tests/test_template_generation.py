@@ -143,6 +143,10 @@ ALWAYS = (
     "alembic.ini",
     "app/settings.py",
     "app/errors.py",
+    # Authorization is domain logic, not an HTTP concern: the rules are asked by
+    # the services, so a worker-only project is held to them too.
+    "app/policies.py",
+    "tests/test_policies.py",
     "app/modules/__init__.py",
     "app/modules/users/service.py",
     "app/modules/users/repository.py",
@@ -166,6 +170,7 @@ API_FILES = (
     "app/modules/users/router.py",
     "app/modules/items/router.py",
     "tests/test_sessions.py",
+    "tests/test_items.py",
 )
 WORKER_FILES = (
     "app/worker.py",

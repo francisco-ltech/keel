@@ -94,6 +94,25 @@ without proving knowledge of the old one is account takeover wearing an update.
 After it lands, `token_store().revoke_subject(user_id)` — and the same after
 disabling or deleting an account, or the tokens issued before it still work.
 {% endif %}
+**Authorize in the service, against a resource, never in the router.** Every
+service function that acts on a named thing opens with
+`authorize("update", Account(user_id))` — before `uow()`, so a refusal opens no
+transaction. The rule is in `app/policies.py`, keyed by the resource's class. A
+guard at the HTTP edge would protect only the callers who arrive over HTTP.
+
+**A new resource type needs a policy before it needs a route.** An unregistered
+one is refused with a `ConfigurationError`, which this application reports as a
+500: a missing registration is a wiring bug, and answering 403 would hide it
+among ordinary refusals. Nothing is ever permitted because a rule was forgotten.
+
+**A policy takes `Identity | None` and opens by refusing `None`.** There is no
+guest object; the annotation is what makes both type checkers stop you reading
+`identity.id` before you have said what an unauthenticated caller gets.
+
+**A new ability is a `match` arm, not a new dependency.** The `case _` arm is
+the deny-by-default. Do not reach for `getattr(policy, action)` — that is the
+same string, resolved dynamically over an object's whole attribute surface.
+
 **An `Identity` is a value, never the `User` row.** It is frozen, serialisable
 and safe to put on a context variable or in a job payload; an ORM instance
 outlives its session and raises `DetachedInstanceError` somewhere far away.
@@ -107,18 +126,27 @@ audit column. `current_identity()` is the form that returns `None`; there is no
 guest object, because a guest with an `id` looks like a caller everywhere the
 check is forgotten.
 {% if has_api %}
-**Guard an endpoint with `Caller` or `Owner`, not by checking inside it.**
-`app/security.py` exports three: `Caller` refuses the request without a valid
-token, `MaybeCaller` hands back `None` for endpoints that behave differently
-when signed in but do not require it, and `Owner` additionally 403s a caller
-whose id is not the `user_id` in the path. All bind `acting_as` for the whole
-request, and all must stay `async def` — a sync dependency runs in a threadpool,
-where a context variable set is invisible to the endpoint. A route that changes
-somebody's account and takes no caller is account takeover; the annotation is
-the whole fix.
+**Require a caller with `Caller`, not by checking inside the endpoint.**
+`app/security.py` exports two: `Caller` refuses the request without a valid
+token, and `MaybeCaller` hands back `None` for endpoints that behave differently
+when signed in but do not require it. Both bind `acting_as` for the whole
+request, and both must stay `async def` — a sync dependency runs in a
+threadpool, where a context variable set is invisible to the endpoint. A route
+that changes somebody's account and takes no caller is account takeover; the
+annotation is the whole fix.
+
+**A route decides nothing else.** There is no `Owner` dependency any more and
+adding one back would be a second mechanism for a job one thing already does.
+Whether the caller may act is the service's `authorize` call, above.
 
 **A 401 carries `WWW-Authenticate`.** `handle_authentication_error` in
 `app/errors.py` does it; raise `AuthenticationError` and it is handled.
+
+**`AuthorizationDeniedError` is a 403, and it is the one `KeelError` that is
+not a 500.** `handle_authorization_denied` in `app/errors.py` is registered for
+it specifically; without that it would fall through to `handle_keel_error` and a
+refused caller would be paged on as a server fault. Three auth outcomes, three
+statuses: 401 no credential, 403 refused, 500 nothing bound.
 
 **`AuthenticationRequiredError` is a 500, not a 401.** Keel raises it when
 `require_identity()` finds nothing bound, which means the edge never

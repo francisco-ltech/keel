@@ -1,5 +1,20 @@
 """The bearer-token dependency: who is calling, and whether they must be.
 
+**This module answers one question, and authorization is not it.** Whether the
+caller *may* do a thing is decided by a policy in ``app/policies.py``, asked by
+the service that does the work. There used to be an ``Owner`` dependency here
+that compared a path's ``user_id`` with the caller; it is gone, because two
+mechanisms for one job is how they drift apart, and because it never reached far
+enough. It could not be mounted on ``/users/{owner_id}/items`` — its parameter
+was spelled ``user_id`` and the path says ``owner_id`` — it protected only
+callers arriving over HTTP, and "the owner or an admin" was not expressible in
+it at all. A rule that takes the resource instead of the request has none of
+those limits.
+
+The two still compose in the right order: the dependency below refuses a request
+with no credential (401) before any service runs, and the policy refuses the
+action (403) once there is somebody to refuse.
+
 **Why this is here and not in Keel.** Keel's core imports no web framework —
 that is the property that lets the same error taxonomy, the same services and
 the same jobs run in a process with no HTTP at all. A dependency is FastAPI's
@@ -31,28 +46,18 @@ refuses the request without a valid token; :data:`MaybeCaller` hands back
 reader wants to know who is asking without demanding it. Both resolve the same
 underlying dependency, which FastAPI caches per request, so asking for both
 costs one lookup.
-
-**:data:`Owner` is authorization, and it is here rather than in a service on
-purpose.** It reads ``user_id`` from the path, compares it with the caller and
-answers 403, so ``PATCH /users/{user_id}`` cannot be written without deciding
-who may call it. That is the simplest possible policy — *you may act on
-yourself* — and it is deliberately not a framework: an admin role, or a resource
-that several people share, is where a policy object earns its place (ADR 0007,
-decision 7). Until then, one dependency is the whole rule and it composes with
-``Caller`` rather than replacing it, so the 401 still happens before the 403.
 """
 
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from typing import Annotated, Final
-from uuid import UUID
 
-from fastapi import Depends, Path
+from fastapi import Depends
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from keel.auth import Identity, acting_as, resolve_token
 
-from app.errors import AuthenticationError, ForbiddenError
+from app.errors import AuthenticationError
 
 bearer_scheme: Final = HTTPBearer(
     scheme_name="Bearer",
@@ -111,39 +116,6 @@ Caller = Annotated[Identity, Depends(require_caller)]
 """The caller, guaranteed. The dependency 401s before the endpoint runs."""
 
 
-async def require_owner(user_id: Annotated[UUID, Path()], caller: Caller) -> Identity:
-    """Return the caller, refusing them the account of anybody else.
-
-    ``Path()`` is load-bearing, not decoration. Without it FastAPI sources a
-    scalar from the **query string** on any route whose path does not declare
-    ``user_id`` — so mounting this on ``/accounts/{id}`` would let a caller pass
-    ``?user_id=<their own>`` and pass the check against somebody else's record.
-    Pinned, such a route fails with a 422 that names the mistake.
-
-    A route guarding a differently-named resource wants its own dependency
-    rather than a parameter added here.
-
-    Args:
-        user_id: The account being acted on, from the path.
-        caller: The authenticated caller.
-
-    Returns:
-        The caller.
-
-    Raises:
-        ForbiddenError: If the caller is somebody else. A 403 rather than a 404:
-            the caller already knows the id — they put it in the URL — so hiding
-            existence here buys nothing that ``GET`` does not already give away.
-    """
-    if caller.id != user_id:
-        raise ForbiddenError("you may only act on your own account")
-    return caller
-
-
-Owner = Annotated[Identity, Depends(require_owner)]
-"""The caller, guaranteed to own the ``user_id`` in the path."""
-
-
 async def require_bearer_token(credentials: Credentials) -> str:
     """Return the presented token itself, for the one endpoint that revokes it.
 
@@ -173,10 +145,8 @@ __all__ = [
     "Caller",
     "Credentials",
     "MaybeCaller",
-    "Owner",
     "bearer_scheme",
     "require_bearer_token",
     "require_caller",
-    "require_owner",
     "resolve_caller",
 ]

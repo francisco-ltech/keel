@@ -55,7 +55,8 @@ app/
 {% endif %}  settings.py      pydantic-settings -> Keel's plain dataclass configs
   errors.py        the error taxonomy{% if has_api %}, and RFC 9457 problem+json for it{% endif %}
 {% if has_api %}  security.py      the bearer-token dependency: Caller and MaybeCaller
-{% endif %}  modules/
+{% endif %}  policies.py      who may do what, per resource type
+  modules/
     __init__.py    the registry: {% if has_api %}MODULES{% if has_worker %} and JOBS{% endif %}{% else %}JOBS{% endif %}
 {% if has_api %}    sessions/      sign in, sign out, who am I — no table of its own
 {% endif %}    users/         models · schemas · repository · service{% if has_api %} · router{% endif %}
@@ -165,33 +166,83 @@ per request is normal; a connection parked across 40 ms of arithmetic is not.
 
 ## Who may call what
 
-`POST /users` is registration and is open. The rest of `/users` itself takes
-`Caller` or `Owner` from `app/security.py`:
+Two questions, answered in two places. **Is somebody there** is the route's:
+`POST /users` is registration and is open, and every other route takes `Caller`
+from `app/security.py`, which answers 401 when no valid token was presented.
+**May that somebody** is a policy's, and lives in `app/policies.py` — see the
+next section.
 
 | | | |
 |---|---|---|
-| `GET /users`, `GET /users/{id}` | `Caller` | a listing of every address is the enumeration answer |
-| `PATCH`, `DELETE /users/{id}` | `Owner` | changing or removing an account |
-| `PUT /users/{id}/password` | `Owner` + the current password | |
-| `/users/{owner_id}/items` | **nothing** | the example domain, deliberately open |
+| `POST /users` | open | registration has to work without a credential |
+| `GET /users` | `Caller` | a listing of every address is the enumeration answer |
+| `GET /users/{id}` | `Caller` + `view` | any caller today; one arm of the policy narrows it |
+| `PATCH`, `DELETE /users/{id}` | `Caller` + `update` / `delete` | the owner, or an admin |
+| `PUT /users/{id}/password` | `Caller` + `change-password` + the current password | the owner alone |
+| `/users/{owner_id}/items` | `Caller` + the items policy | the owner, or an admin |
 
-**The items routes are not guarded.** They are the module you delete, and they
-are left open so the scaffold shows a plain CRUD resource. Guard them before
-they hold anything real. Note that `Owner` will not drop straight onto them:
-its parameter is `user_id` and that path says `owner_id`, so it needs its own
-dependency rather than a rename.
-
-`Owner` compares the path's `user_id` with the caller and answers 403. The
-password lives on its own route rather than in `UserUpdate` because a password
-set without proving knowledge of the old one is a takeover primitive even behind
-authentication.
+The password lives on its own route rather than in `UserUpdate` because a
+password set without proving knowledge of the old one is a takeover primitive
+even behind authentication — and it is the one ability an admin does not get,
+because the precondition is the password in force and a role is not knowledge
+of it.
 
 Changing a password revokes every session the user has, and so does disabling or
 deleting the account: `token_store().revoke_subject(user_id)`. A credential
 change that leaves already-issued tokens working has changed nothing that an
 attacker holding one would notice.
 
-{% endif %}{% if has_worker %}## The queue
+{% endif %}## Authorization
+
+`app/policies.py` is the whole of it: two frozen reference values, two rules,
+and two lines registering them.
+
+```python
+def items_policy(identity: Identity | None, action: str, items: ItemsOf) -> bool:
+    if identity is None:
+        return False
+    match action:
+        case "view" | "create" | "update" | "delete":
+            return identity.id == items.owner_id or identity.has_role(ADMIN)
+        case _:
+            return False
+```
+
+**A rule per resource type, chosen by Keel's registry.** `authorize("update",
+ItemsOf(owner_id))` looks the rule up by the class of the thing being acted on
+and asks it. Adding a resource is a function and a line; no existing rule grows
+a branch.
+
+**Nothing is permitted by omission.** A resource type nobody registered is
+*refused*, and loudly — `authorize` raises rather than answering 403, because a
+missing registration is a wiring bug and a 403 would file it where nobody looks.
+Deleting a policy breaks its callers; it does not open them.
+
+**The check is in the service, not at the edge.** Every function in
+`app/modules/*/service.py` that acts on a named resource opens with `authorize`,
+before its unit of work. A guard on the HTTP layer protects only the callers who
+arrive over HTTP{% if has_worker %}, and a job handler is not one of them{% endif %}; a refusal before the block
+also means no transaction is opened and no connection borrowed. `create_user` is
+the one function that does not authorize, because registration cannot.
+
+**A resource is a reference, not a row.** `Account(user_id)` and
+`ItemsOf(owner_id)` carry an id and nothing else. A session is never held across
+a request, so a route has no ORM object to judge — and a rule written against an
+identifier works just as well before the row has been read. Register a policy
+for a model class and pass the loaded object when a rule genuinely needs the row.
+
+**Roles come from you.** `Identity.roles` is whatever the edge put there when
+the token was minted, and this scaffold mints none: give your users a role
+column or a membership table and fill it in at that moment. The `admin` arms in
+the two policies are written and waiting.
+{% if has_worker %}
+**A job says who it acts for.** `IndexItem.handle` wraps its work in
+`acting_as(Identity(id=owner_id))`, rebuilt from the payload, and the same rule
+applies to it as to a request. It carries no roles on purpose: a job must never
+be able to do more than the person it acts for, or the queue becomes an
+escalation path.
+{% endif %}
+{% if has_worker %}## The queue
 
 `app/modules/items/jobs.py` is the example worth reading. Three things in it are
 the whole convention:
@@ -329,11 +380,15 @@ deployment file rather than a development one.
 
 ## What is deliberately not here yet
 
-* **Authorization.** There is a caller{% if has_api %} and a way to require one{% endif %}, and an
-  `Identity` carries `roles`, but nothing here decides what a role may *do*.
-  Policies are the next question — Strategy per resource or a chain of
-  responsibility — and answering it before there is a second protected resource
-  would be scaffolding for one case.
+* **A source for roles.** The policies read `Identity.roles` and the scaffold
+  never fills it: there is no role column, no membership table and no route that
+  grants one. That is application design, not framework, and the shape of it
+  differs enough between products that a guess here would be one to undo.
+* **Rules that apply to every resource.** A super-admin bypass, a tenant check,
+  a suspended-account gate — anything that has to run before or after *every*
+  policy. That is the point at which a chain of responsibility earns its place;
+  a chain with one link would be indirection with a pattern's name on it, so the
+  registry answers one rule per resource type until then.
 {% if has_api %}* **Refresh tokens.** `revoke` plus `issue` composes rotation today. Pairing
   them is a decision about session policy, not about storage.
 * **A password reset flow, and roles on the user row.** Both are application

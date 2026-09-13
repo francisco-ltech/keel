@@ -1,0 +1,157 @@
+"""Who may do what, and to which thing.
+
+The one file to read before adding a rule. It answers *may they*; ``app/security.py``{% if not has_api %}
+— which this shape does not scaffold, because it is an HTTP edge —{% endif %} answers
+*who is calling*, and the two are kept apart because they fail differently: no
+credential is a 401 raised at the edge, a refused action is a 403 raised here.
+
+**Pattern: Strategy, one rule per resource type.** ``keel.auth`` keeps a
+registry keyed by the resource's class and asks the rule that matches. Adding a
+resource is adding a function and a line at the bottom of this file; no existing
+rule changes and nothing grows a branch. A Chain of Responsibility was the
+alternative and is not needed until some rule has to run for *every* resource —
+a super-admin bypass, a tenant check — because a chain with one link is
+indirection with a pattern's name on it.
+
+**Nothing is permitted by omission.** A resource type with no rule here is
+refused, loudly: `keel.auth.authorize` raises rather than answering 403, because
+a forgotten registration is a wiring bug and a 403 would hide it among ordinary
+refusals. Deleting a policy therefore breaks its routes rather than opening
+them.
+
+**A resource is a reference, not a row.** :class:`Account` and :class:`ItemsOf`
+carry an id and nothing else. That is not laziness: a router never holds an ORM
+object, because a session is never held across a request (ADR 0002), so the
+thing available to judge at the edge *is* the identifier. It is also what makes
+the rule work identically in a service{% if has_worker %} and in a job handler{% endif %}, where the row may
+not have been read yet either. A rule that genuinely needs the row takes the row
+— register a policy for the model class and pass the loaded object.
+
+**Registered when this module is imported**, at the bottom. The services import
+:class:`Account` and :class:`ItemsOf` from here to ask their questions, so the
+import that makes a check possible is the same one that installs the rule; there
+is no separate wiring step to forget. Registering twice is refused by Keel, so
+two rules for one resource cannot silently disagree.
+
+**The caller may be ``None``.** There is no guest ``Identity`` — a guest object
+with an id is indistinguishable from a real caller everywhere the check is
+forgotten — so the parameter is ``Identity | None`` and both type checkers
+refuse to let a rule read ``identity.id`` until it has said what an
+unauthenticated caller gets. Every rule below opens by saying "nobody, no".
+
+**Actions are strings and the ``match`` is exhaustive.** The ``case _`` arm is
+the deny-by-default, and it means a new ability is refused until somebody writes
+its arm. A method per ability — Laravel's shape — would be `getattr` on that
+same string in Python, dispatched across an object's whole attribute surface,
+and no better typed at the call site.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Final
+from uuid import UUID
+
+from keel.auth import Identity, register_policy
+
+ADMIN: Final = "admin"
+"""The role that overrides ownership.
+
+Named once rather than spelled at three call sites, because a typo in a role
+name is a permission that silently never applies. Nothing in this scaffold
+*issues* it — ``sign_in`` builds ``Identity(id=...)`` with no roles, since this
+domain has no source for them yet. Give your users a role column, or a
+membership table, and put its contents on the ``Identity`` at the point the
+token is minted; the rules below already read it.
+"""
+
+
+@dataclass(frozen=True, slots=True)
+class Account:
+    """One user's account, as a caller addresses it.
+
+    Attributes:
+        user_id: Whose account. The path parameter, before any row is read.
+    """
+
+    user_id: UUID
+
+
+@dataclass(frozen=True, slots=True)
+class ItemsOf:
+    """One owner's items, as a caller addresses them.
+
+    The collection rather than the item, because every items route is scoped by
+    owner — ``/users/{owner_id}/items`` — and the service reads nothing that is
+    not already narrowed to that owner. A per-item rule would be asking the same
+    question twice.
+
+    Attributes:
+        owner_id: Whose items.
+    """
+
+    owner_id: UUID
+
+
+def account_policy(identity: Identity | None, action: str, account: Account) -> bool:
+    """Decide what a caller may do to an account.
+
+    Three different answers, which is why the action is a parameter rather than
+    three dependencies. Reading is open to anyone signed in, because this is a
+    directory rather than a profile with private fields — narrow ``view`` to
+    ``mine`` if yours is. Changing and removing are the owner's or an admin's.
+    Replacing the password is the **owner's alone**: it demands the password in
+    force, and an admin who knew it would not need the route.
+
+    Args:
+        identity: The caller, or ``None`` if nobody is authenticated.
+        action: The ability being asked about.
+        account: Whose account it is.
+
+    Returns:
+        Whether it is permitted.
+    """
+    if identity is None:
+        return False
+
+    mine = identity.id == account.user_id
+    match action:
+        case "view":
+            return True
+        case "update" | "delete":
+            return mine or identity.has_role(ADMIN)
+        case "change-password":
+            return mine
+        case _:
+            return False
+
+
+def items_policy(identity: Identity | None, action: str, items: ItemsOf) -> bool:
+    """Decide what a caller may do to one owner's items.
+
+    Every ability has the same answer today — an owner, or an admin — and the
+    ``match`` is still here because that is where a differing one goes. Making
+    reads public, say, is one arm rather than a new mechanism.
+
+    Args:
+        identity: The caller, or ``None`` if nobody is authenticated.
+        action: The ability being asked about.
+        items: Whose items they are.
+
+    Returns:
+        Whether it is permitted.
+    """
+    if identity is None:
+        return False
+
+    match action:
+        case "view" | "create" | "update" | "delete":
+            return identity.id == items.owner_id or identity.has_role(ADMIN)
+        case _:
+            return False
+
+
+register_policy(Account, account_policy)
+register_policy(ItemsOf, items_policy)
+
+__all__ = ["ADMIN", "Account", "ItemsOf", "account_policy", "items_policy"]

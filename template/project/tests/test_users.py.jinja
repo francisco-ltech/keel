@@ -5,26 +5,25 @@ Every test here writes rows and none of them clean up: the transaction the
 uniqueness assertions do not interfere with each other.
 
 **Registration is the only open route, and the tests read that way.** Everything
-else carries an `Authorization` header, because everything else takes `Caller`
-or `Owner`. The three that matter most are at the bottom: a caller is required
-to change a password, one caller cannot touch another's account, and a password
-change has to prove knowledge of the password it replaces. Each of those was a
-live account-takeover path while these routes were open.
+else carries an `Authorization` header, because everything else takes `Caller`.
+Whether that caller may act is `account_policy`'s answer, not the route's, so
+the tests come in pairs: a 401 for nobody and a 403 for the wrong somebody. The
+three that matter most are near the bottom: a caller is required to change a
+password, one caller cannot touch another's account, and a password change has
+to prove knowledge of the password it replaces. Each of those was a live
+account-takeover path while these routes were open.
 """
 
 from __future__ import annotations
 
-from typing import get_args, get_type_hints
 from uuid import UUID
 
 import pytest
-from fastapi import params
 from httpx import AsyncClient
 from keel.database import uow
 
 from app.modules.users.repository import UserRepository
-from app.security import require_owner
-from tests.conftest import DEFAULT_USER, bearer, create_user, signed_in
+from tests.conftest import DEFAULT_USER, admin_bearer, bearer, create_user, signed_in
 
 pytestmark = pytest.mark.anyio
 
@@ -182,7 +181,11 @@ async def test_updating_to_a_taken_email_is_a_conflict(client: AsyncClient) -> N
 
 
 async def test_updating_an_unknown_user_is_forbidden(client: AsyncClient) -> None:
-    """403 before 404: ownership is decided in the dependency, before any query."""
+    """403 before 404: the policy runs before the service opens a transaction.
+
+    The ordering is the defence. Answering 404 first would turn this route into
+    a way to ask which ids are registered, for free and without a password.
+    """
     token = (await signed_in(client))[1]
 
     response = await client.patch(
@@ -309,24 +312,56 @@ async def test_changing_a_password_replaces_it(client: AsyncClient) -> None:
     assert with_new.status_code == 201
 
 
-def test_owner_reads_the_path_and_only_the_path() -> None:
-    """`Owner`'s id parameter must be pinned to the path with `Path()`.
+async def test_ownership_cannot_be_smuggled_through_the_query_string(client: AsyncClient) -> None:
+    """The hazard the previous mechanism needed a pinned `Path()` to survive.
 
-    FastAPI sources a scalar dependency parameter from the **query string** on
-    any route whose path does not declare that name. Unpinned, mounting `Owner`
-    on a route spelled `/accounts/{id}` lets a caller pass `?user_id=<their own>`
-    and clear the ownership check against somebody else's record.
-
-    Asserted structurally rather than through a request: every shipped route
-    spells the parameter `user_id`, so on those the path always wins and an
-    end-to-end probe would pass whether or not the annotation is there.
+    A dependency taking a scalar named `user_id` was sourced from the **query
+    string** on any route whose path did not declare it — so a route spelled
+    `/accounts/{id}` would have let a caller pass `?user_id=<their own>` and
+    clear the check against somebody else's record. The rule now takes the id
+    the service was called with, which is the path parameter, so a second value
+    in the query has nothing to bind to.
     """
-    hint = get_type_hints(require_owner, include_extras=True)["user_id"]
+    victim = (await signed_in(client, email="ada@example.com"))[0]
+    attacker, attacker_token = await signed_in(client, email="mallory@example.com")
 
-    assert any(isinstance(marker, params.Path) for marker in get_args(hint)[1:]), (
-        "require_owner's user_id is not pinned to the path, so a renamed route "
-        "would read it from the query string"
+    response = await client.patch(
+        f"/users/{victim['id']}",
+        params={"user_id": attacker["id"]},
+        json={"full_name": "Owned"},
+        headers=bearer(attacker_token),
     )
+
+    assert response.status_code == 403
+
+
+async def test_an_admin_may_change_an_account_but_not_its_password(client: AsyncClient) -> None:
+    """One role, two answers — which is what the action parameter buys.
+
+    `update` and `delete` fall to an administrator; `change-password` does not,
+    because that route's precondition is the password in force and a role is not
+    knowledge of it. Expressing this at all was impossible while ownership was a
+    comparison between a path parameter and the caller.
+    """
+    victim = (await signed_in(client, email="ada@example.com"))[0]
+    administrator = await admin_bearer()
+
+    renamed = await client.patch(
+        f"/users/{victim['id']}", json={"full_name": "Renamed by support"}, headers=administrator
+    )
+    repassworded = await client.put(
+        f"/users/{victim['id']}/password",
+        json={"current_password": "irrelevant", "new_password": "chosen-by-support"},
+        headers=administrator,
+    )
+
+    assert renamed.status_code == 200
+    assert renamed.json()["full_name"] == "Renamed by support"
+    assert repassworded.status_code == 403
+    still_theirs = await client.post(
+        "/sessions", json={"email": "ada@example.com", "password": DEFAULT_USER["password"]}
+    )
+    assert still_theirs.status_code == 201, "an admin replaced somebody's password"
 
 
 async def test_a_rehash_on_login_cannot_overwrite_a_newer_password(

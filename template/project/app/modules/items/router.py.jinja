@@ -2,9 +2,17 @@
 
 Items are addressed under their owner — ``/users/{owner_id}/items`` — so the
 scope is in the path rather than in a query parameter a client can forget. To
-scope them to the caller instead, take ``caller: Caller`` from
-:mod:`app.security` and pass ``caller.id`` where ``owner_id`` goes — the service
-calls below already take it as an argument, so nothing beneath this file moves.
+scope them to the caller instead, drop ``owner_id`` from the paths and pass
+``caller.id`` where it goes — the service calls below already take it as an
+argument, so nothing beneath this file moves.
+
+**Every route takes ``Caller``, and none of them decides ownership.** The 401
+for a missing token is this file's; the 403 for somebody else's items is
+``items_policy`` in ``app/policies.py``, asked by the service. That split is
+why these routes could finally be guarded at all: the dependency they were
+waiting for compared a path parameter spelled ``user_id`` against the caller,
+and this path says ``owner_id``, so it never fitted. A rule that takes the
+resource rather than the request does not care what the path spells.
 
 Every route carries a tag, and no route touches a session or a repository.
 """
@@ -19,12 +27,13 @@ from fastapi import APIRouter, Query, status
 from app.modules.items import service
 from app.modules.items.repository import DEFAULT_PAGE_SIZE
 from app.modules.items.schemas import ItemCreate, ItemRead, ItemUpdate
+from app.security import Caller
 
 router = APIRouter(prefix="/users/{owner_id}/items", tags=["items"])
 
 
 @router.post("", status_code=status.HTTP_201_CREATED, summary="Create an item")
-async def create_item(owner_id: UUID, payload: ItemCreate) -> ItemRead:
+async def create_item(owner_id: UUID, payload: ItemCreate, _: Caller) -> ItemRead:
     """Create an item owned by the user in the path.
 
     Ownership comes from the URL and is not a body field, so a request cannot
@@ -33,6 +42,7 @@ async def create_item(owner_id: UUID, payload: ItemCreate) -> ItemRead:
     Args:
         owner_id: The owning user.
         payload: The requested item.
+        _: Declared for the dependency: 401 without a token.
 
     Returns:
         The created item.
@@ -43,6 +53,7 @@ async def create_item(owner_id: UUID, payload: ItemCreate) -> ItemRead:
 @router.get("", summary="List an owner's items")
 async def list_items(
     owner_id: UUID,
+    _: Caller,
     limit: Annotated[int, Query(ge=1, le=200)] = DEFAULT_PAGE_SIZE,
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> list[ItemRead]:
@@ -50,6 +61,7 @@ async def list_items(
 
     Args:
         owner_id: Whose items to return.
+        _: Declared for the dependency.
         limit: Maximum rows to return.
         offset: Rows to skip.
 
@@ -60,12 +72,13 @@ async def list_items(
 
 
 @router.get("/{item_id}", summary="Fetch an item")
-async def get_item(owner_id: UUID, item_id: UUID) -> ItemRead:
+async def get_item(owner_id: UUID, item_id: UUID, _: Caller) -> ItemRead:
     """Return one of an owner's items.
 
     Args:
         owner_id: The owning user.
         item_id: The item's id.
+        _: Declared for the dependency.
 
     Returns:
         The item.
@@ -74,13 +87,14 @@ async def get_item(owner_id: UUID, item_id: UUID) -> ItemRead:
 
 
 @router.patch("/{item_id}", summary="Update an item")
-async def update_item(owner_id: UUID, item_id: UUID, payload: ItemUpdate) -> ItemRead:
+async def update_item(owner_id: UUID, item_id: UUID, payload: ItemUpdate, _: Caller) -> ItemRead:
     """Apply a partial update.
 
     Args:
         owner_id: The owning user.
         item_id: The item's id.
         payload: The fields to change.
+        _: Declared for the dependency.
 
     Returns:
         The updated item.
@@ -89,12 +103,13 @@ async def update_item(owner_id: UUID, item_id: UUID, payload: ItemUpdate) -> Ite
 
 
 @router.delete("/{item_id}", status_code=status.HTTP_204_NO_CONTENT, summary="Delete an item")
-async def delete_item(owner_id: UUID, item_id: UUID) -> None:
+async def delete_item(owner_id: UUID, item_id: UUID, _: Caller) -> None:
     """Delete one of an owner's items.
 
     Args:
         owner_id: The owning user.
         item_id: The item's id.
+        _: Declared for the dependency.
     """
     await service.delete_item(item_id, owner_id)
 

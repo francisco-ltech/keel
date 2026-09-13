@@ -1,0 +1,118 @@
+"""The authorization rules, asked directly.
+
+No HTTP, no database and no fixtures: a policy is a function of a caller, an
+action and a reference, so the cheapest place to pin every branch is here. The
+{% if has_api %}route tests in ``test_users.py`` and ``test_items.py`` then prove the *wiring* —
+that the rule is actually consulted, and that a refusal reaches the client as a
+403 — rather than re-enumerating the truth table over HTTP.{% else %}job tests in ``test_jobs.py`` then prove the *wiring* — that a handler acting for
+somebody is held to the same rule — rather than re-enumerating the truth table.{% endif %}
+
+The last two tests are the ones to keep if you delete the rest. One says that a
+resource type nobody registered is refused rather than allowed; the other says
+that importing the policies module is what installs the rules, which is the
+assumption every other test here quietly rests on.
+"""
+
+from __future__ import annotations
+
+from uuid import uuid4
+
+import pytest
+from keel.auth import Identity, acting_as, allows, use_policies
+from keel.exceptions import ConfigurationError
+
+from app.policies import ADMIN, Account, ItemsOf, account_policy, items_policy
+
+OWNER = Identity(id=uuid4())
+STRANGER = Identity(id=uuid4())
+ADMINISTRATOR = Identity(id=uuid4(), roles=frozenset({ADMIN}))
+
+ACCOUNT = Account(user_id=OWNER.id)
+ITEMS = ItemsOf(owner_id=OWNER.id)
+
+
+def test_nobody_may_do_anything_to_an_account() -> None:
+    """There is no guest identity, and ``None`` is not a caller."""
+    for action in ("view", "update", "delete", "change-password"):
+        assert not account_policy(None, action, ACCOUNT)
+
+
+def test_nobody_may_do_anything_to_items() -> None:
+    for action in ("view", "create", "update", "delete"):
+        assert not items_policy(None, action, ITEMS)
+
+
+def test_any_caller_may_read_an_account() -> None:
+    """A directory, not a profile. Narrow this arm if yours is the other one."""
+    assert account_policy(STRANGER, "view", ACCOUNT)
+
+
+def test_only_the_owner_or_an_admin_may_change_an_account() -> None:
+    assert account_policy(OWNER, "update", ACCOUNT)
+    assert account_policy(ADMINISTRATOR, "update", ACCOUNT)
+    assert not account_policy(STRANGER, "update", ACCOUNT)
+
+
+def test_only_the_owner_or_an_admin_may_delete_an_account() -> None:
+    assert account_policy(OWNER, "delete", ACCOUNT)
+    assert account_policy(ADMINISTRATOR, "delete", ACCOUNT)
+    assert not account_policy(STRANGER, "delete", ACCOUNT)
+
+
+def test_not_even_an_admin_may_change_a_password() -> None:
+    """The route's precondition is the password in force, which a role is not.
+
+    The one place the three answers this policy gives actually diverge, and the
+    reason the action is a parameter rather than three separate guards.
+    """
+    assert account_policy(OWNER, "change-password", ACCOUNT)
+    assert not account_policy(ADMINISTRATOR, "change-password", ACCOUNT)
+
+
+def test_an_unnamed_ability_is_refused() -> None:
+    """The ``case _`` arm: a new verb is denied until somebody writes its rule."""
+    assert not account_policy(OWNER, "impersonate", ACCOUNT)
+    assert not items_policy(OWNER, "export", ITEMS)
+
+
+def test_the_owner_of_a_collection_may_write_it() -> None:
+    """The rule the items routes were waiting for."""
+    for action in ("view", "create", "update", "delete"):
+        assert items_policy(OWNER, action, ITEMS)
+
+
+def test_a_stranger_may_not_touch_another_owners_items() -> None:
+    for action in ("view", "create", "update", "delete"):
+        assert not items_policy(STRANGER, action, ITEMS)
+
+
+def test_an_admin_may_touch_anybodys_items() -> None:
+    """Not expressible at all while ownership was a path comparison."""
+    for action in ("view", "create", "update", "delete"):
+        assert items_policy(ADMINISTRATOR, action, ITEMS)
+
+
+def test_an_unregistered_resource_is_refused_rather_than_allowed() -> None:
+    """Delete a policy and its routes break; they do not open.
+
+    Asked against an empty registry, because the point is what happens when a
+    rule is *missing*. It raises rather than answering ``False``: a forgotten
+    registration is a wiring bug, and a 403 would file it where nobody looks.
+    """
+    with use_policies(), acting_as(OWNER), pytest.raises(ConfigurationError, match="no policy"):
+        allows("view", ACCOUNT)
+
+
+def test_importing_the_policies_module_installs_the_rules() -> None:
+    """The wiring, such as it is: an import, and no start-up call to forget.
+
+    ``app.policies`` registers at the bottom of the module, and every service
+    that authorizes imports a resource class from it — so the import that makes
+    a check possible is the one that installs the rule it consults.
+    """
+    with acting_as(OWNER):
+        assert allows("update", ACCOUNT)
+        assert allows("create", ITEMS)
+    with acting_as(STRANGER):
+        assert not allows("update", ACCOUNT)
+        assert not allows("create", ITEMS)

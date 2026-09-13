@@ -21,6 +21,16 @@ deploy chose.
 the read, so a change to how an item is fetched cannot be right for HTTP and
 wrong for the queue.
 
+**Which means the job has to say who it is acting for.** That service
+authorizes, and a worker has no request and no bearer token, so ``handle``
+publishes an :class:`~keel.auth.Identity` with ``acting_as`` and the policy in
+``app/policies.py`` answers exactly as it would for a request. Two properties of
+that identity are deliberate. It is rebuilt from the **payload**, so a job
+carries the authority its own arguments justify rather than a snapshot of
+whoever was signed in when it was enqueued. And it carries **no roles**, so a
+job can never do more than the person it acts for — a background task that
+quietly runs as an administrator is how a queue becomes a privilege escalation.
+
 Declined, deliberately:
 
 * **A job per service function.** One real job is enough to establish the shape.
@@ -37,6 +47,7 @@ from dataclasses import dataclass
 from typing import ClassVar
 from uuid import UUID
 
+from keel.auth import Identity, acting_as
 from keel.cache import cache
 from keel.queue import Backoff, ExponentialBackoff, Job, PermanentFailureError
 
@@ -114,10 +125,13 @@ class IndexItem(Job):
                 would burn five attempts and an hour of backoff re-reading a row
                 that was deleted on purpose.
         """
-        try:
-            item = await service.get_item(UUID(self.item_id), UUID(self.owner_id))
-        except NotFoundError as exc:
-            raise PermanentFailureError(f"item {self.item_id} no longer exists") from exc
+        owner_id = UUID(self.owner_id)
+        # The owner's authority and no more: no roles, and only for this read.
+        with acting_as(Identity(id=owner_id)):
+            try:
+                item = await service.get_item(UUID(self.item_id), owner_id)
+            except NotFoundError as exc:
+                raise PermanentFailureError(f"item {self.item_id} no longer exists") from exc
 
         await cache.put(
             card_key(item.id),
