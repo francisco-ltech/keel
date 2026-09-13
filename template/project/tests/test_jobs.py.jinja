@@ -22,7 +22,7 @@ from __future__ import annotations
 from uuid import UUID
 
 import pytest
-from keel.auth import Identity, acting_as, current_identity
+from keel.auth import Identity, acting_as, current_identity, use_policies
 from keel.cache import cache
 from keel.queue import PermanentFailureError
 from keel.testing import fake_queue
@@ -31,6 +31,7 @@ from app.errors import NotFoundError
 from app.modules.items import service as items_service
 from app.modules.items.jobs import IndexItem, card_key
 from app.modules.items.schemas import ItemCreate
+from app.policies import ItemsOf
 from tests.conftest import make_user
 
 pytestmark = pytest.mark.anyio
@@ -133,3 +134,31 @@ async def test_the_job_runs_with_the_owners_authority_and_no_more(rolled_back: N
 
     assert current_identity() is None, "the job leaked its caller into the process"
     assert await cache.get(card_key(item.id)) is not None
+
+
+async def test_a_job_acts_with_no_roles(rolled_back: None) -> None:
+    """The ceiling on a job's authority, which nothing else observes.
+
+    The test above asserts the job names a caller and clears it afterwards.
+    Neither half looks at roles — so granting the handler `admin` left the whole
+    suite green, and the queue would have become an escalation path. This
+    captures the identity the policy is actually asked about.
+    """
+    ada = await make_user(email="ada@example.com")
+    with acting_as(Identity(id=ada.id)):
+        item = await items_service.create_item(ada.id, ItemCreate(name="Engine"))
+
+    seen: list[Identity | None] = []
+
+    def capture(identity: Identity | None, action: str, resource: ItemsOf) -> bool:
+        seen.append(identity)
+        return True
+
+    with use_policies() as policies:
+        policies.register(ItemsOf, capture)
+        await IndexItem(item_id=str(item.id), owner_id=str(ada.id)).handle()
+
+    assert seen, "the job never consulted a policy"
+    assert all(who is not None and who.roles == frozenset() for who in seen), (
+        "a job reached further than the person it acts for"
+    )

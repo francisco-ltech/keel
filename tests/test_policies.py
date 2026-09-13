@@ -258,3 +258,21 @@ async def test_concurrent_tasks_cannot_see_each_others_policies() -> None:
             return allows("view", account)
 
     assert list(await asyncio.gather(answer(True), answer(False))) == [True, False]
+
+
+def test_an_async_policy_is_refused_rather_than_permitting_everything() -> None:
+    """A coroutine object is truthy, so an async policy would permit everything.
+
+    The fail-safe on a falsey return does not cover this half, and `async def`
+    is the reflex: every other extension point in Keel — services, handlers,
+    repositories, dispatch — is async. Refused at registration, so it is a
+    start-up error rather than a silent bypass of every rule for that type.
+    """
+
+    async def denies_everything(identity: Identity | None, action: str, resource: Document) -> bool:
+        return False
+
+    registry = PolicyRegistry()
+
+    with pytest.raises(ConfigurationError, match="is async"):
+        registry.register(Document, denies_everything)  # type: ignore[arg-type]  # ty: ignore[invalid-argument-type]

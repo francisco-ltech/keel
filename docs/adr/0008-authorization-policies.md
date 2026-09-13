@@ -117,6 +117,42 @@ role source would do.
 deleted moments later still satisfies the policy for its own id, and is stopped
 only by the service's row lookup. Policies did not close that.
 
+## What the review found
+
+The shipped code was correct — no live vulnerability, no wrong status, no
+ordering error. What it did not have was a suite that would notice if that
+stopped being true. Four one-line edits each left all 79 generated tests green,
+and two were directly exploitable:
+
+* **Deleting `change_password`'s `authorize`.** Every non-owner test on that
+  route sent a deliberately wrong `current_password`, and *that* path answers
+  403 too — so `assert status == 403` passed whether the policy ran or not. A
+  stranger who knew the password could take the account. This is the coverage
+  genuinely lost when `require_owner` was deleted: the assertion had been
+  produced by the dependency, the mechanism moved, and the assertion stayed.
+* **Moving `create_item`'s `authorize` after the owner lookup.** A stranger then
+  gets 404 for an unregistered id and 403 for a real one — a free oracle for
+  which user ids exist. Three docstrings asserted the ordering; nothing tested
+  it, because the test that came closest used an admin and took the permitted
+  branch.
+* Weakening `change-password`'s action string to `update`, and giving the job's
+  `acting_as` an `admin` role.
+
+Tests now cover all four, each mutation-checked.
+
+**An `async def` policy failed open.** `bool()` of a coroutine is `True`, so an
+async policy permitted every caller for every action on that type, with only an
+"never awaited" warning. The fail-safe on a falsey return does not cover the
+truthy half, and `async def` is the reflex — every other extension point in Keel
+is async. `register()` now refuses a coroutine function outright, so it is a
+start-up error like every other wiring mistake here.
+
+**`test_ownership_cannot_be_smuggled_through_the_query_string` documents rather
+than guards.** Its failures are a strict subset of the plain stranger tests', and
+the channel is closed by construction: the service takes an ordinary Python
+argument, so there is no injected scalar for a query value to bind to. Kept for
+naming the hazard, not counted as coverage.
+
 ## Verification
 
 - A stranger is refused write, read, update and delete on another owner's items,

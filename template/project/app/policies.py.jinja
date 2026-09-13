@@ -59,10 +59,10 @@ ADMIN: Final = "admin"
 
 Named once rather than spelled at three call sites, because a typo in a role
 name is a permission that silently never applies. Nothing in this scaffold
-*issues* it — ``sign_in`` builds ``Identity(id=...)`` with no roles, since this
-domain has no source for them yet. Give your users a role column, or a
-membership table, and put its contents on the ``Identity`` at the point the
-token is minted; the rules below already read it.
+*issues* it: nothing here builds an ``Identity`` carrying one, because this
+domain has no source for roles yet. Give your users a role column, or a
+membership table, and put its contents on the ``Identity`` wherever your code
+builds one; the rules below already read it.
 """
 
 

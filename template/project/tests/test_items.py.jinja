@@ -288,3 +288,22 @@ async def test_a_deleted_owners_token_stops_working(client: AsyncClient) -> None
 
     after = await client.get(f"/users/{owner['id']}/items", headers=bearer(token))
     assert after.status_code == 401
+
+
+async def test_creating_an_item_for_an_unknown_owner_is_forbidden_to_a_stranger(
+    client: AsyncClient,
+) -> None:
+    """Authorization runs before the owner lookup, and that ordering is the test.
+
+    Move the `authorize` call after the existence check and a stranger gets 404
+    for an unregistered id and 403 for a real one — a free oracle for which user
+    ids exist. The admin-driven test next to this one takes the permitted branch
+    and can never see the flip.
+    """
+    _, token = await signed_in(client)
+
+    response = await client.post(
+        f"/users/{MISSING_ID}/items", json={"name": "Orphan"}, headers=bearer(token)
+    )
+
+    assert response.status_code == 403, "a stranger learned whether the owner exists"

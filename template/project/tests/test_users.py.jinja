@@ -390,3 +390,55 @@ async def test_a_rehash_on_login_cannot_overwrite_a_newer_password(
         )
 
     assert not swapped, "a stale rehash overwrote a newer password"
+
+
+async def test_a_stranger_who_knows_the_password_still_cannot_replace_it(
+    client: AsyncClient,
+) -> None:
+    """The policy has to refuse, not the wrong-password check.
+
+    Every other non-owner test on this route sends a deliberately wrong
+    `current_password`, and that path answers 403 too — so deleting the
+    `authorize` call left the whole suite green while a stranger who knew the
+    password could take the account. This one sends the *correct* password.
+    """
+    victim, _ = await signed_in(client, email="victim@example.com")
+    _, token = await signed_in(client)
+
+    response = await client.put(
+        f"/users/{victim['id']}/password",
+        json={
+            "current_password": DEFAULT_USER["password"],
+            "new_password": "attacker-chosen-value",
+        },
+        headers=bearer(token),
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "you may not change-password this resource"
+
+    still_theirs = await client.post(
+        "/sessions",
+        json={"email": "victim@example.com", "password": DEFAULT_USER["password"]},
+    )
+    assert still_theirs.status_code == 201, "the stranger replaced the password"
+
+
+async def test_an_admin_is_refused_the_password_route_by_the_policy(
+    client: AsyncClient,
+) -> None:
+    """Asserting the status alone cannot tell which check refused.
+
+    A wrong current password is also a 403, so `assert status == 403` passes
+    whether the policy ran or not. The detail is what distinguishes them.
+    """
+    victim, _ = await signed_in(client, email="victim@example.com")
+
+    response = await client.put(
+        f"/users/{victim['id']}/password",
+        json={"current_password": DEFAULT_USER["password"], "new_password": "whatever-1"},
+        headers=await admin_bearer(),
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "you may not change-password this resource"

@@ -66,6 +66,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
+from inspect import iscoroutinefunction
 from typing import Any
 
 from keel.auth.identity import Identity, current_identity
@@ -125,10 +126,20 @@ class PolicyRegistry:
                 makes a policy that forgets to ``return`` fail safe.
 
         Raises:
-            ConfigurationError: If a policy is already registered for the type.
-                Silently replacing one means two registrations disagreeing and
-                the loser being a permission nobody can find.
+            ConfigurationError: If a policy is already registered for the type,
+                or if the policy is a coroutine function. Silently replacing a
+                registration means two rules disagreeing and the loser being a
+                permission nobody can find.
         """
+        if iscoroutinefunction(policy):
+            # A coroutine object is truthy, so an async policy would permit
+            # everything. Fail-safe on falsey values does not cover this half.
+            raise ConfigurationError(
+                f"the policy for {resource_type.__qualname__} is async, and a "
+                f"coroutine is truthy — it would permit every caller, every "
+                f"action. Policies are synchronous by design: an Identity "
+                f"carries its roles and claims so a check needs no query."
+            )
         if resource_type in self._policies:
             raise ConfigurationError(
                 f"a policy is already registered for {resource_type.__qualname__}; "
