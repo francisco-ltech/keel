@@ -61,6 +61,24 @@ class InvalidCursorError(DatabaseError):
         super().__init__(reason)
 
 
+class AuthenticationRequiredError(KeelError):
+    """Raised when work that needs a principal is attempted without one.
+
+    A programming error rather than a failed login: the edge either did not
+    authenticate the caller or did not bind the result.
+    """
+
+
+class UnsupportedHashError(KeelError):
+    """Raised when a stored password hash uses an unconfigured algorithm.
+
+    Almost always a half-finished migration — bcrypt hashes in the table, only
+    Argon2 configured. Loud rather than silent, because returning "wrong
+    password" would lock every affected account out indefinitely and look like
+    a user error.
+    """
+
+
 class CacheError(KeelError):
     """Base class for cache failures."""
 

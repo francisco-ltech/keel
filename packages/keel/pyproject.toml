@@ -26,6 +26,9 @@ factories = ["polyfactory>=2.18"]
 # The queue driver. Optional because an API-only deployment that dispatches
 # nothing, and any process that only reads, should not carry a worker runtime.
 queue = ["saq>=0.22"]
+# Password hashing. Optional because a service that authenticates by token, or
+# not at all, stores no passwords and should not carry an Argon2 binding.
+auth = ["pwdlib[argon2]>=0.2"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/keel"]
