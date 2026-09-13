@@ -165,7 +165,7 @@ per request is normal; a connection parked across 40 ms of arithmetic is not.
 
 ## Who may call what
 
-`POST /users` is registration and is open. Everything else under `/users` takes
+`POST /users` is registration and is open. The rest of `/users` itself takes
 `Caller` or `Owner` from `app/security.py`:
 
 | | | |
@@ -173,6 +173,13 @@ per request is normal; a connection parked across 40 ms of arithmetic is not.
 | `GET /users`, `GET /users/{id}` | `Caller` | a listing of every address is the enumeration answer |
 | `PATCH`, `DELETE /users/{id}` | `Owner` | changing or removing an account |
 | `PUT /users/{id}/password` | `Owner` + the current password | |
+| `/users/{owner_id}/items` | **nothing** | the example domain, deliberately open |
+
+**The items routes are not guarded.** They are the module you delete, and they
+are left open so the scaffold shows a plain CRUD resource. Guard them before
+they hold anything real. Note that `Owner` will not drop straight onto them:
+its parameter is `user_id` and that path says `owner_id`, so it needs its own
+dependency rather than a rename.
 
 `Owner` compares the path's `user_id` with the caller and answers 403. The
 password lives on its own route rather than in `UserUpdate` because a password

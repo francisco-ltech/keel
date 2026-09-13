@@ -226,6 +226,34 @@ Each has a regression test named for it in `test_redis_token_store.py`, and the
 orphaning one is mutation-checked: restoring the index delete makes it fail and
 nothing else does.
 
+## What this does not do
+
+Four limits, all found by review and none of them fixed. They are recorded
+because a subsystem that overstates its guarantees is worse than one that has
+fewer of them.
+
+**The equal-cost login holds only while the stored hashes are homogeneous.** The
+dummy is hashed at the *currently configured* cost; a row written before a cost
+raise verifies faster than it. Measured at 10ms against 36ms after raising the
+parameters — one request classifies an address, and a wrong password never
+triggers a rehash, so the oracle does not heal under attack. Raising cost
+parameters should be paired with an offline rehash, not left to rehash-on-login.
+
+**Revocation cannot reach a sign-in already in flight.** `revoke_subject` kills
+the tokens that exist when it runs. A sign-in that read the row before a
+password change commits issues its token afterwards and survives. Closing it
+needs a revocation epoch per subject, checked at resolve — which costs a read on
+every authenticated request, and is why it is not built.
+
+**A deleted account can leave a resolvable token** by the same interleaving. It
+passes an ownership check and is stopped only by each service's own row lookup.
+
+**Nothing is rate-limited.** Not sign-in, not registration, not the password
+change — which makes that endpoint unlimited online recovery of a plaintext
+password for anyone holding a stolen token. Rate limiting is unscheduled on the
+roadmap, and a service putting this in front of real users needs a limiter it
+supplies itself.
+
 ## Verification
 
 - `test_the_plaintext_is_never_recoverable_from_the_store` — the property the
