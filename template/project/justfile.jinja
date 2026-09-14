@@ -19,9 +19,13 @@ down:
     docker compose down
 
 {% if service_shape == 'api' -%}
+# `--no-access-log` because app/observability.py already writes one line per
+# request, in the configured format and carrying the request id. Uvicorn's is
+# the same fact in a second shape, which is one line per request to ignore.
+
 # Run the API with reload on http://localhost:8000 (docs at /docs).
 dev:
-    uv run uvicorn app.main:app --reload --port 8000
+    uv run uvicorn app.main:app --reload --port 8000 --no-access-log
 {%- elif service_shape == 'worker' -%}
 # Run the worker. The only entrypoint this service has.
 dev: worker
@@ -35,7 +39,7 @@ dev: worker
 dev:
     #!/usr/bin/env bash
     set -uo pipefail
-    uv run uvicorn app.main:app --reload --port 8000 &
+    uv run uvicorn app.main:app --reload --port 8000 --no-access-log &
     api=$!
     uv run python -m app.worker &
     worker=$!

@@ -51,6 +51,7 @@ from keel.queue.scheduler import (
     _CronFields,
     entry_lock_key,
 )
+from keel.support.correlation import correlation
 from keel.testing import fake_queue
 
 pytestmark = [pytest.mark.anyio]
@@ -385,6 +386,29 @@ async def test_a_tick_dispatches_a_due_entry_and_records_the_claim(
     assert len(queued.pushed) == 1
     async with uow() as session:
         assert await ScheduleRuns(session).last_run("claim-recorded") == BASE
+
+
+@pytest.mark.postgres
+async def test_a_scheduled_dispatch_carries_the_entry_name(
+    database: Database,
+) -> None:
+    """The one dispatch in the codebase with no request id to inherit.
+
+    Everything else enqueues from inside a scope somebody bound. A tick binds
+    nothing, so a scheduled job's envelope carried `{}` and there was no join at
+    all between the "dispatched X for Y" line here and the worker's lines minutes
+    later — for exactly the work nobody is watching when it runs.
+    """
+    scheduler = Scheduler(entry_for(BASE, name="named-in-context"), database=database)
+
+    with fake_queue() as queued:
+        assert await scheduler.tick(BASE) == ["named-in-context"]
+
+    assert queued.pushed[0].context == {
+        "schedule": "named-in-context",
+        "due": BASE.isoformat(),
+    }
+    assert correlation() == {}
 
 
 @pytest.mark.postgres

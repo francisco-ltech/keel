@@ -44,6 +44,7 @@ from keel.queue.worker import (
     WorkerEvent,
     WorkerStopped,
 )
+from keel.support.correlation import correlation
 from keel.support.events import EventDispatcher
 
 pytestmark = [pytest.mark.anyio, pytest.mark.redis]
@@ -61,6 +62,7 @@ class Record:
 
     ran: list[str] = field(default_factory=list)
     finished: list[str] = field(default_factory=list)
+    context: list[dict[str, str]] = field(default_factory=list)
     hold: float = 0.4
     started: anyio.Event | None = None
 
@@ -90,6 +92,20 @@ class WorkerEcho(Job):
     async def handle(self) -> None:
         """Record having run."""
         record.ran.append(self.message)
+
+
+@dataclass(frozen=True, slots=True)
+class WorkerCorrelated(Job):
+    """Records the correlation fields its handler can see."""
+
+    message: str
+
+    max_attempts: ClassVar[int] = 1
+
+    async def handle(self) -> None:
+        """Record what the worker bound around this attempt."""
+        record.ran.append(self.message)
+        record.context.append(dict(correlation()))
 
 
 @dataclass(frozen=True, slots=True)
@@ -297,6 +313,68 @@ async def test_a_worker_executes_a_pushed_job(
     assert len(of_type(seen, JobSucceeded)) == 1
     assert of_type(seen, JobSucceeded)[0].envelope.attempts == 1
     assert await queue.size() == 0
+
+
+async def test_a_job_runs_under_the_context_it_was_dispatched_with(
+    queue: SaqQueue, make_worker: Callable[..., Worker], events: EventDispatcher
+) -> None:
+    """The whole point of the slice, through a real Redis round trip.
+
+    A context that survived `dict` but not `json` would pass every in-process
+    assertion and lose the request id in production, which is why this is here
+    rather than in `test_observability.py`.
+    """
+    listened: list[dict[str, str]] = []
+    events.listen(JobSucceeded, lambda _event: listened.append(dict(correlation())))
+    await queue.push(Envelope.seal(WorkerCorrelated("hello"), context={"request_id": "req-42"}))
+    worker = make_worker()
+
+    await drive(worker, lambda: bool(record.ran))
+
+    assert record.context[0]["request_id"] == "req-42"
+    assert record.context[0]["job"] == WorkerCorrelated.name
+    assert record.context[0]["job_id"]
+    # The lifecycle listeners are inside the binding too, so a log line written
+    # from one carries the request id rather than only the handler's doing.
+    assert listened and listened[0]["request_id"] == "req-42"
+
+
+async def test_the_context_does_not_outlive_the_job(
+    queue: SaqQueue, make_worker: Callable[..., Worker]
+) -> None:
+    """Two jobs, two request ids, and no leakage in either direction."""
+    await queue.push(Envelope.seal(WorkerCorrelated("one"), context={"request_id": "req-1"}))
+    await queue.push(Envelope.seal(WorkerCorrelated("two"), context={"request_id": "req-2"}))
+    worker = make_worker()
+
+    await drive(worker, lambda: len(record.ran) == 2)
+
+    seen_ids = {fields["request_id"] for fields in record.context}
+    assert seen_ids == {"req-1", "req-2"}
+    assert correlation() == {}
+
+
+async def test_a_refused_field_on_the_wire_does_not_kill_the_worker(
+    queue: SaqQueue, make_worker: Callable[..., Worker]
+) -> None:
+    """An envelope sealed elsewhere is data, so a bad name is dropped, not raised.
+
+    Raising here would take the worker's task group down over a field name
+    chosen by an older release — one poisoned envelope for the whole replica.
+    """
+    await queue.push(
+        Envelope.seal(
+            WorkerCorrelated("odd"),
+            context={"request_id": "req-9", "api_key": "hunter2", "level": "FORGED"},
+        )
+    )
+    worker = make_worker()
+
+    await drive(worker, lambda: bool(record.ran))
+
+    assert record.context[0]["request_id"] == "req-9"
+    assert "api_key" not in record.context[0]
+    assert "level" not in record.context[0]
 
 
 async def test_a_worker_serves_every_queue_it_was_given(

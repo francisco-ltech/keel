@@ -24,7 +24,7 @@ To look at output by hand:
 ```sh
 uv run copier copy --trust --defaults \
   --data service_shape=worker \
-  --data keel_path="$PWD/src/keel" \
+  --data keel_path="$PWD" \
   template /tmp/gen && cd /tmp/gen && uv sync && just check
 ```
 

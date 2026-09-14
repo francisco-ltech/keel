@@ -13,9 +13,10 @@ The dependency points from the application to the library, never back.
 **Each subsystem carries its own prefix; there is no nested delimiter.** Every
 group below is a ``BaseSettings`` in its own right with an ``env_prefix``, so
 the variables read as ``DATABASE_URL``, ``DB_POOL_SIZE``, ``CACHE_STORE``,
-``HASHING_TIME_COST``{% if has_api %}, ``TOKEN_DRIVER``{% endif %}{% if has_worker %}, ``QUEUE_DRIVER``,
-``WORKER_HEALTH_FILE``{% endif %} — the names a hosting platform injects. Adding a
-subsystem means a new ``<SUBSYSTEM>_*`` group, not a new top-level key. Setting
+``HASHING_TIME_COST``, ``LOG_LEVEL``{% if has_api %}, ``TOKEN_DRIVER``{% endif %}{% if has_worker %},
+``QUEUE_DRIVER``, ``WORKER_HEALTH_FILE``{% endif %} — the names a hosting platform
+injects. Adding a subsystem means a new ``<SUBSYSTEM>_*`` group, not a new
+top-level key. Setting
 ``env_nested_delimiter="__"`` on :class:`Settings` instead would silently ignore
 every one of those names, because ``extra="ignore"`` means a variable that binds
 to nothing does not raise.
@@ -31,6 +32,7 @@ from pathlib import Path
 {% if has_api %}from keel.auth import DEFAULT_TOKEN_TTL, HashingConfig, TokenConfig{% else %}from keel.auth import HashingConfig{% endif %}
 from keel.cache import CacheConfig, StoreConfig
 from keel.database import DatabaseConfig
+from keel.observability import LoggingConfig
 {%- if has_worker %}
 from keel.queue import QueueConfig
 {%- endif %}
@@ -117,6 +119,29 @@ class HashingSettings(BaseSettings):
     time_cost: int = 3
     memory_cost: int = 65536
     parallelism: int = 4
+
+
+class LoggingSettings(BaseSettings):
+    """How this process writes its logs.
+
+    Read by every entrypoint, and the values are deliberately the same ones for
+    all of them: {% if has_api and has_worker %}an API line and a worker line for the same request{% elif has_api %}every line this process writes{% else %}every line this worker writes{% endif %} has to
+    land in the aggregator in one shape, or the query that joins them has to
+    know which process wrote which.
+
+    Attributes:
+        level: The root logger's level, by name.
+        formatter: ``json`` for a log aggregator, ``text`` for a terminal. JSON
+            is the default because a deployed service's logs are read by a
+            machine first; ``LOG_FORMAT=text`` is what a developer running the
+            process locally wants.
+    """
+
+    model_config = SettingsConfigDict(env_prefix="LOG_", env_file=".env", extra="ignore")
+
+    level: str = "INFO"
+    # `formatter` rather than `format`, which shadows a builtin on an attribute.
+    formatter: str = Field(default="json", validation_alias=AliasChoices("LOG_FORMAT"))
 
 {% if has_api %}
 class TokenSettings(BaseSettings):
@@ -266,6 +291,7 @@ class WorkerSettings(BaseSettings):
         db: Database settings, from ``DATABASE_URL`` and ``DB_*``.
         cache: Cache settings, from ``REDIS_URL`` and ``CACHE_*``.
         hashing: Password hashing cost, from ``HASHING_*``.
+        logging: Log level and shape, from ``LOG_*``.
 {%- if has_api %}
         token: Bearer token settings, from ``REDIS_URL`` and ``TOKEN_*``.
 {%- endif %}
@@ -289,6 +315,7 @@ class WorkerSettings(BaseSettings):
     db: DatabaseSettings = Field(default_factory=DatabaseSettings)
     cache: CacheSettings = Field(default_factory=CacheSettings)
     hashing: HashingSettings = Field(default_factory=HashingSettings)
+    logging: LoggingSettings = Field(default_factory=LoggingSettings)
 {%- if has_api %}
     token: TokenSettings = Field(default_factory=TokenSettings)
 {%- endif %}
@@ -344,6 +371,17 @@ class WorkerSettings(BaseSettings):
             memory_cost=self.hashing.memory_cost,
             parallelism=self.hashing.parallelism,
         )
+
+    def logging_config(self) -> LoggingConfig:
+        """Translate the validated settings into Keel's logging config.
+
+        Returns:
+            The plain dataclass :func:`keel.observability.configure_logging`
+            expects. It refuses an unknown level or formatter at construction,
+            so a typo in ``LOG_LEVEL`` fails at start-up rather than producing a
+            process that silently logs nothing.
+        """
+        return LoggingConfig(level=self.logging.level, formatter=self.logging.formatter)
 {%- if has_api %}
 
     def token_config(self) -> TokenConfig:
@@ -399,6 +437,7 @@ __all__ = [
     "CacheSettings",
     "DatabaseSettings",
     "HashingSettings",
+    "LoggingSettings",
 {%- if has_worker %}
     "QueueSettings",
 {%- endif %}

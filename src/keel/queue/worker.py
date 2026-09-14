@@ -35,6 +35,13 @@ is still charged — :meth:`~keel.queue.saq_driver.SaqQueue.reserve` charges it
 before the handler runs — so a job that kills its worker every time runs out of
 budget and is dead-lettered rather than eating the fleet one replica at a time.
 
+**A job runs under the context it was dispatched with.** Whatever correlation
+fields were in effect when ``dispatch()`` was called were sealed onto the
+envelope, and :meth:`Worker._process` binds them around the attempt — so a log
+line written by a handler, by a lifecycle listener, or by the failure sink
+carries the request id of the API call that caused the work. That is the whole
+of what ``Envelope.context`` was reserved for.
+
 Signals are taken with :func:`anyio.open_signal_receiver` rather than
 ``loop.add_signal_handler``. Two reasons: it delivers signals as an async
 iterable, so the handler is ordinary task code that can await the queue instead
@@ -63,6 +70,7 @@ from keel.queue.config import QueueConfig
 from keel.queue.envelope import Envelope
 from keel.queue.job import Job, JobError, PermanentFailureError, UnknownJobError
 from keel.queue.saq_driver import DEFAULT_RESERVE_TIMEOUT, Reservation, SaqQueue
+from keel.support.correlation import correlate, correlation_fields
 from keel.support.events import EventDispatcher
 
 if TYPE_CHECKING:
@@ -667,21 +675,44 @@ class Worker:
         reservation: Reservation,
         slots: anyio.Semaphore,
     ) -> None:
-        """Run one reserved job and decide what happens to it.
+        """Run one reserved job under the context it was dispatched with.
 
         The template's fixed part. Every branch below ends the SAQ attempt
         before deciding anything else, because an attempt that is still open
         holds the job's key and a re-dispatch under the same id would be
         rejected as a duplicate of itself.
 
+        **The envelope's context is bound around the whole of it**, which is the
+        second half of the promise ``Envelope.context`` makes: the request id
+        that caused the work is on this worker's log lines, on the lifecycle
+        events below, and on the dead letter if it comes to that. The binding is
+        here rather than around the handler alone for exactly that reason, and
+        it is per task — ``start_soon`` copies the context — so two jobs running
+        concurrently cannot see each other's fields.
+
+        The envelope's context arrived over the wire, so a field name this
+        process refuses is dropped rather than raised: a name chosen by an older
+        release must not be able to kill the worker that read it.
+
+        ``job`` and ``job_id`` are bound ambiently, which means a job dispatched
+        *from* this handler would inherit them —
+        :data:`keel.queue.dispatch.INHERITED_FIELDS` renames them on the way out
+        so a child's envelope says ``parent_job_id`` rather than claiming an id
+        that is not its own.
+
         Args:
             queue: The driver the job came from.
             reservation: What was reserved.
             slots: The concurrency semaphore to release when done.
         """
+        envelope = reservation.envelope
+        received = correlation_fields(envelope.context, refuse=False)
         self._in_flight += 1
         try:
-            await self._execute(queue, reservation)
+            # Merged into one mapping rather than passed as two: a context that
+            # already carries `job` would otherwise be a duplicate keyword.
+            with correlate(**dict(received, job=envelope.job, job_id=envelope.id)):
+                await self._execute(queue, reservation)
         finally:
             self._in_flight -= 1
             self._touch()

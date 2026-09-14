@@ -142,6 +142,7 @@ from keel.database.repository import Repository
 from keel.exceptions import KeelError
 from keel.queue.dispatch import dispatch
 from keel.queue.job import Job
+from keel.support.correlation import correlate
 
 _croniter: Any | None
 """``croniter``'s entry point, or ``None`` when it is not installed.
@@ -844,6 +845,12 @@ class Scheduler:
            instant. Deferring would hand the failure to a callback that cannot
            un-claim anything.
 
+        Steps 3 and 4 run inside ``correlate(schedule=..., due=...)``. Without
+        it a scheduled job's envelope carries ``{}``, and nothing joins the
+        "dispatched X for Y" line below to the worker line minutes later — which
+        is the one case where there is no request id to inherit and so the only
+        one where the scheduler has to name the work itself.
+
         Args:
             entry: The entry to consider.
             now: The instant to evaluate at.
@@ -864,22 +871,25 @@ class Scheduler:
                 logger.debug("entry %s is held by another replica", entry.name)
                 return False
 
-            async with self._transaction() as session:
-                if not await ScheduleRuns(session).claim(entry.name, due):
-                    return False
+            # Bound around the claim as well as the push, so the claim's own
+            # lines and the envelope name the same entry and the same instant.
+            with correlate(schedule=entry.name, due=due.isoformat()):
+                async with self._transaction() as session:
+                    if not await ScheduleRuns(session).claim(entry.name, due):
+                        return False
 
-            try:
-                await dispatch(
-                    entry.job,
-                    on=entry.on,
-                    connection=entry.connection,
-                    after_commit=False,
-                )
-            except Exception:
-                await self._release_claim(entry.name, due)
-                raise
-            logger.info("dispatched %s for %s", entry.name, due.isoformat())
-            return True
+                try:
+                    await dispatch(
+                        entry.job,
+                        on=entry.on,
+                        connection=entry.connection,
+                        after_commit=False,
+                    )
+                except Exception:
+                    await self._release_claim(entry.name, due)
+                    raise
+                logger.info("dispatched %s for %s", entry.name, due.isoformat())
+                return True
 
     def _within_catch_up(self, entry: ScheduleEntry, due: datetime, now: datetime) -> bool:
         """Whether a due instant is recent enough to still be worth running.

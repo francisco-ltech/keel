@@ -55,6 +55,7 @@ app/
 {% endif %}  settings.py      pydantic-settings -> Keel's plain dataclass configs
   errors.py        the error taxonomy{% if has_api %}, and RFC 9457 problem+json for it{% endif %}
 {% if has_api %}  security.py      the bearer-token dependency: Caller and MaybeCaller
+  observability.py the request id: bound for the request, returned on the reply
 {% endif %}  policies.py      who may do what, per resource type
   modules/
     __init__.py    the registry: {% if has_api %}MODULES{% if has_worker %} and JOBS{% endif %}{% else %}JOBS{% endif %}
@@ -282,7 +283,7 @@ table nightly through `SCHEDULE`, which is also where recurring work goes.
 
 `pydantic-settings`. Each subsystem carries its own prefix rather than a nested
 delimiter, so the variables read as `DATABASE_URL`, `CACHE_STORE`,
-`HASHING_TIME_COST`{% if has_api %}, `TOKEN_DRIVER`{% endif %}, `QUEUE_DRIVER`
+`HASHING_TIME_COST`, `LOG_LEVEL`{% if has_api %}, `TOKEN_DRIVER`{% endif %}, `QUEUE_DRIVER`
 and `WORKER_HEALTH_FILE` — the names a hosting platform injects. Keel's own
 configs are plain frozen dataclasses — the library takes no configuration-stack
 dependency — so `app/settings.py` is the one place that translates between the
@@ -301,7 +302,8 @@ resolves no tokens. A job that acts on someone's behalf still can —
 
 `pydantic-settings`. Each subsystem carries its own prefix rather than a nested
 delimiter, so the variables read as `DATABASE_URL`, `CACHE_STORE`,
-`HASHING_TIME_COST` and `TOKEN_DRIVER` — the names a hosting platform injects.
+`HASHING_TIME_COST`, `LOG_LEVEL` and `TOKEN_DRIVER` — the names a hosting
+platform injects.
 Keel's own configs are plain frozen dataclasses — the library takes no
 configuration-stack dependency — so `app/settings.py` is the one place that
 translates between the two. See `.env.example`.
@@ -311,6 +313,70 @@ translates between the two. See `.env.example`.
 `cache.flush()` scans its whole prefix — so a cache namespaced at `{{ project_slug }}`
 would delete every token. Keel shipped exactly that bug for two phases.
 {% endif %}
+## Logging, and the request id
+
+`LOG_FORMAT=json` writes one object per line — `time`, `level`, `logger`,
+`message`, then whatever ambient fields were in effect. `text` is the same
+content laid out for a terminal. `configure_logging` is called {% if has_api and has_worker %}by both
+entrypoints{% elif has_api %}in `create_app`{% else %}in `app.worker.main`{% endif %}, before anything else, because the
+failures worth reading happen during start-up.
+{% if has_api %}
+**Every request gets an id.** `app/observability.py` mints one — or accepts an
+inbound `X-Request-ID`, once it has checked the value is short and has no quotes
+or newlines in it — binds it for the request, and returns it on the response.
+Every line written while that request is being served carries it, including
+lines from modules that only ever called `logging.getLogger`.
+{% endif %}{% if has_worker %}
+**And it travels.** `dispatch()` seals the fields in effect onto the envelope,
+and the worker binds them again around the attempt. So the `IndexItem` line the
+worker writes minutes later{% if has_api %} carries the `request_id` of the `POST` that enqueued
+it{% else %} carries whatever the caller bound{% endif %} — one query, both halves:
+
+```sh
+{% if has_api %}just dev
+curl -s -X POST localhost:8000/users/<id>/items -H "X-Request-ID: demo-1" ...{% else %}just worker{% endif %}
+# then, in the logs
+grep '"request_id": "demo-1"' ...
+```
+
+A dead letter is joinable the same way: `keel_failed_jobs.context` is the same
+mapping, in its own column so it can be queried without opening the envelope.
+
+**A retried dead letter keeps its original id** rather than picking up the one
+belonging to the operator who pressed retry. The replay is verbatim by design,
+and `context["retried_from"]` joins the new dispatch to the old one.
+{% endif %}
+**Bind a field the same way anywhere**:
+
+```python
+from keel.observability import correlate
+
+with correlate(tenant=tenant_id):
+    ...
+```
+
+It merges with whatever is already bound and restores on the way out. Values are
+coerced to strings and `None` is dropped, so `correlate(tenant=maybe)` adds
+nothing rather than recording the string `None`. Names that look like a
+credential — `password`, `api_key`, `token`, `cookie`, `bearer` — are
+**refused**, because a correlation field is written to every log line{% if has_worker %} and sealed
+onto every envelope{% endif %}. That is a check on the name, not the value: nothing can
+tell that `reference` holds a credential, so do not put one there.
+
+`logging.info("shipped", extra={"shipment": "S1"})` works as well, and lands on
+the same line beside the ambient fields. Use `correlate` for anything that
+should travel and `extra=` for a fact about one line.
+
+**Every line in the stream has the same shape, uvicorn's included.** The server
+runs with `--no-access-log` because `app/observability.py` already writes one
+line per request, and `configure_logging` takes uvicorn's own handlers off so
+its tracebacks propagate to the root formatter rather than arriving as plain
+text.
+
+Nothing puts `Identity.roles` or `Identity.claims` on a record. The principal's
+**id** is added as `user_id`, and that is all — `claims` is yours to fill and
+would turn the log aggregator into a copy of it.
+
 ## Migrations
 
 ```sh

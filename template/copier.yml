@@ -25,6 +25,7 @@ _exclude:
   #    whole `sessions` module go with it: both are HTTP, and one imports FastAPI.
   - "{% if not has_api %}app/main.py{% endif %}"
   - "{% if not has_api %}app/security.py{% endif %}"
+  - "{% if not has_api %}app/observability.py{% endif %}"
   - "{% if not has_api %}app/modules/sessions{% endif %}"
   - "{% if not has_api %}app/modules/users/router.py{% endif %}"
   - "{% if not has_api %}app/modules/items/router.py{% endif %}"

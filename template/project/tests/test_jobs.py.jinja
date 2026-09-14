@@ -24,6 +24,7 @@ from uuid import UUID
 import pytest
 from keel.auth import Identity, acting_as, current_identity, use_policies
 from keel.cache import cache
+from keel.observability import correlate
 from keel.queue import PermanentFailureError
 from keel.testing import fake_queue
 
@@ -46,6 +47,24 @@ async def test_creating_an_item_dispatches_the_index_job(rolled_back: None) -> N
         item = await items_service.create_item(owner.id, ItemCreate(name="Engine"))
 
     queued.assert_pushed(IndexItem, item_id=str(item.id), owner_id=str(owner.id))
+
+
+async def test_the_dispatch_carries_the_request_id_to_the_worker(rolled_back: None) -> None:
+    """The half of the join that happens in this process.
+
+    `app/observability.py` binds the id for the request; `dispatch()` seals
+    whatever is bound onto the envelope; Keel's worker binds it again around the
+    handler. This pins the middle step — the one that is invisible until someone
+    goes looking for a worker log line and finds nothing to search by.
+    """
+    owner = await make_user()
+
+    identity = Identity(id=owner.id)
+    with fake_queue() as queued, acting_as(identity), correlate(request_id="req-from-the-api"):
+        item = await items_service.create_item(owner.id, ItemCreate(name="Engine"))
+
+    envelope = queued.assert_pushed(IndexItem, item_id=str(item.id))
+    assert envelope.context["request_id"] == "req-from-the-api"
 
 
 async def test_a_failed_creation_dispatches_nothing(rolled_back: None) -> None:

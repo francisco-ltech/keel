@@ -25,6 +25,13 @@ Each step compiles and is testable before the next.
 | 9 | `testing.py` | A `fake_<sub>()` context manager. |
 | 10 | `docs/adr/000N-...md` | Decisions, declined patterns, what the suite caught. |
 
+**Not every subsystem has a driver seam.** Steps 1-6 and 8-9 exist because
+something needs swapping. Where nothing does — observability, authorization —
+following them literally produces a `Manager` over a two-entry dict and a fake
+nobody needs, which is the ceremony ADR 0000 forbids. Build the config, the
+thing itself and the tests, say in the ADR that the seam was declined and what
+would change it, and skip the rest.
+
 ## What transfers, and what does not
 
 Reuse directly — these generalise and are proven twice:

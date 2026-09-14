@@ -30,6 +30,14 @@ must be atomic. FastAPI PR #12066 is the reason: a session yielded from
 ``Depends`` stays open through response-model validation, so under load the pool
 starves while every individual request still looks fast at p99.
 
+**Logging is configured before anything else, and it is not a lifespan.** The
+interesting failures happen *during* start-up — a bad URL, a refused pool — and
+a lifespan runs too late to record them. ``configure_logging`` installs a JSON
+formatter and a log record factory that puts the current request id on every
+line, whichever module wrote it.{% if has_worker %} ``app.worker`` calls the same function with
+the same settings, so one query joins an API line to the worker line for the job
+it dispatched.{% endif %}
+
 **Liveness and readiness are different questions.** See the two endpoints below.
 """
 
@@ -43,6 +51,7 @@ from fastapi.responses import JSONResponse
 from keel.auth import hashing_lifespan, token_lifespan
 from keel.cache import cache_lifespan
 from keel.database import current_database, database_lifespan
+from keel.observability import configure_logging
 {%- if has_worker %}
 from keel.queue import queue_lifespan
 {%- endif %}
@@ -50,6 +59,7 @@ from keel.queue import queue_lifespan
 from app import __version__
 from app.errors import register_error_handlers
 from app.modules import include_modules
+from app.observability import RequestContext
 from app.settings import Settings, get_settings
 
 
@@ -68,6 +78,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         A configured application.
     """
     config = settings if settings is not None else get_settings()
+    configure_logging(config.logging_config())
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
@@ -90,6 +101,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         lifespan=lifespan,
     )
 
+    # Outermost user middleware, so the id is bound before routing and is still
+    # bound when an error handler answers. See app/observability.py for the 500.
+    app.add_middleware(RequestContext)
     register_error_handlers(app)
     include_modules(app)
 

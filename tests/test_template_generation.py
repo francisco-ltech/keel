@@ -162,6 +162,9 @@ do not vary with the entrypoint."""
 
 API_FILES = (
     "app/main.py",
+    # The request-id middleware is ASGI vocabulary, so it is the API half's for
+    # the same reason `security.py` is.
+    "app/observability.py",
     # The bearer dependency and the login surface are HTTP, so they are the API
     # half — a worker-only project importing either would import FastAPI.
     "app/security.py",
@@ -591,6 +594,8 @@ def test_every_documented_environment_variable_is_actually_read(
         # so a probe below it would fail at load rather than prove anything.
         "HASHING_MEMORY_COST": "9216",
         "HASHING_PARALLELISM": "1",
+        "LOG_LEVEL": "DEBUG",
+        "LOG_FORMAT": "text",
         "APP_NAME": "Probe App",
         "DEBUG": "true",
         **shape.variables,
@@ -612,6 +617,7 @@ def test_every_documented_environment_variable_is_actually_read(
         "17",
         "6399",
         "9216",
+        "DEBUG",
         "Probe App",
         *shape.variables.values(),
     )

@@ -29,8 +29,9 @@ app/modules/<domain>/
 {% if has_api %}
 `modules/sessions/` has no `models.py` and no `repository.py` on purpose: a
 session is a token in Keel's store, not a row here. `app/security.py` holds the
-bearer dependency — FastAPI vocabulary, so it stays in this project rather than
-in Keel, whose core imports no web framework.
+bearer dependency and `app/observability.py` the request-id middleware — both
+web-framework vocabulary, so both stay in this project rather than in Keel,
+whose core imports no web framework.
 {% endif %}
 ## Rules
 
@@ -164,6 +165,52 @@ rather than broken.
 
 **Jobs are dataclasses, retried, and may run more than once.** Write handlers to
 be idempotent; at-least-once is the only guarantee a queue can make.
+{% endif %}
+**Never call `logging.basicConfig`.** `configure_logging(settings.logging_config())`
+is the entrypoint, called once{% if has_api and has_worker %} by `create_app` and by `app.worker.main`{% endif %} before
+anything else. It installs a JSON formatter *and* a log record factory that puts
+the ambient fields on every record, so `basicConfig` after it replaces the first
+half and silently keeps the second.
+
+**Add a field with `correlate`, never by passing it down.**
+
+```python
+from keel.observability import correlate
+
+with correlate(tenant=tenant_id):
+    ...
+```
+
+It merges with what is already bound, an inner scope may overwrite a name, and
+the previous mapping comes back on the way out{% if has_worker %} — including into a job the
+block dispatches, since the fields are sealed onto the envelope{% endif %}. Values are
+coerced to strings and `None` is dropped.
+
+**A credential-shaped field *name* is refused; no value is ever inspected.**
+`password`, `token`, `api_key`, `cookie`, `bearer` and the rest raise at the
+`correlate` call. That catches the reflex — `correlate(token=bearer)` in a piece
+of middleware — and nothing more: nothing can tell that `reference` holds a
+credential, and a secret bound under an innocent name reaches the log like any
+other field. So the rule you actually follow is yours, not the mechanism's: a
+correlation field reaches every log line{% if has_worker %}, every envelope and
+`keel_failed_jobs.context`{% endif %}, so carry an id and never the thing itself. The same
+reasoning is why only `Identity.id` reaches a record and `claims` does not.
+{% if has_api %}
+**The request id comes from `app/observability.py`, and nothing else mints one.**
+`RequestContext` is plain ASGI rather than `@app.middleware("http")` on purpose:
+`BaseHTTPMiddleware` runs the rest of the application in a separate task, so
+what a context variable set there is visible to depends on the Starlette version
+installed. Do not "simplify" it into a decorator.
+
+**It also answers the unhandled `500` itself**, because `add_middleware` puts it
+*inside* `ServerErrorMiddleware` — whose reply goes out through the outer `send`,
+where no header can be stamped. Removing that branch loses the id on the one
+response anybody raises a ticket about, and every other test still passes.
+
+**Uvicorn is run with `--no-access-log`**, and `configure_logging` takes the
+handlers off `uvicorn`/`uvicorn.error` so its traceback propagates to the root
+and comes out as JSON like everything else. Undo either and the stream carries
+two shapes.
 {% endif %}
 **Soft-deleted rows are filtered globally.** You do not add `WHERE deleted_at IS
 NULL`. To include them, `with_deleted(...)` explicitly.

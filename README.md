@@ -45,6 +45,7 @@ docs/adr/          why things are shaped the way they are
 | `keel.database` (Phase 2) | Generic repository, UUIDv7 keys, soft deletes as a global query scope, keyset pagination, model observers that fire after commit, factories and seeders, advisory-locked migrations with drift detection. |
 | `keel.queue` (Phase 3) | Jobs as Commands, dispatch that waits for the transaction to commit, SAQ driver, a supervised worker with graceful shutdown and orphan recovery, durable failed jobs, and cron guarded by an advisory lock. |
 | `keel.auth` (Phase 4) | The current-identity context, Argon2 password hashing with rehash-on-login, hashed-at-rest bearer tokens, and authorization policies registered per resource type with `authorize()` / `allows()`. Drivers: Redis, in-memory. Recording fake. No guard protocol. |
+| `keel.observability` (Phase 5) | A correlation context, structured JSON logging that carries it onto every record including third-party ones, and jobs that inherit the request id that dispatched them. |
 | `template/` | Generates a service in three shapes — API, worker, or both — with domain modules, Alembic, tests and Docker. |
 
 Mail, storage and rate limiting are not in the box yet.
@@ -97,6 +98,9 @@ starves. See [ADR 0002](docs/adr/0002-the-unit-of-work.md).
   this rather than depending on Advanced-Alchemy.
 - [ADR 0004 — two type checkers](docs/adr/0004-two-type-checkers.md): ty for the
   inner loop, mypy as the gate, and the criteria for dropping one.
+- [ADR 0009 — correlation and logging](docs/adr/0009-correlation-and-logging.md):
+  why the record factory rather than a filter, what reaches a log line and what
+  never does, and the guarantee the secret-name denylist does not give.
 - [ADR 0008 — authorization policies](docs/adr/0008-authorization-policies.md):
   a policy as a function registered per resource type, why the check moved into
   the service, and the chain that was declined for the second time.

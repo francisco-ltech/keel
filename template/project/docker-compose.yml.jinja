@@ -49,7 +49,14 @@ services:
     profiles: ["app"]
     image: ghcr.io/astral-sh/uv:python{{ python_version }}-bookworm-slim
     working_dir: /srv/app
-    command: ["sh", "-c", "uv sync && exec uv run uvicorn app.main:app --host 0.0.0.0 --port 8000"]
+    # `--no-access-log`: app/observability.py writes that line itself, in the
+    # configured format and with the request id on it.
+    command:
+      [
+        "sh",
+        "-c",
+        "uv sync && exec uv run uvicorn app.main:app --host 0.0.0.0 --port 8000 --no-access-log",
+      ]
     environment:
       UV_PROJECT_ENVIRONMENT: /opt/venv
       UV_LINK_MODE: copy

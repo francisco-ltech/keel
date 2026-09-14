@@ -83,7 +83,11 @@ class Envelope:
             delay: Seconds before it becomes visible to a worker.
             queue: Override the job's declared queue — for draining a backlog
                 onto a dedicated lane, say.
-            context: Ambient data to carry along.
+            context: Ambient data to carry along. Taken as given: sealing is
+                packaging, and deciding that an omitted context means *the
+                current correlation fields* is a policy that belongs to
+                :func:`keel.queue.dispatch.dispatch`, which is also the layer
+                ``FailedJobs.retry`` bypasses to keep a replay verbatim.
 
         Returns:
             The sealed envelope.

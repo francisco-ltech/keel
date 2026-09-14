@@ -30,13 +30,29 @@ Two escape hatches, both explicit:
   should look deliberate.
 * ``dispatch_now(job)`` bypasses the queue entirely and runs the handler inline.
   For a CLI command or a test that wants the work done, not queued.
+
+**Every dispatch seals the ambient correlation fields onto the envelope.** That
+is what makes a worker's log lines joinable to the request that caused the work,
+and it is what ``Envelope.context``'s docstring has promised since Phase 3. It
+happens here rather than in ``Envelope.seal`` because sealing is packaging and
+this is the layer that decides what a dispatch means — which is also why
+``FailedJobs.retry`` bypassing this module (ADR 0006, decision 8) keeps its
+replay verbatim: a job retried next week carries the context of the request that
+originally caused it, not of the operator who pressed the button.
+
+Two names are rewritten on the way out — see :data:`INHERITED_FIELDS` — and one
+parameter is deliberately not called ``context``: ``context_override=`` replaces
+what travels rather than adding to it, which is a surprise worth spelling out in
+the keyword rather than in a docstring nobody opens.
 """
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from contextlib import AbstractContextManager
 from datetime import timedelta
+from types import MappingProxyType
+from typing import Any, Final
 
 from keel.contracts.queue import Queue
 from keel.database.hooks import after_commit as defer_until_commit
@@ -44,6 +60,7 @@ from keel.queue.envelope import Envelope
 from keel.queue.job import Job
 from keel.queue.manager import QueueManager
 from keel.support.binding import Binding
+from keel.support.correlation import correlation, correlation_fields
 
 _binding: Binding[QueueManager] = Binding(
     "queue manager",
@@ -113,6 +130,55 @@ def _seconds(delay: float | timedelta) -> float:
     return delay.total_seconds() if isinstance(delay, timedelta) else float(delay)
 
 
+INHERITED_FIELDS: Final[Mapping[str, str]] = MappingProxyType(
+    {"job": "parent_job", "job_id": "parent_job_id"}
+)
+"""Fields renamed on the way out, because they describe the dispatcher.
+
+:meth:`keel.queue.worker.Worker._process` binds ``job`` and ``job_id`` around an
+attempt, so a job dispatched *from a handler* would otherwise seal its parent's
+id onto its own envelope — and a dead letter's ``keel_failed_jobs.context`` would
+then name a ``job_id`` that is not the row's. Log lines hid it, because the child
+worker overwrites both names before the handler writes anything. Renaming turns a
+value that was wrong into the one an operator actually wants: what enqueued this.
+"""
+
+
+def _travelling(context: Mapping[str, Any] | None) -> Mapping[str, str]:
+    """Return the ambient data an envelope should carry.
+
+    A *context_override* **replaces** the ambient fields rather than merging with
+    them, which is the opposite of how
+    :func:`keel.support.correlation.correlate` nests — and the parameter is
+    spelled to say so. Nesting a scope adds knowledge; this is an override like
+    ``on=`` and ``connection=``, and it is the only spelling that can say "carry
+    nothing", which merging cannot express. A caller wanting both writes
+    ``context_override={**correlation(), "reason": "backfill"}``.
+
+    Args:
+        context: What the caller asked to carry, or ``None`` for the ambient
+            correlation fields with :data:`INHERITED_FIELDS` renamed.
+
+    Returns:
+        The fields to seal onto the envelope, normalised so they will survive
+        the trip through the queue and into ``keel_failed_jobs.context``.
+
+    Raises:
+        ConfigurationError: If an explicit context names a reserved field or one
+            that looks like a credential.
+    """
+    if context is not None:
+        return correlation_fields(context)
+    ambient = correlation()
+    if not any(name in ambient for name in INHERITED_FIELDS):
+        return ambient
+    carried = dict(ambient)
+    for name, parent in INHERITED_FIELDS.items():
+        if name in carried:
+            carried[parent] = carried.pop(name)
+    return carried
+
+
 async def dispatch(
     job: Job,
     *,
@@ -120,6 +186,7 @@ async def dispatch(
     on: str | None = None,
     connection: str | None = None,
     after_commit: bool = True,
+    context_override: Mapping[str, Any] | None = None,
 ) -> str:
     """Send a job to the queue.
 
@@ -132,13 +199,20 @@ async def dispatch(
             this to ``False`` pushes immediately, which means the job may run
             against a transaction that later rolls back — occasionally correct,
             never accidental.
+        context_override: What the envelope should carry instead of the
+            correlation fields in effect. Leave it alone and the ambient fields
+            travel, which is what joins the worker's log lines to the request
+            that caused the work; passing a mapping **replaces** them rather
+            than adding to them. See :func:`_travelling`.
 
     Returns:
         The envelope id. When the dispatch was deferred this is still the id the
         job will carry, because ids are generated at seal time rather than
         assigned by the backend.
     """
-    envelope = Envelope.seal(job, delay=_seconds(delay), queue=on)
+    envelope = Envelope.seal(
+        job, delay=_seconds(delay), queue=on, context=_travelling(context_override)
+    )
     target = queue(connection)
 
     if after_commit:
@@ -159,6 +233,7 @@ async def dispatch_many(
     on: str | None = None,
     connection: str | None = None,
     after_commit: bool = True,
+    context_override: Mapping[str, Any] | None = None,
 ) -> list[str]:
     """Send several jobs in one round trip.
 
@@ -168,11 +243,16 @@ async def dispatch_many(
         on: Override their declared queue.
         connection: Which queue connection to use.
         after_commit: Defer until the surrounding transaction commits.
+        context_override: What every envelope should carry instead of the
+            correlation fields in effect. Replaces rather than merges.
 
     Returns:
         The envelope ids, in order.
     """
-    envelopes = [Envelope.seal(job, delay=_seconds(delay), queue=on) for job in jobs]
+    travelling = _travelling(context_override)
+    envelopes = [
+        Envelope.seal(job, delay=_seconds(delay), queue=on, context=travelling) for job in jobs
+    ]
     target = queue(connection)
 
     if after_commit:
@@ -193,6 +273,10 @@ async def dispatch_now(job: Job) -> None:
     every dispatch, this is one call deciding it does not want to wait. Useful
     in a CLI command, a migration backfill, or a test that wants the work done.
 
+    Nothing is sealed and nothing is bound: the handler runs in the caller's own
+    context, so it already sees the correlation fields a queued copy would have
+    had to carry.
+
     Args:
         job: The job to run.
 
@@ -204,6 +288,7 @@ async def dispatch_now(job: Job) -> None:
 
 
 __all__ = [
+    "INHERITED_FIELDS",
     "bound_queue_manager",
     "current_queue_manager",
     "dispatch",

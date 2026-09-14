@@ -1,15 +1,33 @@
-"""Liveness and readiness are different questions, and these tests say so.
+"""Liveness, readiness, and the request id — the three edge concerns.
 
-If both endpoints did the same thing, one of them would be wrong: a liveness
-probe that fails on a brief database outage gets the container killed, which
-loses every in-flight request and does not fix the database.
+If both probes did the same thing, one of them would be wrong: a liveness probe
+that fails on a brief database outage gets the container killed, which loses
+every in-flight request and does not fix the database.
+
+The request id tests are here for the same reason the probes are: they are
+claims about the edge rather than about a domain. What they pin is that every
+response carries one, that a caller's own id is honoured when it is safe to log
+and replaced when it is not, that the id is bound for the request rather than
+only stamped on the way out, and that the ``500`` nobody plans for carries it
+too — which is the one response a caller opens a ticket about.
 """
 
 from __future__ import annotations
 
 import pytest
+from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from keel.database import Database, DatabaseConfig, use_database
+from keel.observability import correlation
+from starlette.types import Receive, Scope, Send
+
+from app.errors import PROBLEM_JSON
+from app.observability import (
+    REQUEST_ID_HEADER,
+    SAFE_REQUEST_ID,
+    RequestContext,
+    inbound_request_id,
+)
 
 pytestmark = pytest.mark.anyio
 
@@ -51,6 +69,117 @@ async def test_an_unknown_path_is_a_problem_document(client: AsyncClient) -> Non
     assert response.status_code == 404
     assert response.headers["content-type"].startswith("application/problem+json")
     assert response.json()["instance"] == "/nope"
+    # The middleware sits outside routing, so an error response is stamped too —
+    # which is when a caller most needs an id to quote.
+    assert response.headers[REQUEST_ID_HEADER]
+
+
+async def test_every_response_carries_a_request_id(client: AsyncClient) -> None:
+    first = await client.get("/health")
+    second = await client.get("/health")
+
+    assert first.headers[REQUEST_ID_HEADER] != second.headers[REQUEST_ID_HEADER]
+
+
+bound: list[dict[str, str]] = []
+"""What the wrapped endpoint below could see, one entry per request."""
+
+
+async def echo_context(scope: Scope, receive: Receive, send: Send) -> None:
+    """An ASGI endpoint that records the fields bound for it and answers 204."""
+    bound.append(dict(correlation()))
+    await send({"type": "http.response.start", "status": 204, "headers": []})
+    await send({"type": "http.response.body", "body": b""})
+
+
+async def through_the_middleware(sent: str | None) -> str:
+    """Drive one request through :class:`RequestContext` alone.
+
+    Args:
+        sent: The ``X-Request-ID`` to send, or ``None`` to send none.
+
+    Returns:
+        The id on the response.
+    """
+    bound.clear()
+    transport = ASGITransport(app=RequestContext(echo_context))
+    async with AsyncClient(transport=transport, base_url="http://test") as http:
+        sending = {REQUEST_ID_HEADER: sent} if sent else None
+        response = await http.get("/anything", headers=sending)
+    return response.headers[REQUEST_ID_HEADER]
+
+
+async def test_the_id_is_bound_for_the_request_not_only_stamped_on_the_reply() -> None:
+    """The property the whole slice rests on.
+
+    A middleware that only wrote the header would pass the two tests above and
+    leave every log line — and every job this request dispatches — with nothing
+    to join on.
+    """
+    returned = await through_the_middleware("caller-123")
+
+    assert returned == "caller-123"
+    assert bound == [{"request_id": "caller-123"}]
+
+
+async def test_an_unusable_inbound_id_is_replaced_rather_than_cleaned() -> None:
+    """The value is about to be written into every line this request produces.
+
+    Cleaning it would mean the id in the logs is not the id the caller holds, so
+    a rejected one is discarded outright and a fresh one minted.
+    """
+    returned = await through_the_middleware('spaces and "quotes"')
+
+    assert returned != 'spaces and "quotes"'
+    assert " " not in returned
+    assert bound == [{"request_id": returned}]
+
+
+@pytest.mark.parametrize("sent", ["abc\n", "a" * 128 + "\n", "a" * 129, 'say "hi"', "a b"])
+def test_a_request_id_with_a_trailing_newline_is_replaced(sent: str) -> None:
+    """`$` matches before a trailing newline; `\\Z` does not.
+
+    So `"abc\\n"` was accepted, and so was 129 characters ending in one — into
+    every log line this request produces, by a pattern whose docstring promises
+    no newlines. One character's difference, and nothing else would notice.
+
+    Asked of the scope directly rather than through a client, because an HTTP
+    client of its own accord refuses to send a header value with a newline in it
+    — and the value this guards against arrives from something that does not.
+    """
+    scope: Scope = {"type": "http", "headers": [(b"x-request-id", sent.encode("latin-1"))]}
+
+    assert inbound_request_id(scope) is None
+    assert not SAFE_REQUEST_ID.match(sent)
+
+
+async def test_a_500_from_an_unhandled_exception_still_carries_the_request_id(
+    app: FastAPI,
+) -> None:
+    """The response a caller actually opens a ticket about.
+
+    `add_middleware` puts `RequestContext` *inside* `ServerErrorMiddleware`, and
+    nothing registers a handler for bare `Exception` — so the 500 went out
+    through the outer `send`, with no header on it. A 404 carries one, which is
+    why asserting on that alone was false assurance.
+
+    `raise_app_exceptions=False` because the exception is deliberately re-raised
+    after the response has gone: the server is entitled to know it failed.
+    """
+
+    @app.get("/boom", include_in_schema=False)
+    async def boom() -> None:
+        """Fail in the way nobody wrote a handler for."""
+        raise RuntimeError("nothing catches this")
+
+    transport = ASGITransport(app=app, raise_app_exceptions=False)
+    async with AsyncClient(transport=transport, base_url="http://test") as http:
+        response = await http.get("/boom", headers={REQUEST_ID_HEADER: "ticket-1"})
+
+    assert response.status_code == 500
+    assert response.headers[REQUEST_ID_HEADER] == "ticket-1"
+    assert response.headers["content-type"].startswith(PROBLEM_JSON)
+    assert response.json()["status"] == 500
 
 
 async def test_ready_reports_503_when_the_database_is_unreachable(app: object) -> None:

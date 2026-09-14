@@ -1,0 +1,195 @@
+"""The request id, and the one log line every request produces.
+
+**A request id is bound for the request, echoed on the response, and carried
+everywhere the request goes.** ``correlate`` publishes it on a context variable,
+so a service, a repository{% if has_worker %}, a job this request dispatches{% endif %} and anything that
+calls ``logging.getLogger`` gets it without being handed it. Keel's log record
+factory reads the same variable, which is why a module that knows nothing about
+any of this still writes the id on its lines.
+
+**Pure ASGI, not ``BaseHTTPMiddleware``.** ``@app.middleware("http")`` is the
+one line everybody writes and it is wrong for this: Starlette runs the rest of
+the application in a **separate task**, so what a context variable set there is
+visible to is a question about which Starlette version is installed. A plain
+ASGI callable runs the endpoint in the caller's own task, and there is no
+question to answer. It is also cheaper — no per-request task group, no
+anyio memory object stream.
+
+**An inbound ``X-Request-ID`` is honoured, and validated first.** Honoured
+because a gateway or a calling service has usually already minted one and two
+ids for one request is worse than none. Validated because the value is
+attacker-controlled and about to be written into every log line this request
+produces: bounded length, and a character set with no quotes, spaces or
+newlines in it. The JSON formatter escapes newlines anyway, so this is the
+second lock rather than the first — but a 4 KB "request id" in a million log
+lines is its own outage.
+
+**It answers an unhandled exception itself.** ``add_middleware`` installs this
+*inside* Starlette's ``ServerErrorMiddleware``, which is what sends the ``500``
+for anything no handler caught — through the outer ``send``, where this
+middleware cannot stamp the header. So the one response a caller opens a ticket
+about would be the one with no id on it. Catching here, answering through
+``relay``, and re-raising fixes that without moving the binding outside the
+application: ``ServerErrorMiddleware`` sees a response already started and does
+what it does for any half-sent response — re-raises, so the server still logs the
+traceback and still counts the failure.
+
+**This middleware lives here rather than in Keel**, for the reason
+``app/security.py`` does: it is web-framework vocabulary, and Keel's core imports
+no web framework so that a worker-only service does not pay for one.
+"""
+
+from __future__ import annotations
+
+import logging
+import re
+import time
+from typing import TYPE_CHECKING, Final
+from uuid import uuid4
+
+from keel.observability import correlate
+from starlette.datastructures import MutableHeaders
+from starlette.requests import Request
+
+from app.errors import PROBLEM_BASE, problem
+
+if TYPE_CHECKING:
+    from starlette.types import ASGIApp, Message, Receive, Scope, Send
+
+logger = logging.getLogger(__name__)
+
+REQUEST_ID_HEADER: Final = "X-Request-ID"
+"""The header read on the way in and written on the way out.
+
+One name for both directions, so a client can quote back the id it was given and
+a caller that minted its own sees the same value it sent.
+"""
+
+SAFE_REQUEST_ID: Final = re.compile(r"\A[A-Za-z0-9._-]{1,128}\Z")
+"""What an inbound request id may contain. Anything else is replaced, not cleaned.
+
+Cleaning an id changes it, which means the value in the logs is not the value the
+caller holds — so a rejected one is discarded and a fresh id is minted instead.
+
+``\\Z`` rather than ``$``, which also matches immediately *before* a trailing
+newline: ``$`` accepted ``"abc\\n"``, and 129 characters ending in one.
+"""
+
+
+def inbound_request_id(scope: Scope) -> str | None:
+    """Return a usable request id from the request's headers.
+
+    Args:
+        scope: The ASGI connection scope.
+
+    Returns:
+        The inbound id if there is one and it is safe to log, otherwise ``None``.
+    """
+    for name, value in scope["headers"]:
+        if name == b"x-request-id":
+            candidate = value.decode("latin-1")
+            return candidate if SAFE_REQUEST_ID.match(candidate) else None
+    return None
+
+
+class RequestContext:
+    """Binds a request id for the request and writes it on the response.
+
+    Args:
+        app: The ASGI application to wrap.
+    """
+
+    __slots__ = ("app",)
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        """Run one connection with a request id bound around it.
+
+        The access line is emitted in a ``finally`` so a request that raised is
+        still recorded, and it is written *inside* the binding, which is what
+        puts the id on it. When the request raised, that same line carries the
+        traceback rather than a second line being written for it — one record
+        per request, whatever happened to it.
+
+        Args:
+            scope: The ASGI connection scope.
+            receive: The ASGI receive channel.
+            send: The ASGI send channel.
+
+        Raises:
+            Exception: Whatever the application raised, after the ``500`` has
+                gone out through :func:`relay`. Re-raised rather than swallowed:
+                the server is entitled to know a request failed, and deciding
+                otherwise would make this middleware the last word on every
+                unhandled exception in the process.
+        """
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        request_id = inbound_request_id(scope) or uuid4().hex
+        began = time.perf_counter()
+        status = 500
+        replied = False
+        failure: BaseException | None = None
+
+        async def relay(message: Message) -> None:
+            """Pass *message* on, stamping the id onto the response head."""
+            nonlocal status, replied
+            if message["type"] == "http.response.start":
+                status = message["status"]
+                replied = True
+                MutableHeaders(scope=message)[REQUEST_ID_HEADER] = request_id
+            await send(message)
+
+        with correlate(request_id=request_id):
+            try:
+                await self.app(scope, receive, relay)
+            except Exception as exc:
+                failure = exc
+                if not replied:
+                    await server_error(scope, receive, relay)
+                raise
+            finally:
+                logger.log(
+                    logging.ERROR if failure is not None else logging.INFO,
+                    "%s %s %s in %.1fms",
+                    scope.get("method", "-"),
+                    scope.get("path", "-"),
+                    status,
+                    (time.perf_counter() - began) * 1000,
+                    exc_info=failure,
+                )
+
+
+async def server_error(scope: Scope, receive: Receive, send: Send) -> None:
+    """Answer an unhandled exception in the shape every other error uses.
+
+    ``ServerErrorMiddleware`` would otherwise send a bare ``text/plain``
+    "Internal Server Error", which is both the wrong media type for this
+    application and the one response with no ``X-Request-ID`` on it.
+
+    Args:
+        scope: The ASGI connection scope.
+        receive: The ASGI receive channel.
+        send: The stamping relay, not the raw send — the header is the point.
+    """
+    response = problem(
+        Request(scope),
+        status=500,
+        title="Internal Server Error",
+        detail="the request could not be completed",
+        problem_type=f"{PROBLEM_BASE}/internal-error",
+    )
+    await response(scope, receive, send)
+
+
+__all__ = [
+    "REQUEST_ID_HEADER",
+    "SAFE_REQUEST_ID",
+    "RequestContext",
+    "inbound_request_id",
+    "server_error",
+]

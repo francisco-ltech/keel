@@ -37,6 +37,16 @@ so a draining worker still reports alive: liveness that fails during a graceful
 shutdown gets the container killed mid-job, which is the exact outcome graceful
 shutdown exists to prevent.
 
+**A job's log lines carry the request id that caused it.** Nothing here arranges
+that. ``dispatch()`` sealed the correlation fields onto the envelope, and Keel's
+worker binds them again around the attempt — so the listeners below, the
+handler, and the dead-letter line all write the same ``request_id``, and one
+query finds every line a single piece of work produced.
+{%- if has_api %}
+That includes the ``app.observability`` line the API wrote when it accepted the
+request, which is the whole point of carrying the field this far.
+{%- endif %}
+
 **Patterns.** :class:`~keel.queue.Worker` is the Template Method that owns the
 loop; the two collaborators handed to it here are Strategies —
 :class:`~keel.queue.DatabaseFailureSink` decides what happens to an exhausted
@@ -64,6 +74,7 @@ import anyio
 from keel.auth import hashing_lifespan
 from keel.cache import cache_lifespan
 from keel.database import database_lifespan, uow
+from keel.observability import configure_logging
 from keel.queue import (
     DatabaseFailureSink,
     FailedJobs,
@@ -255,11 +266,12 @@ def main() -> None:
     ``anyio.run`` rather than ``asyncio.run`` because the worker takes signals
     with :func:`anyio.open_signal_receiver`, which needs an anyio event loop on
     the main thread — which is exactly where a worker process lives.
+
+    Logging is configured from the same ``LOG_*`` settings {% if has_api %}``app.main``{% else %}the API half{% endif %}
+    reads, so both halves emit the same shape — and every line written while a
+    job runs carries the request id that was in effect when it was enqueued.
     """
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)-8s %(name)s %(message)s",
-    )
+    configure_logging(get_settings().logging_config())
     anyio.run(serve)
 
 

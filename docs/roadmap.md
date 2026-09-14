@@ -54,12 +54,20 @@ Neither is built.
 
 ### Phase 5 — observability
 
-The request inspector, plus structured logging, health and metrics.
+**Slice one is done** ([ADR 0009](adr/0009-correlation-and-logging.md)): a
+correlation context, structured logging that carries it wherever a record is
+emitted, and `dispatch()` sealing it onto the envelope so a worker's log lines
+name the request that caused the work. `Envelope.context` has promised that
+since Phase 3 and nothing had ever filled it.
 
-ADR 0001 leaves one question deliberately open for this phase: whether cache
-events are emitted from the `Store` or the `Repository`. The inspector is the
-first consumer with a real opinion, and guessing before it exists risks building
-the wrong answer twice.
+**Left:** the request inspector, health and readiness checks, and metrics.
+
+ADR 0001 still leaves one question open for this phase: whether cache events are
+emitted from the `Store` or the `Repository`. The inspector is the first
+consumer with a real opinion. Slice one removed a confounder — a cache event
+from either layer is now correlatable without plumbing, so the decision can be
+made on what the inspector wants to *see* rather than on which layer can reach a
+request id.
 
 ## Beyond, unscheduled
 
