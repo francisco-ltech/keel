@@ -1,4 +1,4 @@
-"""The worker's readiness probe, as a process rather than an endpoint.
+"""The worker's liveness probe, as a process rather than an endpoint.
 
     python -m app.healthcheck
 
@@ -21,7 +21,9 @@ still holding its slot, and no longer working.
 
 This module deliberately imports nothing but the settings — no database, no
 Redis, no queue. A probe that can fail because a dependency is slow is a probe
-that restarts healthy containers during an incident.
+that restarts healthy containers during an incident. That is also why there is
+no worker readiness probe beside it: readiness decides where traffic goes, and a
+worker takes none. The API's ``/ready`` is where dependencies are asked.
 """
 
 from __future__ import annotations

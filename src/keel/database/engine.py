@@ -31,7 +31,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
-from typing import Any
+from typing import Any, Final
 
 from sqlalchemy import event, text
 from sqlalchemy.ext.asyncio import (
@@ -45,6 +45,13 @@ from sqlalchemy.ext.asyncio import (
 from keel.database.config import DatabaseConfig
 from keel.database.hooks import publish_session, run_after_commit, withdraw_session
 from keel.database.observers import ModelEvent, dispatch_pending
+
+PROBE_APPLICATION_NAME: Final = "keel-readiness-probe"
+"""How the probe's connection names itself in ``pg_stat_activity``.
+
+So an operator counting connections against a limit can tell the one per
+process that serves no request.
+"""
 
 
 class Database:
@@ -72,6 +79,7 @@ class Database:
         "_engine",
         "_on_deferred_error",
         "_on_observer_error",
+        "_probe_engine",
         "_sessions",
     )
 
@@ -85,6 +93,7 @@ class Database:
         self._on_observer_error = on_observer_error
         self._on_deferred_error = on_deferred_error
         self._engine = self._create_engine(config)
+        self._probe_engine = self._create_probe_engine(config) or self._engine
         self._sessions = async_sessionmaker(
             self._engine,
             expire_on_commit=False,
@@ -136,6 +145,41 @@ class Database:
         if config.statement_timeout is not None and not config.is_sqlite:
             _apply_statement_timeout(engine, config.statement_timeout)
         return engine
+
+    @staticmethod
+    def _create_probe_engine(config: DatabaseConfig) -> AsyncEngine | None:
+        """Build the one-connection engine :meth:`ping` uses, or ``None`` for SQLite.
+
+        Its own pool, so a request pool that is merely busy does not read as a
+        database that is down: requests wait for a connection and are served,
+        and a probe sharing their queue would report every replica unready at
+        the same moment. No connection opens until the first ping, and there is
+        no ``statement_timeout`` listener — ``SELECT 1`` cannot run long, and
+        the probe's own deadline bounds it.
+
+        Args:
+            config: The database configuration.
+
+        Returns:
+            The probe engine, or ``None`` where the main engine must serve.
+        """
+        if config.is_sqlite:
+            return None
+        connect_args = Database._connect_args(config)
+        match config.url.split("://", 1)[0]:
+            case "postgresql+asyncpg":
+                connect_args["server_settings"] = {"application_name": PROBE_APPLICATION_NAME}
+            case "postgresql+psycopg":
+                connect_args["application_name"] = PROBE_APPLICATION_NAME
+        return create_async_engine(
+            config.url,
+            pool_size=1,
+            max_overflow=0,
+            pool_timeout=config.pool_timeout,
+            pool_recycle=config.pool_recycle,
+            pool_pre_ping=True,
+            connect_args=connect_args,
+        )
 
     @property
     def config(self) -> DatabaseConfig:
@@ -205,26 +249,24 @@ class Database:
         async with self._engine.begin() as connection:
             yield connection
 
-    async def healthy(self) -> bool:
-        """Whether the database answers.
+    async def ping(self) -> None:
+        """Run ``SELECT 1`` on a connection of its own, raising if it fails.
 
-        Intended for a readiness probe. A health check that reports success
-        without touching its dependencies is worse than none: the orchestrator
-        keeps routing traffic to a process that cannot serve it.
+        Not through the request pool; :meth:`_create_probe_engine` says why. So
+        this answers "does the database answer", not "is a connection free".
 
-        Returns:
-            ``True`` if a trivial query succeeded.
+        Unbounded: it waits as long as the connect timeout allows. A readiness
+        probe wants :func:`keel.observability.check_database`, which
+        :func:`keel.observability.probe` runs under a deadline.
         """
-        try:
-            async with self.connect() as connection:
-                await connection.execute(text("SELECT 1"))
-        except Exception:  # noqa: BLE001 — any failure means "not ready"
-            return False
-        return True
+        async with self._probe_engine.connect() as connection:
+            await connection.execute(text("SELECT 1"))
 
     async def close(self) -> None:
-        """Dispose of the pool. Call this once, at shutdown."""
+        """Dispose of both pools. Call this once, at shutdown."""
         await self._engine.dispose()
+        if self._probe_engine is not self._engine:
+            await self._probe_engine.dispose()
 
     def __repr__(self) -> str:
         """Identify the backend without leaking the password."""

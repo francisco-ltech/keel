@@ -135,6 +135,6 @@ real Postgres rather than asserted:
 - `test_a_statement_timeout_is_applied_to_every_connection` — the pool guard.
 - `test_code_under_test_can_commit_normally` — the savepoint trick, which is
   what lets application code stay ignorant of the test harness.
-- `test_health_reports_an_unreachable_database` — a readiness probe that cannot
+- `test_ping_raises_on_an_unreachable_database` — a readiness probe that cannot
   fail is worse than none, because the orchestrator keeps routing to a process
   that cannot serve.

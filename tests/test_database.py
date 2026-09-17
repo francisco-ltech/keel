@@ -147,18 +147,19 @@ async def database(database_url: str) -> AsyncIterator[Database]:
 
 
 @pytest.mark.postgres
-async def test_health_reports_a_reachable_database(database: Database) -> None:
-    assert await database.healthy() is True
+async def test_ping_answers_on_a_reachable_database(database: Database) -> None:
+    await database.ping()
 
 
 @pytest.mark.postgres
-async def test_health_reports_an_unreachable_database() -> None:
+async def test_ping_raises_on_an_unreachable_database() -> None:
     """A readiness probe that cannot fail is worse than no probe at all."""
     unreachable = Database(
         DatabaseConfig(url="postgresql+asyncpg://keel:keel@localhost:1/nope", pool_pre_ping=False)
     )
     try:
-        assert await unreachable.healthy() is False
+        with pytest.raises(OSError):
+            await unreachable.ping()
     finally:
         await unreachable.close()
 

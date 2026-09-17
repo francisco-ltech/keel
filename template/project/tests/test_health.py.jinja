@@ -22,6 +22,7 @@ from keel.observability import correlation
 from starlette.types import Receive, Scope, Send
 
 from app.errors import PROBLEM_JSON
+from app.main import READINESS
 from app.observability import (
     REQUEST_ID_HEADER,
     SAFE_REQUEST_ID,
@@ -54,13 +55,23 @@ async def test_health_touches_no_dependency(app: object) -> None:
         assert (await http.get("/health")).status_code == 200
 
 
-async def test_ready_reports_the_database(client: AsyncClient) -> None:
+async def test_ready_asks_every_dependency(client: AsyncClient) -> None:
     response = await client.get("/ready")
 
     assert response.status_code == 200
     body = response.json()
     assert body["status"] == "ready"
-    assert body["database"] is True
+    assert set(body["checks"]) == set(READINESS)
+    assert all(check["ok"] for check in body["checks"].values())
+
+
+def test_readiness_covers_every_subsystem_the_api_binds() -> None:
+    """The failure this list exists to prevent is a dependency nobody asks.
+
+    An API that probed Postgres alone reported ready with Redis down, while
+    every authenticated request failed resolving its token.
+    """
+    assert set(READINESS) == {"database", "cache", "tokens"{% if has_worker %}, "queue"{% endif %}}
 
 
 async def test_an_unknown_path_is_a_problem_document(client: AsyncClient) -> None:
@@ -198,4 +209,8 @@ async def test_ready_reports_503_when_the_database_is_unreachable(app: object) -
         await broken.close()
 
     assert response.status_code == 503
-    assert response.json() == {"status": "degraded", "database": False}
+    body = response.json()
+    assert body["status"] == "unready"
+    assert body["checks"]["database"]["ok"] is False
+    # The others still answered, so the body says which one to go and look at.
+    assert all(body["checks"][name]["ok"] for name in READINESS if name != "database")

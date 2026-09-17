@@ -269,11 +269,12 @@ push waits for the commit. Enqueue outside the transaction and a worker runs
 against a row that may never exist — and usually wins the race, so the job
 dead-letters looking like corrupted data rather than like an ordering bug.
 
-**The worker's readiness is a file, not an endpoint.** It refreshes the mtime of
+**The worker's liveness is a file, not an endpoint.** It refreshes the mtime of
 `WORKER_HEALTH_FILE` while it is healthy and deletes it on exit;
 `python -m app.healthcheck` exits 0 or 1 on the file's age and is wired as the
 compose healthcheck. A draining worker still reports alive — liveness that fails
-during a graceful shutdown gets the container killed mid-job.
+during a graceful shutdown gets the container killed mid-job. There is no worker
+readiness probe: readiness decides where traffic goes, and a worker takes none.
 
 Exhausted jobs land in `keel_failed_jobs` with the whole envelope and the
 original traceback, so they can be retried by hand. `app/worker.py` prunes that
@@ -433,6 +434,11 @@ The worker's healthcheck is an *exec* probe rather than an HTTP one, since it
 serves no HTTP: `app.healthcheck` exits 0 while the heartbeat file is younger
 than `WORKER_HEALTH_MAX_AGE`. That file stays inside the container on purpose —
 on a shared volume a dead replica's heartbeat would keep a live replica green.
+{% endif %}{% if has_api %}
+The API answers two probes. `/health` is liveness and touches nothing, because
+restarting a process does not fix its database. `/ready` asks every dependency
+in `READINESS` concurrently, under a deadline, and answers 503 naming the one that
+failed — add to that mapping whenever you add a lifespan.
 {% endif %}
 ### Why there is no Dockerfile
 

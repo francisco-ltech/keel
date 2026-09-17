@@ -60,7 +60,17 @@ emitted, and `dispatch()` sealing it onto the envelope so a worker's log lines
 name the request that caused the work. `Envelope.context` has promised that
 since Phase 3 and nothing had ever filled it.
 
-**Left:** the request inspector, health and readiness checks, and metrics.
+**Slice two is done** ([ADR 0010](adr/0010-readiness-checks.md)): `probe()`
+runs a set of named checks concurrently, each under a deadline, and the
+template's `/ready` asks every dependency the API binds rather than Postgres
+alone. The database is probed on a connection of its own, so a busy request pool
+does not take the fleet out of rotation.
+
+**Next:** fix the worker's handling of a transient Redis error, which the slice
+two review found kills the loop and cancels running jobs (ADR 0010, "What the
+review caught").
+
+**Left:** the request inspector, and metrics.
 
 ADR 0001 still leaves one question open for this phase: whether cache events are
 emitted from the `Store` or the `Repository`. The inspector is the first

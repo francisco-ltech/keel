@@ -22,7 +22,7 @@ knows who it is acting for — ``acting_as`` publishes an
 a password on create, and an unbound hasher is a ``ConfigurationError`` on the
 first invite that gets processed.
 
-**Readiness without HTTP.** A worker serves no requests, so there is no endpoint
+**Liveness without HTTP.** A worker serves no requests, so there is no endpoint
 to probe. It refreshes the mtime of a heartbeat file while
 :attr:`keel.queue.Worker.healthy` is true and deletes it on the way out; an
 orchestrator runs :mod:`app.healthcheck` as an exec probe against the file's

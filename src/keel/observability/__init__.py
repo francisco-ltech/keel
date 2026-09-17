@@ -1,6 +1,6 @@
 """The observability subsystem.
 
-Two imports cover the whole of it. One at start-up::
+Three imports cover the whole of it. One at start-up::
 
     from keel.observability import LoggingConfig, configure_logging
 
@@ -26,6 +26,11 @@ handler on a ``StringIO``, read the line. A recording double would be a second
 implementation of a formatter, which is the point at which a contract suite
 would start earning its place and not before.
 
+And one in a readiness endpoint, which is handed the dependencies to ask rather
+than discovering them — :mod:`keel.observability.health` says why::
+
+    report = await probe({"database": check_database, "cache": check_cache})
+
 :func:`correlate` and :func:`correlation` live in
 :mod:`keel.support.correlation`, because the queue seals those fields onto every
 envelope and a tenant is not a logging concept. They are re-exported here the
@@ -36,6 +41,18 @@ thing should need one import.
 from __future__ import annotations
 
 from keel.observability.config import FORMATTERS, LEVELS, LoggingConfig
+from keel.observability.health import (
+    DEFAULT_TIMEOUT,
+    PROBE_KEY,
+    Check,
+    CheckResult,
+    HealthReport,
+    check_cache,
+    check_database,
+    check_queue,
+    check_tokens,
+    probe,
+)
 from keel.observability.logs import (
     ADOPTED_LOGGERS,
     CORRELATION_KEY,
@@ -55,16 +72,26 @@ from keel.support.correlation import (
 __all__ = [
     "ADOPTED_LOGGERS",
     "CORRELATION_KEY",
+    "DEFAULT_TIMEOUT",
     "FORMATTERS",
     "HANDLER_NAME",
     "LEVELS",
+    "PROBE_KEY",
     "RESERVED_FIELDS",
     "SECRET_MARKERS",
+    "Check",
+    "CheckResult",
+    "HealthReport",
     "JsonFormatter",
     "LoggingConfig",
     "TextFormatter",
+    "check_cache",
+    "check_database",
+    "check_queue",
+    "check_tokens",
     "configure_logging",
     "correlate",
     "correlation",
     "correlation_fields",
+    "probe",
 ]

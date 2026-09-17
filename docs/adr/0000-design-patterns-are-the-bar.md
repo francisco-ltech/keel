@@ -82,6 +82,7 @@ for the queue after it earned its place in the cache.
 | A policy class per resource | Authorization | A policy is one function with no state. `getattr(policy, action)` is the same string, resolved across an object's whole attribute surface. ADR 0008. |
 | A default (Null Object) policy | Authorization | Permissive is a hole; an unregistered type raises instead, because a forgotten registration answering 403 is indistinguishable from a real refusal. ADR 0008. |
 | A symmetrical consume contract | The queue | The worker is one implementation. An interface with a single implementor is indirection pretending to be design. |
+| A check protocol, and a check registry | Readiness | A check is one async function; which dependencies gate readiness is the application's list, not something subsystems add themselves to. ADR 0010. |
 | A guard protocol, and a user provider | Auth | One implementation until sessions exist beside tokens; and the principal's row is the application's schema, not Keel's. ADR 0007. |
 | Decorator over a real backend, for the fake | `FakeQueue` | Works for the cache, where behaviour is cheap to have for real. Running a job would make the test exercise the handler while claiming to test the dispatcher. |
 

@@ -38,7 +38,10 @@ line, whichever module wrote it.{% if has_worker %} ``app.worker`` calls the sam
 the same settings, so one query joins an API line to the worker line for the job
 it dispatched.{% endif %}
 
-**Liveness and readiness are different questions.** See the two endpoints below.
+**Liveness and readiness are different questions.** Liveness touches nothing;
+readiness asks every dependency a request can need, and ``READINESS`` below is
+that list. A dependency added to the lifespan belongs in it too — a probe that
+skips one reports ready while every request that needs it fails.
 """
 
 from __future__ import annotations
@@ -50,8 +53,18 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from keel.auth import hashing_lifespan, token_lifespan
 from keel.cache import cache_lifespan
-from keel.database import current_database, database_lifespan
-from keel.observability import configure_logging
+from keel.database import database_lifespan
+from keel.observability import (
+    Check,
+    check_cache,
+    check_database,
+{%- if has_worker %}
+    check_queue,
+{%- endif %}
+    check_tokens,
+    configure_logging,
+    probe,
+)
 {%- if has_worker %}
 from keel.queue import queue_lifespan
 {%- endif %}
@@ -61,6 +74,18 @@ from app.errors import register_error_handlers
 from app.modules import include_modules
 from app.observability import RequestContext
 from app.settings import Settings, get_settings
+
+READINESS: dict[str, Check] = {
+    "database": check_database,
+    "cache": check_cache,
+    # Every authenticated request resolves its bearer token here.
+    "tokens": check_tokens,
+{%- if has_worker %}
+    # `dispatch()` pushes on this connection once the unit of work commits.
+    "queue": check_queue,
+{%- endif %}
+}
+"""What ``/ready`` asks, by the name its response body reports."""
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -122,16 +147,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def ready() -> JSONResponse:
         """Readiness: can this process serve traffic?
 
-        Checks the database, and returns 503 if it does not answer, so the
-        orchestrator stops routing to a process that cannot serve. A readiness
-        check that reports success without touching its dependencies is worse
-        than none at all.
+        Asks every dependency in ``READINESS`` at once, each under a deadline,
+        and answers 503 naming the one that failed, so the orchestrator stops
+        routing here. The body carries each failure's exception class; the
+        message, which can name a host, goes to the log.
+
+        Every replica shares these dependencies, so an outage takes them all out
+        of rotation together. That is the intended trade: during a rollout it is
+        what stops a replica with a wrong ``DATABASE_URL`` from taking traffic.
         """
-        healthy = await current_database().healthy()
-        return JSONResponse(
-            status_code=200 if healthy else 503,
-            content={"status": "ready" if healthy else "degraded", "database": healthy},
-        )
+        report = await probe(READINESS)
+        return JSONResponse(status_code=200 if report.ok else 503, content=report.as_dict())
 
     return app
 
@@ -139,4 +165,4 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 app = create_app()
 """The application ``uvicorn app.main:app`` serves."""
 
-__all__ = ["app", "create_app"]
+__all__ = ["READINESS", "app", "create_app"]
