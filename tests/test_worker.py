@@ -26,9 +26,10 @@ from typing import Any, ClassVar
 
 import anyio
 import pytest
+from redis.exceptions import ConnectionError as RedisConnectionError
 
 from keel.exceptions import ConfigurationError
-from keel.queue import Envelope, FixedBackoff, Job, QueueConfig
+from keel.queue import Envelope, ExponentialBackoff, FixedBackoff, Job, QueueConfig
 from keel.queue.backoff import Backoff
 from keel.queue.saq_driver import SaqQueue
 from keel.queue.worker import (
@@ -40,8 +41,10 @@ from keel.queue.worker import (
     JobStarted,
     JobSucceeded,
     JobUnroutable,
+    JobUnsettled,
     Worker,
     WorkerEvent,
+    WorkerFaulted,
     WorkerStopped,
 )
 from keel.support.correlation import correlation
@@ -216,6 +219,54 @@ class BrokenSink:
         raise OSError("the failed_jobs table is gone")
 
 
+class FaultingQueue(SaqQueue):
+    """The real driver, with a named method made to raise a set number of times.
+
+    What a Redis failover looks like from the worker: a call that raises
+    `ConnectionError` a few times and then works again. Only the named method
+    faults, so the test can say which loop was hit and check the others kept
+    going.
+    """
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.faults: dict[str, int] = {}
+        self.dropped_replies: dict[str, int] = {}
+
+    def _fault(self, method: str) -> None:
+        remaining = self.faults.get(method, 0)
+        if remaining > 0:
+            self.faults[method] = remaining - 1
+            raise RedisConnectionError(f"{method}: connection lost")
+
+    def _drop_reply(self, method: str) -> None:
+        """The other shape of a failover: the write landed and the reply did not."""
+        remaining = self.dropped_replies.get(method, 0)
+        if remaining > 0:
+            self.dropped_replies[method] = remaining - 1
+            raise RedisConnectionError(f"{method}: reply lost")
+
+    async def reserve(self, queue: str | None = None, *, timeout: float = 5.0) -> Any:
+        self._fault("reserve")
+        return await super().reserve(queue, timeout=timeout)
+
+    async def promote_due(self, queue: str | None = None) -> int:
+        self._fault("promote_due")
+        return await super().promote_due(queue)
+
+    async def sweep(self, queue: str | None = None, *, lock: float) -> list[str]:
+        self._fault("sweep")
+        return await super().sweep(queue, lock=lock)
+
+    async def ack(self, reservation: Any) -> None:
+        self._fault("ack")
+        await super().ack(reservation)
+
+    async def fail(self, reservation: Any, error: str) -> None:
+        await super().fail(reservation, error)
+        self._drop_reply("fail")
+
+
 # -- fixtures --------------------------------------------------------------
 
 
@@ -233,6 +284,14 @@ def config(redis_url: str, prefix: str) -> QueueConfig:
 @pytest.fixture
 async def queue(redis_url: str, config: QueueConfig) -> AsyncIterator[SaqQueue]:
     driver = SaqQueue.from_url(redis_url, config)
+    yield driver
+    await driver.clear()
+    await driver.close()
+
+
+@pytest.fixture
+async def faulting(redis_url: str, config: QueueConfig) -> AsyncIterator[FaultingQueue]:
+    driver = FaultingQueue.from_url(redis_url, config)
     yield driver
     await driver.clear()
     await driver.close()
@@ -835,3 +894,242 @@ async def test_a_healthy_workers_own_jobs_are_never_swept(
 
     assert record.ran == ["live"], "the job was reserved more than once"
     assert of_type(seen, JobRecovered) == []
+
+
+# -- surviving the driver ---------------------------------------------------
+
+INSTANT: Backoff = FixedBackoff(seconds=0.02, jitter=0.0)
+"""Fault backoff for tests: long enough to be a wait, short enough not to notice."""
+
+
+async def test_a_reserve_error_does_not_cancel_the_jobs_in_flight(
+    faulting: FaultingQueue, make_worker: Callable[..., Worker], seen: list[Any]
+) -> None:
+    """A transient Redis error while polling must not end the run or the jobs in it.
+
+    Before the fix, `reserve` raising propagated out of the worker's task group,
+    which cancelled its siblings — the running jobs included — and skipped the
+    grace period entirely. One failover then cost every job on the replica.
+    """
+    record.hold = 0.6
+    record.started = anyio.Event()
+    await faulting.push(Envelope.seal(WorkerSlow("in-flight")))
+    worker = make_worker(queue=faulting, fault_backoff=INSTANT)
+
+    async with anyio.create_task_group() as tasks:
+        tasks.start_soon(worker.run)
+        with anyio.fail_after(10):
+            assert record.started is not None
+            await record.started.wait()
+        faulting.faults["reserve"] = 1
+        await faulting.push(Envelope.seal(WorkerEcho("after")))
+        with anyio.fail_after(10):
+            while "after" not in record.ran:
+                await anyio.sleep(0.02)
+        await worker.stop()
+
+    assert record.finished == ["in-flight"], "the in-flight job was cancelled"
+    faulted = of_type(seen, WorkerFaulted)
+    assert [event.activity for event in faulted] == ["reserve"]
+    assert faulted[0].lane == "default"
+    assert isinstance(faulted[0].error, RedisConnectionError)
+    stopped = of_type(seen, WorkerStopped)
+    assert len(stopped) == 1 and stopped[0].forced is False
+
+
+@pytest.mark.parametrize(("method", "activity"), [("promote_due", "promote"), ("sweep", "sweep")])
+async def test_a_maintenance_error_does_not_stop_the_worker(
+    faulting: FaultingQueue,
+    make_worker: Callable[..., Worker],
+    seen: list[Any],
+    method: str,
+    activity: str,
+) -> None:
+    """The maintenance and sweep loops fault the same way the reserve loop does."""
+    faulting.faults[method] = 2
+    await faulting.push(Envelope.seal(WorkerEcho("still served")))
+    worker = make_worker(queue=faulting, fault_backoff=INSTANT, sweep_interval=0.05)
+
+    await drive(worker, lambda: bool(record.ran) and len(of_type(seen, WorkerFaulted)) == 2)
+
+    assert record.ran == ["still served"]
+    faulted = of_type(seen, WorkerFaulted)
+    assert [event.activity for event in faulted] == [activity, activity]
+    assert [event.failures for event in faulted] == [1, 2]
+    assert faulting.faults[method] == 0, "the loop stopped retrying before the fault cleared"
+    assert of_type(seen, WorkerStopped)[0].forced is False
+
+
+async def test_consecutive_faults_back_off_and_the_worker_stays_alive(
+    faulting: FaultingQueue, make_worker: Callable[..., Worker], seen: list[Any]
+) -> None:
+    """The wait grows per consecutive failure, and a faulting loop is a live loop.
+
+    A restart does not fix an unreachable Redis, so liveness must not flap
+    during an outage: the heartbeat is refreshed by the retry itself.
+    """
+    faulting.faults["reserve"] = 3
+    await faulting.push(Envelope.seal(WorkerEcho("eventually")))
+    worker = make_worker(
+        queue=faulting,
+        fault_backoff=ExponentialBackoff(base=0.02, factor=2.0, maximum=1.0, jitter=0.0),
+        heartbeat_timeout=0.5,
+    )
+
+    async with anyio.create_task_group() as tasks:
+        tasks.start_soon(worker.run)
+        with anyio.fail_after(10):
+            while len(of_type(seen, WorkerFaulted)) < 3:
+                await anyio.sleep(0.01)
+        assert worker.healthy is True, "an outage is not a hung loop"
+        with anyio.fail_after(10):
+            while not record.ran:
+                await anyio.sleep(0.02)
+        await worker.stop()
+
+    faulted = of_type(seen, WorkerFaulted)
+    assert [event.failures for event in faulted] == [1, 2, 3]
+    assert [event.retry_in for event in faulted] == [0.02, 0.04, 0.08]
+    assert record.ran == ["eventually"]
+
+
+async def test_a_stop_request_cuts_a_fault_wait_short(
+    faulting: FaultingQueue, make_worker: Callable[..., Worker], seen: list[Any]
+) -> None:
+    """Backing off for a minute must not make a SIGTERM take a minute."""
+    faulting.faults["reserve"] = 100
+    worker = make_worker(queue=faulting, fault_backoff=FixedBackoff(seconds=60.0, jitter=0.0))
+
+    started_at = time.monotonic()
+    async with anyio.create_task_group() as tasks:
+        tasks.start_soon(worker.run)
+        with anyio.fail_after(10):
+            while not of_type(seen, WorkerFaulted):
+                await anyio.sleep(0.02)
+        await anyio.sleep(0.1)
+        await worker.stop()
+
+    assert time.monotonic() - started_at < 5.0, "stop() waited out the fault backoff"
+    assert worker.running is False
+
+
+async def test_an_outcome_the_queue_cannot_record_is_reported_and_recovered(
+    faulting: FaultingQueue, make_worker: Callable[..., Worker], seen: list[Any]
+) -> None:
+    """A job ran, but Redis would not take the ack. The worker must go on, and
+    the job must come back, because the reservation is still on the active list.
+    """
+    faulting.faults["ack"] = 1
+    await faulting.push(
+        Envelope(
+            job=WorkerEcho.name,
+            payload={"message": "twice"},
+            queue="default",
+            max_attempts=3,
+            timeout=1.0,
+        )
+    )
+    worker = make_worker(queue=faulting, fault_backoff=INSTANT, sweep_interval=0.5)
+
+    await drive(worker, lambda: len(of_type(seen, JobSucceeded)) == 1)
+
+    assert record.ran == ["twice", "twice"]
+    unsettled = of_type(seen, JobUnsettled)
+    assert len(unsettled) == 1
+    assert isinstance(unsettled[0].error, RedisConnectionError)
+    assert unsettled[0].envelope.attempts == 1
+    assert of_type(seen, JobRecovered), "the redelivery should be the sweep's, and visible"
+    assert of_type(seen, JobSucceeded)[0].envelope.attempts == 2
+    assert worker.in_flight == 0
+    assert await faulting.size() == 0
+    assert of_type(seen, WorkerStopped)[0].forced is False
+
+
+async def test_a_dead_letter_survives_a_driver_that_drops_the_reply(
+    faulting: FaultingQueue,
+    make_worker: Callable[..., Worker],
+    seen: list[Any],
+    sink: RecordingSink,
+) -> None:
+    """`fail()` landed on Redis and raised in the client. The sink must still be written.
+
+    The review found the terminal branches called the driver first and the sink
+    second, so a lost reply skipped the sink: the job was finished on the server,
+    absent from every list, and recorded nowhere — the one outcome a dead-letter
+    store exists to rule out.
+    """
+    faulting.dropped_replies["fail"] = 1
+    await faulting.push(
+        Envelope(
+            job=WorkerAlwaysFails.name, payload={"token": "pay me"}, queue="default", max_attempts=1
+        )
+    )
+    worker = make_worker(queue=faulting, fault_backoff=INSTANT)
+
+    await drive(worker, lambda: bool(sink.records))
+
+    assert record.ran == ["pay me"]
+    assert len(sink.records) == 1
+    assert len(of_type(seen, JobDeadLettered)) == 1
+    assert len(of_type(seen, JobUnsettled)) == 1, "the driver's error is still reported"
+    assert await faulting.size() == 0
+
+
+async def test_a_fault_between_the_dequeue_and_the_start_does_not_strand_the_job(
+    faulting: FaultingQueue, make_worker: Callable[..., Worker], seen: list[Any]
+) -> None:
+    """The one gap the sweep refuses to cover, so `reserve` has to cover it itself.
+
+    SAQ's dequeue has moved the job to the active list; Keel's write of the
+    start fails. Without a re-queue the job sits there with no start for ever,
+    invisible to `size()` and to the sweep, and the fault event names no job.
+    """
+    lane = faulting.lane("default")
+    real_update = lane.update
+    calls = 0
+
+    async def update_once_broken(*args: Any, **kwargs: Any) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RedisConnectionError("update: connection lost")
+        await real_update(*args, **kwargs)
+
+    lane.update = update_once_broken  # type: ignore[method-assign]  # ty: ignore[invalid-assignment]
+    await faulting.push(Envelope.seal(WorkerEcho("returned")))
+    worker = make_worker(queue=faulting, fault_backoff=INSTANT)
+
+    await drive(worker, lambda: bool(record.ran))
+
+    assert record.ran == ["returned"]
+    assert [event.activity for event in of_type(seen, WorkerFaulted)] == ["reserve"]
+    succeeded = of_type(seen, JobSucceeded)
+    assert succeeded[0].envelope.attempts == 1, (
+        "a reservation that was never made is not an attempt"
+    )
+    assert await faulting.size() == 0
+
+
+async def test_a_worker_that_cannot_reach_its_queue_stops_reporting_ready(
+    faulting: FaultingQueue, make_worker: Callable[..., Worker]
+) -> None:
+    """Liveness holds through an outage; readiness must not, or a bad rollout goes green."""
+    for method in ("reserve", "promote_due", "sweep"):
+        faulting.faults[method] = 10_000
+    worker = make_worker(
+        queue=faulting, fault_backoff=INSTANT, heartbeat_timeout=0.3, sweep_interval=0.05
+    )
+
+    async with anyio.create_task_group() as tasks:
+        tasks.start_soon(worker.run)
+        with anyio.fail_after(5):
+            while not worker.running:
+                await anyio.sleep(0.02)
+            ready_at_first = worker.accepting
+            assert ready_at_first, "ready until the queue has gone quiet for a while"
+            while worker.accepting:
+                await anyio.sleep(0.02)
+        assert worker.healthy is True, "an unanswered queue is not a hung loop"
+        assert time.time() - worker.last_success >= 0.3
+        assert time.time() - worker.last_activity < 0.3
+        await worker.stop()

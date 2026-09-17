@@ -158,6 +158,62 @@ into a leader election needing a lease.
 Missed ticks run late by default, up to an hour, and only the most recent missed
 instant — never the backlog.
 
+### 10. A driver fault pauses a loop; it does not end the run
+
+Added after the Phase 5 readiness review (ADR 0010) found that one Redis error
+during `reserve` raised out of the worker's task group. anyio cancels a group's
+siblings when one raises, and the siblings were the running jobs — cancelled
+where they stood, with no grace period, by a failover they would have survived
+had the loop simply asked again a moment later. `promote_due` and `sweep` had
+the same exit, and so did `ack`, `fail` and `retry` inside a job task.
+
+Each loop now catches `Exception` around its driver call, emits `WorkerFaulted`,
+refreshes the heartbeat, and waits on the stop event under the worker's
+`fault_backoff` — a `Backoff` Strategy, the same protocol jobs use, with the
+worker's own default of half a second doubling to thirty. Cancellation is a
+`BaseException` and passes through, so a hard stop still lands mid-wait. A job
+whose outcome the driver would not take emits `JobUnsettled` and is left where
+it is. Whether it runs again is not the worker's to promise: if the write landed
+and only the reply was lost, it is finished; if the write was lost and the job
+declares a timeout, the sweep re-delivers it, a duplicate that at-least-once
+permits; if it declares no timeout, it is stuck, per decision 5. The event's
+docstring says all three, because the review caught the first draft promising
+only the middle one.
+
+**A dead letter is written even when the driver call that ends the attempt
+raises.** The terminal branches go through `Worker._bury`: `fail`, then the
+sink, and the sink on the way out if `fail` raised. A `fail` that landed on the
+server and raised in the client was, in the first draft, the one path that
+skipped the sink — the job finished, on no list, recorded nowhere. Recording it
+twice is the accepted worst case.
+
+**`reserve` puts a job back when it cannot record the start.** SAQ's dequeue
+moves the job to the active list a round trip before Keel writes `started`, and
+decision 5 says a sweep never takes a job with no start. A fault in that gap
+therefore stranded the job for ever, invisible to `size()` and to every sweep;
+before this decision it crash-looped the process, which at least was loud. The
+driver now re-queues it itself, best effort, and if that fails too the job id is
+on the raised error so the `WorkerFaulted` an observer sees names what to look
+for.
+
+**The heartbeat is refreshed during a fault; `last_success` is not.** `healthy`
+is the liveness question, and a loop that is retrying is alive. Letting it go
+stale would have the orchestrator restart the process into the same outage,
+cancelling its in-flight jobs on the way — the exact outcome this decision
+exists to prevent. But a worker that has *never* reached its queue must not
+look fine, or a rollout carrying a bad `REDIS_URL` goes green and replaces every
+replica that worked. So `accepting`, the readiness question, goes false once
+the queue has gone unanswered for the heartbeat timeout, and `last_success` is
+readable beside `last_activity`. The template's healthcheck publishes liveness
+only, and says so; a deployment that wants the rollout to stall probes
+`accepting`.
+
+Declined: a cap after which the worker gives up and exits. Exiting is what it
+did before, and it helped nothing — the orchestrator restarts it into the same
+outage. Also declined: catching `RedisError` rather than `Exception`. The driver
+is a seam, and a replacement raises its own hierarchy; whatever it raises, the
+answer is the same.
+
 ## Consequences
 
 **`keel.queue` exports lazily.** `Worker` and `SaqQueue` pull in SAQ, an optional
@@ -175,6 +231,36 @@ so registration compares module and name rather than identity.
 **Delays are approximate below a second.** SAQ's delayed jobs sit in a sorted set
 until something promotes them, and promotion is rate-limited by SAQ's internal
 one-second lock.
+
+## What the review of decision 10 caught
+
+The first draft passed lint, both type checkers and eight new tests, and the
+adversarial review confirmed four defects against the live Redis:
+
+- **A lost reply destroyed the dead letter.** Every terminal branch called
+  `fail` and then the sink, so a `fail` that landed and raised skipped the sink.
+  The job was finished on the server, on no list, and recorded nowhere. Now
+  `Worker._bury`.
+- **`JobUnsettled` promised a redelivery the sweep cannot always make.** A job
+  with no timeout is never orphaned (decision 5), and a write that landed has
+  nothing to redeliver. The draft's docstring, the ADR and the template's log
+  line all said "it will run again". They say the three cases now.
+- **A fault between the dequeue and the start stranded the job**, with nothing
+  an operator watches moving: `size()` read zero, the fault event named no job,
+  and the sweep would never take it. `reserve` re-queues it now.
+- **A worker that never reached its queue was green for ever.** The heartbeat
+  was refreshed during faults, so liveness held — correctly — but nothing
+  distinguished a failover from a misconfigured rollout. `accepting` and
+  `last_success` do now.
+
+Two low findings: the module's `__all__` omitted every new name, and the
+module docstring still claimed the worker never decides a wait. The mechanical
+export test written for the first then found a pre-existing entry in the lazy
+table that pointed at the wrong module.
+
+The review also tried and failed to break the slot semaphore on the fault path,
+a stop or kill during a fault wait, and the sweep overlapping a live handler,
+and confirmed the new tests fail against the old code.
 
 ## What the contract suite caught
 
@@ -219,6 +305,26 @@ deliberately not the behaviour, the same exception `NullStore` gets.
   the SAQ rule that was rejected.
 - `test_a_job_that_keeps_killing_its_worker_is_not_immortal` — decision 4.
 - `test_a_job_with_no_timeout_cannot_be_recovered` — the honest consequence.
+- `test_a_reserve_error_does_not_cancel_the_jobs_in_flight` — decision 10, the
+  defect as found: a job is half done, the next poll raises, and the job must
+  still finish.
+- `test_a_maintenance_error_does_not_stop_the_worker` — the same for the
+  promote and sweep loops.
+- `test_consecutive_faults_back_off_and_the_worker_stays_alive` — the backoff
+  is the Strategy's answer, and liveness holds through an outage.
+- `test_a_stop_request_cuts_a_fault_wait_short` — a thirty-second backoff must
+  not make SIGTERM take thirty seconds.
+- `test_an_outcome_the_queue_cannot_record_is_reported_and_recovered` — an ack
+  the driver refuses is a `JobUnsettled`, and the sweep brings the job back.
+- `test_a_dead_letter_survives_a_driver_that_drops_the_reply` — the sink is
+  written whichever way `fail` fails.
+- `test_a_fault_between_the_dequeue_and_the_start_does_not_strand_the_job` —
+  `reserve` covers its own gap.
+- `test_a_worker_that_cannot_reach_its_queue_stops_reporting_ready` — liveness
+  holds, readiness does not.
+- `test_every_lazily_exported_name_is_in_its_modules_all` — mechanical, over
+  the lazy table; it found `DEFAULT_SWEEP_INTERVAL` pointed at a module that
+  did not define it.
 - `test_only_one_sweeper_runs_per_lock_window` — proves the *lock* gates it
   rather than emptiness.
 - `test_clear_with_no_argument_clears_only_the_default_queue` — across every

@@ -118,6 +118,7 @@ if TYPE_CHECKING:
         Trigger,
     )
     from keel.queue.worker import (
+        DEFAULT_FAULT_BACKOFF,
         DeadLetterDiscarded,
         EventFailureSink,
         FailureSink,
@@ -128,8 +129,10 @@ if TYPE_CHECKING:
         JobStarted,
         JobSucceeded,
         JobUnroutable,
+        JobUnsettled,
         Worker,
         WorkerEvent,
+        WorkerFaulted,
         WorkerStarted,
         WorkerStopped,
     )
@@ -137,8 +140,9 @@ if TYPE_CHECKING:
 _LAZY: Final[dict[str, str]] = {
     "SaqQueue": "keel.queue.saq_driver",
     "Reservation": "keel.queue.saq_driver",
-    "DEFAULT_SWEEP_INTERVAL": "keel.queue.saq_driver",
+    "DEFAULT_SWEEP_INTERVAL": "keel.queue.worker",
     "Worker": "keel.queue.worker",
+    "DEFAULT_FAULT_BACKOFF": "keel.queue.worker",
     "FailureSink": "keel.queue.worker",
     "EventFailureSink": "keel.queue.worker",
     "WorkerEvent": "keel.queue.worker",
@@ -150,6 +154,8 @@ _LAZY: Final[dict[str, str]] = {
     "JobRetrying": "keel.queue.worker",
     "JobDeadLettered": "keel.queue.worker",
     "JobUnroutable": "keel.queue.worker",
+    "JobUnsettled": "keel.queue.worker",
+    "WorkerFaulted": "keel.queue.worker",
     "JobRecovered": "keel.queue.worker",
     "DeadLetterDiscarded": "keel.queue.worker",
     "FailedJob": "keel.queue.failed",
@@ -196,6 +202,8 @@ def __dir__() -> list[str]:
 
 
 __all__ = [
+    "DEFAULT_FAULT_BACKOFF",
+    "DEFAULT_SWEEP_INTERVAL",
     "Backoff",
     "CronError",
     "CronTrigger",
@@ -220,6 +228,7 @@ __all__ = [
     "JobStarted",
     "JobSucceeded",
     "JobUnroutable",
+    "JobUnsettled",
     "NoBackoff",
     "NullQueue",
     "PermanentFailureError",
@@ -240,6 +249,7 @@ __all__ = [
     "UnknownJobError",
     "Worker",
     "WorkerEvent",
+    "WorkerFaulted",
     "WorkerStarted",
     "WorkerStopped",
     "bound_queue_manager",

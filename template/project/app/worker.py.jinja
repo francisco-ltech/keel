@@ -81,9 +81,11 @@ from keel.queue import (
     Job,
     JobDeadLettered,
     JobSucceeded,
+    JobUnsettled,
     Schedule,
     Scheduler,
     Worker,
+    WorkerFaulted,
     WorkerStarted,
     WorkerStopped,
     queue_lifespan,
@@ -162,6 +164,39 @@ def on_dead_lettered(event: JobDeadLettered) -> None:
     logger.error("%s %s dead-lettered: %s", event.envelope.job, event.envelope.id, event.error)
 
 
+def on_faulted(event: WorkerFaulted) -> None:
+    """Record a Redis call that failed, and when the loop will try again.
+
+    The loop survives it and liveness stays green, so this line is the only
+    trace of an outage. One is a failover; a climbing ``failures`` is what an
+    alert should be written against.
+    """
+    logger.warning(
+        "worker %s: %s failed (%d in a row), retrying in %.1fs: %s",
+        event.worker,
+        event.activity,
+        event.failures,
+        event.retry_in,
+        event.error,
+    )
+
+
+def on_unsettled(event: JobUnsettled) -> None:
+    """Record a job whose outcome Redis would not take.
+
+    Whether it runs again depends on whether the write landed and whether the
+    job declares a timeout; the event's docstring has the three cases. A dead
+    letter is recorded regardless, which is why this is a warning and not an
+    error.
+    """
+    logger.warning(
+        "%s %s ran but its outcome may not have been recorded: %s",
+        event.envelope.job,
+        event.envelope.id,
+        event.error,
+    )
+
+
 def on_listener_error(error: BaseException, event: Any) -> None:
     """Report a listener that raised, without failing the job that emitted it.
 
@@ -188,6 +223,8 @@ def log_events(events: EventDispatcher) -> None:
     events.listen(WorkerStopped, on_stopped)
     events.listen(JobSucceeded, on_succeeded)
     events.listen(JobDeadLettered, on_dead_lettered)
+    events.listen(WorkerFaulted, on_faulted)
+    events.listen(JobUnsettled, on_unsettled)
 
 
 async def heartbeat(worker: Worker, path: Path, interval: float = HEARTBEAT_INTERVAL) -> None:

@@ -160,7 +160,7 @@ dependency answered at 1.006.
 this slice, confirmed while checking what the worker's liveness means during an
 outage. `reserve` raising propagates out of the worker's task group, which
 cancels its siblings, including running jobs, skipping `shutdown_grace`. Fixed
-separately.
+as ADR 0006, decision 10.
 
 **The connection-count test counted every backend on the database**, so run
 serially against the shared database it failed three times in six while any

@@ -66,9 +66,10 @@ template's `/ready` asks every dependency the API binds rather than Postgres
 alone. The database is probed on a connection of its own, so a busy request pool
 does not take the fleet out of rotation.
 
-**Next:** fix the worker's handling of a transient Redis error, which the slice
-two review found kills the loop and cancels running jobs (ADR 0010, "What the
-review caught").
+**The worker fix is done** ([ADR 0006, decision 10](adr/0006-the-queue.md)):
+the slice two review found that one transient Redis error killed the loop and
+cancelled running jobs. A driver fault now pauses the loop that hit it, under a
+backoff, and leaves the rest of the worker alone.
 
 **Left:** the request inspector, and metrics.
 

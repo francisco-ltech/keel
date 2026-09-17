@@ -6,8 +6,10 @@ reserves, :meth:`Worker._execute` runs and then acknowledges, retries or
 dead-letters — while every step that could reasonably differ is delegated to
 something that already owns the decision:
 
-* *how long to wait before retrying* is asked of the job's
-  :class:`~keel.queue.backoff.Backoff` Strategy, never decided here;
+* *how long to wait before retrying a job* is asked of the job's
+  :class:`~keel.queue.backoff.Backoff` Strategy, never decided here — the
+  worker's own ``fault_backoff`` answers a different question, when *Redis*
+  will be back;
 * *how many attempts remain* is read off the envelope, which froze the policy at
   dispatch so a deploy cannot retroactively change it;
 * *what happens to an exhausted job* is handed to a :class:`FailureSink`;
@@ -34,6 +36,15 @@ its own timer and re-queues anything whose holder is gone. The attempt that died
 is still charged — :meth:`~keel.queue.saq_driver.SaqQueue.reserve` charges it
 before the handler runs — so a job that kills its worker every time runs out of
 budget and is dead-lettered rather than eating the fleet one replica at a time.
+
+**A driver failure pauses a loop; it does not end the run.** Each of the three
+loops — reserve, promote, sweep — catches what the driver raises, reports a
+:class:`WorkerFaulted`, and waits out the worker's *fault backoff* before
+trying again. Without that, one dropped connection during a Redis failover
+raised out of the loop's task group, which cancelled its siblings: every job
+in flight on the replica, with no grace period. A job whose *outcome* the
+driver would not take is reported as :class:`JobUnsettled`; whether it runs
+again is the sweep's call, and that event's docstring says exactly when it is.
 
 **A job runs under the context it was dispatched with.** Whatever correlation
 fields were in effect when ``dispatch()`` was called were sealed onto the
@@ -66,6 +77,7 @@ from typing import TYPE_CHECKING, Final, Protocol
 import anyio
 
 from keel.exceptions import ConfigurationError
+from keel.queue.backoff import Backoff, ExponentialBackoff
 from keel.queue.config import QueueConfig
 from keel.queue.envelope import Envelope
 from keel.queue.job import Job, JobError, PermanentFailureError, UnknownJobError
@@ -119,6 +131,17 @@ DEFAULT_UNROUTABLE_DELAY: Final = 30.0
 
 DEFAULT_UNROUTABLE_AFTER: Final = 3600.0
 """Seconds after dispatch at which an unroutable job stops being a rollout artefact."""
+
+DEFAULT_FAULT_BACKOFF: Final[Backoff] = ExponentialBackoff(base=0.5, maximum=30.0)
+"""How long a loop waits after the driver fails, growing while it keeps failing.
+
+Half a second is under a Redis failover's election time, so the first retry
+usually lands on the new primary. Thirty seconds is the most an operator should
+wait to see a recovered Redis picked up, and a fleet polling every thirty
+seconds during an outage is not a fleet that keeps the outage going. Jitter is
+on, for the reason :mod:`keel.queue.backoff` gives: a hundred replicas lost the
+same connection at the same instant.
+"""
 
 
 # -- events ---------------------------------------------------------------
@@ -181,6 +204,31 @@ class JobRecovered(WorkerEvent):
 
 
 @dataclass(frozen=True, slots=True)
+class WorkerFaulted(WorkerEvent):
+    """The driver failed underneath a loop, which will wait and try again.
+
+    The event to alert on during a Redis incident, and the only trace of one:
+    the loop does not stop, and :attr:`Worker.healthy` stays true, because a
+    restart would not help. A stream with a climbing ``failures`` is an outage;
+    a single one is a failover that has already been survived.
+
+    Attributes:
+        activity: What the loop was doing: ``reserve``, ``promote`` or ``sweep``.
+        lane: The queue name being reserved from, or ``None`` when the activity
+            spans every lane.
+        error: What the driver raised.
+        failures: How many consecutive times this loop has now failed.
+        retry_in: Seconds until it tries again.
+    """
+
+    activity: str = ""
+    lane: str | None = None
+    error: BaseException | None = None
+    failures: int = 1
+    retry_in: float = 0.0
+
+
+@dataclass(frozen=True, slots=True)
 class JobEvent(WorkerEvent):
     """Base class for events about one dispatched job.
 
@@ -228,6 +276,31 @@ class JobDeadLettered(JobEvent):
 
     Attributes:
         error: The failure that ended it.
+    """
+
+    error: BaseException | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class JobUnsettled(JobEvent):
+    """This worker could not record a job's outcome; the handler may have run.
+
+    What failed was the driver call that ends the attempt. Three things can be
+    true, and the worker cannot tell which:
+
+    * the write landed and only the reply was lost, in which case the job is
+      finished and nothing more happens;
+    * the write was lost and the job declares a timeout, in which case it sits
+      on the active list until the sweep re-delivers it — a duplicate delivery,
+      which at-least-once permits;
+    * the write was lost and the job declares no timeout, in which case it is
+      stuck, for the reason :meth:`~keel.queue.saq_driver.SaqQueue.sweep` gives.
+
+    A dead letter is never among the casualties: the sink is written before
+    this is raised, see :meth:`Worker._bury`.
+
+    Attributes:
+        error: What the driver raised.
     """
 
     error: BaseException | None = None
@@ -354,6 +427,10 @@ class Worker:
             again.
         unroutable_after: Seconds after dispatch at which an unknown job is
             dead-lettered instead of being offered again.
+        fault_backoff: How long a loop waits after the driver raises, by
+            consecutive failure count. The worker's own policy, distinct from
+            any job's: it answers "when will Redis be back", not "when will
+            this job's dependency be".
         handle_signals: Whether to install signal handlers. Turn it off to embed
             a worker in a process that manages its own.
 
@@ -365,10 +442,12 @@ class Worker:
     __slots__ = (
         "_config",
         "_events",
+        "_fault_backoff",
         "_forced",
         "_heartbeat",
         "_heartbeat_timeout",
         "_in_flight",
+        "_last_success",
         "_maintenance_interval",
         "_name",
         "_owns_queue",
@@ -404,6 +483,7 @@ class Worker:
         heartbeat_timeout: float = DEFAULT_HEARTBEAT_TIMEOUT,
         unroutable_delay: float = DEFAULT_UNROUTABLE_DELAY,
         unroutable_after: float = DEFAULT_UNROUTABLE_AFTER,
+        fault_backoff: Backoff = DEFAULT_FAULT_BACKOFF,
         handle_signals: bool = True,
     ) -> None:
         self._config = config
@@ -420,6 +500,7 @@ class Worker:
         self._heartbeat_timeout = heartbeat_timeout
         self._unroutable_delay = unroutable_delay
         self._unroutable_after = unroutable_after
+        self._fault_backoff = fault_backoff
         self.handle_signals = handle_signals
 
         self._running = False
@@ -428,6 +509,7 @@ class Worker:
         self._stop_requested = False
         self._in_flight = 0
         self._heartbeat = time.time()
+        self._last_success = self._heartbeat
         # Both are event-loop bound, so they cannot exist before run() does.
         self._stopping: anyio.Event | None = None
         self._work_scope: anyio.CancelScope | None = None
@@ -461,13 +543,23 @@ class Worker:
 
     @property
     def last_activity(self) -> float:
-        """Unix timestamp of the last reserve, maintenance tick or job event.
+        """Unix timestamp of the last reserve, maintenance tick, job event or fault retry.
 
         The value a liveness endpoint should expose alongside :attr:`healthy`,
         because "unhealthy since 40 seconds ago" is actionable and "unhealthy"
         is not.
         """
         return self._heartbeat
+
+    @property
+    def last_success(self) -> float:
+        """Unix timestamp of the last driver call that answered.
+
+        Unlike :attr:`last_activity` this is *not* refreshed while a loop waits
+        out a fault, so "the queue has not answered for 40 seconds" is readable
+        here and nowhere else.
+        """
+        return self._last_success
 
     @property
     def healthy(self) -> bool:
@@ -486,9 +578,15 @@ class Worker:
 
         The **readiness** question. False from the moment a stop is requested,
         which is what lets a rollout take a worker out of rotation before it
-        goes quiet.
+        goes quiet — and false once the queue has gone unanswered for longer
+        than the heartbeat timeout, so a rollout carrying a bad ``REDIS_URL``
+        never reports ready and never replaces the replicas that work.
         """
-        return self._running and not self._stop_requested
+        return (
+            self._running
+            and not self._stop_requested
+            and (time.time() - self._last_success) < self._heartbeat_timeout
+        )
 
     @property
     def handles_signals(self) -> bool:
@@ -607,13 +705,19 @@ class Worker:
                 purpose — ``concurrency`` is capped by the database pool, and a
                 per-lane budget would multiply it by the number of queues.
         """
+        failures = 0
         while not self._should_stop():
             await slots.acquire()
             held = True
+            fault: BaseException | None = None
             try:
                 if self._should_stop():
                     return
                 reservation = await queue.reserve(lane, timeout=self._reserve_timeout)
+            except Exception as exc:  # noqa: BLE001 — see _pause_after_fault
+                fault = exc
+            else:
+                failures = 0
                 self._touch()
                 if reservation is not None:
                     # The slot now belongs to the job task, which releases it.
@@ -622,6 +726,11 @@ class Worker:
             finally:
                 if held:
                     slots.release()
+            if fault is not None:
+                # After the slot is released: a job finishing meanwhile must not
+                # find its slot held by a loop that is only waiting.
+                failures += 1
+                await self._pause_after_fault("reserve", fault, failures, lane=lane)
 
     async def _maintain(self, queue: SaqQueue) -> None:
         """Promote delayed jobs and keep the heartbeat fresh.
@@ -630,9 +739,16 @@ class Worker:
             queue: The driver to maintain.
         """
         stopping = self._stopping
+        failures = 0
         while not self._should_stop():
-            for lane in self._queues:
-                await queue.promote_due(lane)
+            try:
+                for lane in self._queues:
+                    await queue.promote_due(lane)
+            except Exception as exc:  # noqa: BLE001 — see _pause_after_fault
+                failures += 1
+                await self._pause_after_fault("promote", exc, failures)
+                continue
+            failures = 0
             self._touch()
             if stopping is None:  # pragma: no cover — run() always sets it
                 return
@@ -656,13 +772,20 @@ class Worker:
             queue: The driver to sweep.
         """
         stopping = self._stopping
+        failures = 0
         while not self._should_stop():
-            for lane in self._queues:
-                recovered = await queue.sweep(lane, lock=self._sweep_interval)
-                for job_id in recovered:
-                    await self._events.dispatch(
-                        JobRecovered(worker=self._name, lane=lane, job_id=job_id)
-                    )
+            try:
+                for lane in self._queues:
+                    recovered = await queue.sweep(lane, lock=self._sweep_interval)
+                    for job_id in recovered:
+                        await self._events.dispatch(
+                            JobRecovered(worker=self._name, lane=lane, job_id=job_id)
+                        )
+            except Exception as exc:  # noqa: BLE001 — see _pause_after_fault
+                failures += 1
+                await self._pause_after_fault("sweep", exc, failures)
+                continue
+            failures = 0
             self._touch()
             if stopping is None:  # pragma: no cover — run() always sets it
                 return
@@ -712,7 +835,12 @@ class Worker:
             # Merged into one mapping rather than passed as two: a context that
             # already carries `job` would otherwise be a duplicate keyword.
             with correlate(**dict(received, job=envelope.job, job_id=envelope.id)):
-                await self._execute(queue, reservation)
+                try:
+                    await self._execute(queue, reservation)
+                except Exception as exc:  # noqa: BLE001 — the driver failed; the sweep re-delivers
+                    await self._events.dispatch(
+                        JobUnsettled(worker=self._name, envelope=envelope, error=exc)
+                    )
         finally:
             self._in_flight -= 1
             self._touch()
@@ -733,8 +861,13 @@ class Worker:
         if attempt.attempts > attempt.max_attempts:
             # Only reachable through recovery: a job that kills its worker is swept
             # back for ever. Not `exhausted` — that is true on the last valid attempt.
-            await queue.fail(reservation, "attempt budget exceeded after recovery")
-            await self._dead_letter(attempt, JobError("job exceeded its attempts after recovery"))
+            await self._bury(
+                queue,
+                reservation,
+                attempt,
+                JobError("job exceeded its attempts after recovery"),
+                "attempt budget exceeded after recovery",
+            )
             return
         try:
             job = attempt.open()
@@ -744,8 +877,7 @@ class Worker:
         except JobError as exc:
             # The payload no longer fits the job's fields. Deterministic, so spending
             # the remaining attempts only delays the dead-letter a human needs to see.
-            await queue.fail(reservation, self._describe(exc))
-            await self._dead_letter(attempt, exc)
+            await self._bury(queue, reservation, attempt, exc)
             return
 
         await self._events.dispatch(JobStarted(worker=self._name, envelope=attempt))
@@ -755,8 +887,7 @@ class Worker:
         except PermanentFailureError as exc:
             # The handler has said retrying cannot help; spending the remaining
             # attempts would only make a broken job look like a flaky one.
-            await queue.fail(reservation, self._describe(exc))
-            await self._dead_letter(attempt, exc)
+            await self._bury(queue, reservation, attempt, exc)
         except Exception as exc:  # noqa: BLE001 — a handler may raise anything
             await self._retry_or_bury(queue, reservation, job, exc)
         else:
@@ -817,8 +948,7 @@ class Worker:
         """
         attempt = reservation.envelope
         if attempt.exhausted:
-            await queue.fail(reservation, self._describe(error))
-            await self._dead_letter(attempt, error)
+            await self._bury(queue, reservation, attempt, error)
             return
         delay = job.backoff.delay_for(attempt.attempts + 1)
         await queue.retry(
@@ -866,11 +996,10 @@ class Worker:
         """
         refunded = replace(reservation.envelope, attempts=max(0, reservation.envelope.attempts - 1))
         if time.time() - refunded.dispatched_at >= self._unroutable_after:
-            await queue.fail(reservation, self._describe(error))
             await self._events.dispatch(
                 JobUnroutable(worker=self._name, envelope=refunded, error=error, retry_in=None)
             )
-            await self._dead_letter(refunded, error)
+            await self._bury(queue, reservation, refunded, error)
             return
         await queue.retry(
             reservation,
@@ -886,6 +1015,39 @@ class Worker:
                 retry_in=self._unroutable_delay,
             )
         )
+
+    async def _bury(
+        self,
+        queue: SaqQueue,
+        reservation: Reservation,
+        envelope: Envelope,
+        error: BaseException,
+        reason: str | None = None,
+    ) -> None:
+        """End the attempt for good and record the dead letter, never one without the other.
+
+        The driver goes first, so the attempt is closed before anything can
+        re-dispatch under its id. But a ``fail`` that raises may still have
+        landed — a failover's commonest shape is a write whose reply was lost —
+        and if the sink were skipped then, the only copy of the payload would be
+        gone with nothing to say so. So the sink is written on the way out
+        either way, and the driver's error still propagates to become a
+        :class:`JobUnsettled`. The worst case is a dead letter recorded twice;
+        the alternative was zero times.
+
+        Args:
+            queue: The driver holding the attempt.
+            reservation: What was reserved.
+            envelope: The envelope as the sink should see it.
+            error: What ended the job.
+            reason: The driver's error field, when it should differ from *error*.
+        """
+        try:
+            await queue.fail(reservation, reason or self._describe(error))
+        except Exception:
+            await self._dead_letter(envelope, error)
+            raise
+        await self._dead_letter(envelope, error)
 
     async def _dead_letter(self, envelope: Envelope, error: BaseException) -> None:
         """Announce a job's death and hand it to the sink.
@@ -907,6 +1069,54 @@ class Worker:
             await self._sink.record(envelope, error)
         except Exception as exc:  # noqa: BLE001 — a broken sink must not stop the worker
             await self._events.dispatch(DeadLetterDiscarded(envelope=envelope, error=exc))
+
+    # -- faults -----------------------------------------------------------
+
+    async def _pause_after_fault(
+        self,
+        activity: str,
+        error: BaseException,
+        failures: int,
+        *,
+        lane: str | None = None,
+    ) -> None:
+        """Report a driver failure and hold the calling loop until its next try.
+
+        Catches ``Exception`` at the call sites rather than Redis' own
+        hierarchy, because the driver is a seam: whatever a replacement raises,
+        the answer is the same — wait, then ask again. Cancellation is a
+        ``BaseException`` and passes through, which is what lets a hard stop
+        still cancel a loop that is mid-wait.
+
+        The heartbeat is refreshed here on purpose, and :attr:`last_success`
+        is not. A loop that is retrying is alive, and a liveness probe that
+        called it dead would have the orchestrator restart a process into the
+        same outage, cancelling its in-flight jobs on the way. Readiness is the
+        question an unanswered queue should fail, and :attr:`accepting` does.
+
+        Args:
+            activity: What the loop was doing, for the event.
+            error: What the driver raised.
+            failures: Consecutive failures so far, including this one.
+            lane: The queue name involved, when the activity has one.
+        """
+        delay = self._fault_backoff.delay_for(failures + 1)
+        self._heartbeat = time.time()
+        await self._events.dispatch(
+            WorkerFaulted(
+                worker=self._name,
+                activity=activity,
+                lane=lane,
+                error=error,
+                failures=failures,
+                retry_in=delay,
+            )
+        )
+        stopping = self._stopping
+        if stopping is None:  # pragma: no cover — run() always sets it
+            return
+        with anyio.move_on_after(delay):
+            await stopping.wait()
 
     # -- shutdown ---------------------------------------------------------
 
@@ -984,8 +1194,8 @@ class Worker:
         return self._stop_requested
 
     def _touch(self) -> None:
-        """Record that the loop is alive."""
-        self._heartbeat = time.time()
+        """Record that the loop is alive and the driver answered."""
+        self._heartbeat = self._last_success = time.time()
 
     @staticmethod
     def _describe(error: BaseException) -> str:
@@ -1010,6 +1220,7 @@ class Worker:
 
 
 __all__ = [
+    "DEFAULT_FAULT_BACKOFF",
     "DEFAULT_HEARTBEAT_TIMEOUT",
     "DEFAULT_MAINTENANCE_INTERVAL",
     "DEFAULT_SHUTDOWN_GRACE",
@@ -1027,8 +1238,10 @@ __all__ = [
     "JobStarted",
     "JobSucceeded",
     "JobUnroutable",
+    "JobUnsettled",
     "Worker",
     "WorkerEvent",
+    "WorkerFaulted",
     "WorkerStarted",
     "WorkerStopped",
 ]

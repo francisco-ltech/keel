@@ -59,7 +59,7 @@ for the queue after it earned its place in the cache.
 | Pattern | Where |
 |---|---|
 | Bridge | `cache.Store` (implementor) / `cache.Repository` (abstraction) |
-| Strategy | Cache drivers; serializers; backoff policies; authorization policies, selected by resource type |
+| Strategy | Cache drivers; serializers; backoff policies, for a job's retries and for the worker's own faults; authorization policies, selected by resource type |
 | Template Method | `Repository.remember`; the worker loop |
 | Abstract Factory | `Manager[T]`, `CacheManager`, `QueueManager`, `TokenManager` |
 | Decorator | `EventfulStore`, `FakeStore`, `FakeTokenStore` |

@@ -56,7 +56,7 @@ import dataclasses
 import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, Final
+from typing import Any, Final, Self
 
 from redis.asyncio import Redis
 from saq.job import Job as SaqJob
@@ -108,6 +108,9 @@ with everything else.
 
 SWEEP_ERROR: Final = "recovered: the worker holding this job did not finish it"
 """Recorded on a job that a sweep re-queued, for dashboards and post-mortems."""
+
+RESERVE_LOST_ERROR: Final = "returned: the worker could not record that it took this job"
+"""Recorded on a job put back by :meth:`SaqQueue.reserve` after its start was lost."""
 
 
 def _require_prefix(prefix: str) -> str:
@@ -287,7 +290,7 @@ class SaqQueue:
         return f"{prefix}{SEPARATOR}{queue}"
 
     @classmethod
-    def from_url(cls, url: str, config: QueueConfig | None = None) -> SaqQueue:
+    def from_url(cls, url: str, config: QueueConfig | None = None) -> Self:
         """Build a queue that owns its own Redis client.
 
         Args:
@@ -480,6 +483,13 @@ class SaqQueue:
         one delivery more than its budget, never fewer, which is the direction
         an at-least-once queue is allowed to err in.
 
+        A worker that *survives* a failure in between must put the job back
+        itself: it is on the active list with no start recorded, which is the
+        one shape :meth:`sweep` refuses to touch, so nothing else ever would.
+        The re-queue is best effort — the same outage usually takes it too —
+        and when it fails the job id is on the raised error, so the fault an
+        observer sees names what to look for.
+
         Args:
             queue: Which named queue to take from, or ``None`` for the default.
             timeout: Seconds to block waiting for one.
@@ -494,15 +504,22 @@ class SaqQueue:
         if saq_job is None:
             return None
         envelope = decode(saq_job.kwargs).attempted()
-        await lane.update(
-            saq_job,
-            status=Status.ACTIVE,
-            started=saq_now(),
-            kwargs=encode(envelope),
-            # SAQ treats any non-zero `scheduled` as "due", so a delayed job's now-past
-            # epoch would let a swept job be promoted a second time and delivered twice.
-            scheduled=0,
-        )
+        try:
+            await lane.update(
+                saq_job,
+                status=Status.ACTIVE,
+                started=saq_now(),
+                kwargs=encode(envelope),
+                # SAQ treats any non-zero `scheduled` as "due", so a delayed job's now-past
+                # epoch would let a swept job be promoted a second time and delivered twice.
+                scheduled=0,
+            )
+        except Exception as exc:
+            try:
+                await lane.retry(saq_job, RESERVE_LOST_ERROR)
+            except Exception:  # noqa: BLE001 — the outage that lost the start loses this too
+                exc.add_note(f"job {saq_job.id} is on the active list with no start recorded")
+            raise
         return Reservation(envelope=envelope, lane=resolved, saq_job=saq_job)
 
     async def ack(self, reservation: Reservation) -> None:
