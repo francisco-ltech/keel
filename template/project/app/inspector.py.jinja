@@ -1,0 +1,54 @@
+"""The request inspector's endpoints, for the developer at the desk.
+
+``GET /_inspector/requests`` lists the last ``INSPECTOR_RETAIN`` requests this
+process served, newest first, with how long each took and how many queries,
+cache calls, dispatches and log lines it produced. ``GET /_inspector/requests/{id}``
+is one request's whole timeline. It is the answer to "why is this endpoint
+slow": open the trace, and the query that runs once per item is right there.
+
+**Mounted only under ``DEBUG``**, by ``create_app``, and there is no way to turn
+it on without that. The listing shows SQL text and log messages to whoever can
+reach it, and a bearer check would only narrow *whoever* to *any signed-in
+user*, which is still everyone's queries. Bind parameters are left out unless
+``INSPECTOR_PARAMETERS=true``, because a password hash travels as one.
+
+Excluded from the OpenAPI document: it is not part of the service's contract,
+and a client generated from the schema must not learn it exists.
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+from fastapi import APIRouter, Request
+from fastapi.responses import JSONResponse
+from keel.observability import current_inspector
+
+from app.errors import PROBLEM_BASE, problem
+from app.observability import INSPECTOR_PREFIX
+
+router = APIRouter(prefix=INSPECTOR_PREFIX, tags=["inspector"], include_in_schema=False)
+
+
+@router.get("/requests", summary="Recent requests, newest first")
+async def list_requests() -> list[dict[str, Any]]:
+    """Return a summary of every retained request."""
+    return [recorded.as_dict(entries=False) for recorded in reversed(current_inspector().recent)]
+
+
+@router.get("/requests/{trace_id}", summary="One request's timeline")
+async def show_request(trace_id: str, request: Request) -> JSONResponse:
+    """Return one request's entries, or a problem if it has been dropped."""
+    recorded = current_inspector().find(trace_id)
+    if recorded is None:
+        return problem(
+            request,
+            status=404,
+            title="Not Found",
+            detail=f"no recorded request {trace_id!r}; it may have been dropped",
+            problem_type=f"{PROBLEM_BASE}/not-found",
+        )
+    return JSONResponse(recorded.as_dict())
+
+
+__all__ = ["router"]

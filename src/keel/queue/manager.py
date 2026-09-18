@@ -20,6 +20,7 @@ from keel.exceptions import ConfigurationError
 from keel.queue.config import KNOWN_DRIVERS, QueueConfig
 from keel.queue.drivers import NullQueue, SyncQueue
 from keel.queue.fake import FakeQueue
+from keel.support.events import EventDispatcher
 from keel.support.manager import Manager
 
 type QueueFactory = Callable[[str, QueueConfig], Queue]
@@ -31,19 +32,28 @@ class QueueManager(Manager[Queue]):
 
     Args:
         config: How to reach the queue.
+        events: Where :func:`~keel.queue.dispatch.dispatch` announces each
+            dispatch, or ``None`` for no announcement. The same seam the cache
+            manager has, and the one the request inspector subscribes to.
     """
 
-    __slots__ = ("_config", "_drivers")
+    __slots__ = ("_config", "_drivers", "_events")
 
-    def __init__(self, config: QueueConfig) -> None:
+    def __init__(self, config: QueueConfig, events: EventDispatcher | None = None) -> None:
         super().__init__(config.driver)
         self._config = config
+        self._events = events
         self._drivers: dict[str, QueueFactory] = {}
 
     @property
     def config(self) -> QueueConfig:
         """The configuration this manager builds from."""
         return self._config
+
+    @property
+    def events(self) -> EventDispatcher | None:
+        """The dispatcher dispatches are announced on, if any."""
+        return self._events
 
     def register_driver(self, driver: str, factory: QueueFactory) -> None:
         """Teach this manager a driver it does not ship with.

@@ -31,6 +31,13 @@ than discovering them — :mod:`keel.observability.health` says why::
 
     report = await probe({"database": check_database, "cache": check_cache})
 
+And, in development, one around each request, so the queries, cache calls,
+dispatches and log lines it produced can be read back as one timeline —
+:mod:`keel.observability.inspector`::
+
+    with trace(f"{method} {path}") as recorded:
+        ...
+
 :func:`correlate` and :func:`correlation` live in
 :mod:`keel.support.correlation`, because the queue seals those fields onto every
 envelope and a tenant is not a logging concept. They are re-exported here the
@@ -52,6 +59,19 @@ from keel.observability.health import (
     check_queue,
     check_tokens,
     probe,
+)
+from keel.observability.inspector import (
+    Entry,
+    Inspector,
+    InspectorConfig,
+    Trace,
+    bound_inspector,
+    current_inspector,
+    current_trace,
+    inspector_lifespan,
+    set_inspector,
+    trace,
+    use_inspector,
 )
 from keel.observability.logs import (
     ADOPTED_LOGGERS,
@@ -81,10 +101,15 @@ __all__ = [
     "SECRET_MARKERS",
     "Check",
     "CheckResult",
+    "Entry",
     "HealthReport",
+    "Inspector",
+    "InspectorConfig",
     "JsonFormatter",
     "LoggingConfig",
     "TextFormatter",
+    "Trace",
+    "bound_inspector",
     "check_cache",
     "check_database",
     "check_queue",
@@ -93,5 +118,11 @@ __all__ = [
     "correlate",
     "correlation",
     "correlation_fields",
+    "current_inspector",
+    "current_trace",
+    "inspector_lifespan",
     "probe",
+    "set_inspector",
+    "trace",
+    "use_inspector",
 ]

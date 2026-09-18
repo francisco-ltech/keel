@@ -274,6 +274,9 @@ and reach back for these pieces, rather than starting from this file.
 
 ## Open question, deliberately not settled
 
+*Settled by [ADR 0011](0011-the-request-inspector.md), decision 2: they stay on
+the `Store`. The paragraphs below are kept as the question was asked.*
+
 **Should events be emitted from the `Store` or the `Repository`?** They are
 emitted from the `Store` today, via `EventfulStore`. The argument for moving
 them up: the decorator sees only primitives, so it cannot report that

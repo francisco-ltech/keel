@@ -31,7 +31,8 @@ app/modules/<domain>/
 session is a token in Keel's store, not a row here. `app/security.py` holds the
 bearer dependency and `app/observability.py` the request-id middleware — both
 web-framework vocabulary, so both stay in this project rather than in Keel,
-whose core imports no web framework.
+whose core imports no web framework. `app/inspector.py` is the same kind of
+thing: the endpoints over Keel's request inspector, mounted only under `DEBUG`.
 {% endif %}
 ## Rules
 

@@ -32,7 +32,7 @@ from pathlib import Path
 {% if has_api %}from keel.auth import DEFAULT_TOKEN_TTL, HashingConfig, TokenConfig{% else %}from keel.auth import HashingConfig{% endif %}
 from keel.cache import CacheConfig, StoreConfig
 from keel.database import DatabaseConfig
-from keel.observability import LoggingConfig
+from keel.observability import {% if has_api %}InspectorConfig, {% endif %}LoggingConfig
 {%- if has_worker %}
 from keel.queue import QueueConfig
 {%- endif %}
@@ -144,6 +144,26 @@ class LoggingSettings(BaseSettings):
     formatter: str = Field(default="json", validation_alias=AliasChoices("LOG_FORMAT"))
 
 {% if has_api %}
+class InspectorSettings(BaseSettings):
+    """How much the request inspector keeps, while ``DEBUG`` has it recording.
+
+    There is no ``enabled`` here on purpose: the inspector serves SQL text and
+    log lines to whoever can reach ``/_inspector``, which is developer-facing
+    behaviour by definition, so ``DEBUG`` is its switch and there is no second
+    one to leave on by mistake.
+
+    Attributes:
+        retain: How many recent requests to keep in memory.
+        parameters: Whether SQL bind parameters are recorded. Off by default,
+            because a password hash and a bearer token both travel as one.
+    """
+
+    model_config = SettingsConfigDict(env_prefix="INSPECTOR_", env_file=".env", extra="ignore")
+
+    retain: int = 100
+    parameters: bool = False
+
+
 class TokenSettings(BaseSettings):
     """Where bearer tokens live and how long they last.
 
@@ -293,6 +313,7 @@ class WorkerSettings(BaseSettings):
         hashing: Password hashing cost, from ``HASHING_*``.
         logging: Log level and shape, from ``LOG_*``.
 {%- if has_api %}
+        inspector: Request inspector retention, from ``INSPECTOR_*``; on under ``DEBUG``.
         token: Bearer token settings, from ``REDIS_URL`` and ``TOKEN_*``.
 {%- endif %}
 {%- if has_worker %}
@@ -317,6 +338,7 @@ class WorkerSettings(BaseSettings):
     hashing: HashingSettings = Field(default_factory=HashingSettings)
     logging: LoggingSettings = Field(default_factory=LoggingSettings)
 {%- if has_api %}
+    inspector: InspectorSettings = Field(default_factory=InspectorSettings)
     token: TokenSettings = Field(default_factory=TokenSettings)
 {%- endif %}
 {%- if has_worker %}
@@ -383,6 +405,19 @@ class WorkerSettings(BaseSettings):
         """
         return LoggingConfig(level=self.logging.level, formatter=self.logging.formatter)
 {%- if has_api %}
+
+    def inspector_config(self) -> InspectorConfig:
+        """Translate the validated settings into Keel's inspector config.
+
+        Returns:
+            The plain dataclass :func:`keel.observability.inspector_lifespan`
+            expects, enabled exactly when ``DEBUG`` is.
+        """
+        return InspectorConfig(
+            enabled=self.debug,
+            retain=self.inspector.retain,
+            parameters=self.inspector.parameters,
+        )
 
     def token_config(self) -> TokenConfig:
         """Translate the validated settings into Keel's token config.

@@ -65,7 +65,7 @@ for the queue after it earned its place in the cache.
 | Decorator | `EventfulStore`, `FakeStore`, `FakeTokenStore` |
 | Virtual Proxy | `CacheProxy`, the `dispatch()` facade |
 | Null Object | `NullStore`, `NullLock` — and declined for a guest `Identity`, ADR 0007 |
-| Observer | `EventDispatcher`; model observers; job lifecycle events |
+| Observer | `EventDispatcher`; model observers; job lifecycle events; the request inspector, as the subscriber ADR 0011 |
 | Test Spy | `FakeStore`, `FakeQueue`, `FakeTokenStore` |
 | Command | `Job` — an operation with its parameters, serialised and executed later |
 | Chain of Responsibility | *Declined twice* — job middleware and authorization. One link is not a chain. ADR 0006, ADR 0008 |
@@ -85,6 +85,7 @@ for the queue after it earned its place in the cache.
 | A check protocol, and a check registry | Readiness | A check is one async function; which dependencies gate readiness is the application's list, not something subsystems add themselves to. ADR 0010. |
 | A guard protocol, and a user provider | Auth | One implementation until sessions exist beside tokens; and the principal's row is the application's schema, not Keel's. ADR 0007. |
 | Decorator over a real backend, for the fake | `FakeQueue` | Works for the cache, where behaviour is cheap to have for real. Running a job would make the test exercise the handler while claiming to test the dispatcher. |
+| A storage seam, and an entry class per kind | The request inspector | A ring buffer answers "the last few requests on this machine"; a reader that outlives the process would earn a driver. Entries are displayed, never dispatched on. ADR 0011. |
 
 ## Note
 

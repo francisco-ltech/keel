@@ -201,9 +201,16 @@ TOKEN_VARIABLES = {
 }
 """Bearer tokens are the API half's: a worker issues and resolves none."""
 
-TOKEN_PROSE = ("TOKEN_", "fake_tokens", "issue_token")
-"""Names only an HTTP edge has. A worker-only project issues no bearer token, so
-prose mentioning one sends its reader looking for a subsystem that is not there."""
+INSPECTOR_VARIABLES = {
+    "INSPECTOR_RETAIN": "23",
+    "INSPECTOR_PARAMETERS": "true",
+}
+"""The request inspector is the API half's too: it records requests, and a worker serves none."""
+
+TOKEN_PROSE = ("TOKEN_", "fake_tokens", "issue_token", "INSPECTOR_", "/_inspector")
+"""Names only an HTTP edge has. A worker-only project issues no bearer token and
+serves no inspector, so prose mentioning either sends its reader looking for a
+subsystem that is not there."""
 
 QUEUE_PROSE = ("fake_queue", "dispatch", "QUEUE_")
 """The mirror image, for a project with no worker."""
@@ -219,7 +226,7 @@ SHAPES = (
         # The point of the question. `saq` is a worker runtime, and a replica
         # that only serves HTTP should not ship one.
         uninstallable=("saq",),
-        variables=TOKEN_VARIABLES,
+        variables=TOKEN_VARIABLES | INSPECTOR_VARIABLES,
         processes=("api",),
         undocumented=QUEUE_PROSE,
     ),
@@ -239,7 +246,7 @@ SHAPES = (
         name="both",
         present=API_FILES + WORKER_FILES,
         importable=("fastapi", "uvicorn", "saq", "pwdlib"),
-        variables=QUEUE_VARIABLES | TOKEN_VARIABLES,
+        variables=QUEUE_VARIABLES | TOKEN_VARIABLES | INSPECTOR_VARIABLES,
         processes=("api", "worker"),
     ),
 )

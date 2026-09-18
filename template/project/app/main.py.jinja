@@ -53,7 +53,7 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from keel.auth import hashing_lifespan, token_lifespan
 from keel.cache import cache_lifespan
-from keel.database import database_lifespan
+from keel.database import current_database, database_lifespan
 from keel.observability import (
     Check,
     check_cache,
@@ -63,16 +63,19 @@ from keel.observability import (
 {%- endif %}
     check_tokens,
     configure_logging,
+    inspector_lifespan,
     probe,
 )
 {%- if has_worker %}
 from keel.queue import queue_lifespan
 {%- endif %}
+from keel.support.events import EventDispatcher
 
 from app import __version__
 from app.errors import register_error_handlers
+from app.inspector import router as inspector_router
 from app.modules import include_modules
-from app.observability import RequestContext
+from app.observability import RequestContext, on_listener_error
 from app.settings import Settings, get_settings
 
 READINESS: dict[str, Check] = {
@@ -107,15 +110,24 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
-        """Bind every subsystem for the life of the process."""
+        """Bind every subsystem for the life of the process.
+
+        One dispatcher for everything that announces: the cache's stores and
+        ``dispatch()`` publish on it, and the inspector reads it under ``DEBUG``.
+        The inspector enters last because it watches what the others bound.
+        """
+        events = EventDispatcher(on_error=on_listener_error)
         async with (
             database_lifespan(config.database_config()),
-            cache_lifespan(config.cache_config()),
+            cache_lifespan(config.cache_config(), events),
             hashing_lifespan(config.hashing_config()),
             token_lifespan(config.token_config()),
 {%- if has_worker %}
-            queue_lifespan(config.queue_config()),
+            queue_lifespan(config.queue_config(), events),
 {%- endif %}
+            inspector_lifespan(
+                config.inspector_config(), database=current_database(), events=events
+            ),
         ):
             yield
 
@@ -131,6 +143,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.add_middleware(RequestContext)
     register_error_handlers(app)
     include_modules(app)
+    if config.debug:
+        # Serves SQL text and log lines to whoever can reach it; see app/inspector.py.
+        app.include_router(inspector_router)
 
     @app.get("/health", tags=["health"])
     async def health() -> dict[str, str]:

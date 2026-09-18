@@ -40,6 +40,8 @@ from keel.cache.events import (
     CounterIncremented,
     KeyForgotten,
     KeyWritten,
+    LockAcquired,
+    LockReleased,
 )
 from keel.cache.fake import CacheAssertionError, FakeStore, Operation
 from keel.cache.lock import NullLock, StoreLock
@@ -115,6 +117,8 @@ __all__ = [
     "KeyForgotten",
     "KeyWritten",
     "Lock",
+    "LockAcquired",
+    "LockReleased",
     "NullLock",
     "NullStore",
     "Operation",

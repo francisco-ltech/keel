@@ -44,12 +44,18 @@ Two names are rewritten on the way out — see :data:`INHERITED_FIELDS` — and 
 parameter is deliberately not called ``context``: ``context_override=`` replaces
 what travels rather than adding to it, which is a surprise worth spelling out in
 the keyword rather than in a docstring nobody opens.
+
+**Every dispatch is announced**, as a :class:`JobDispatched` on the manager's
+dispatcher when it has one, from here rather than from a decorator over the
+driver: only this layer knows whether the push was deferred to the commit, and
+that is the fact an observer — the request inspector — wants to show.
 """
 
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from contextlib import AbstractContextManager
+from dataclasses import dataclass
 from datetime import timedelta
 from types import MappingProxyType
 from typing import Any, Final
@@ -123,6 +129,51 @@ def queue(name: str | None = None) -> Queue:
         The connection.
     """
     return current_queue_manager().connection(name)
+
+
+@dataclass(frozen=True, slots=True)
+class JobDispatched:
+    """A job was handed to the queue.
+
+    A fact, like the worker's events: frozen, no behaviour. Emitted once per
+    envelope, so a ``dispatch_many`` of five is five of these — and emitted
+    when the push is made, not when ``dispatch()`` was called. A dispatch
+    deferred to the commit is announced at the commit, and a unit of work that
+    rolls back announces nothing, because nothing was dispatched.
+
+    Attributes:
+        envelope: What was sealed, including the queue name and the delay.
+        connection: Which queue connection took it.
+        deferred: ``True`` when the push is waiting for the surrounding
+            transaction to commit, which is the default inside a unit of work.
+    """
+
+    envelope: Envelope
+    connection: str
+    deferred: bool = False
+
+
+async def _announce(
+    manager: QueueManager,
+    envelopes: Sequence[Envelope],
+    *,
+    connection: str | None,
+    deferred: bool,
+) -> None:
+    """Emit a :class:`JobDispatched` per envelope, if anything is listening.
+
+    Args:
+        manager: The manager whose dispatcher to use.
+        envelopes: What was dispatched.
+        connection: The connection name the caller asked for, or ``None``.
+        deferred: Whether the push waits for the commit.
+    """
+    events = manager.events
+    if events is None:
+        return
+    name = connection or manager.default_name
+    for envelope in envelopes:
+        await events.dispatch(JobDispatched(envelope=envelope, connection=name, deferred=deferred))
 
 
 def _seconds(delay: float | timedelta) -> float:
@@ -213,16 +264,21 @@ async def dispatch(
     envelope = Envelope.seal(
         job, delay=_seconds(delay), queue=on, context=_travelling(context_override)
     )
-    target = queue(connection)
+    manager = current_queue_manager()
+    target = manager.connection(connection)
 
     if after_commit:
 
         async def push() -> None:
+            await _announce(manager, [envelope], connection=connection, deferred=True)
             await target.push(envelope)
 
         if defer_until_commit(push):
             return envelope.id
 
+    # Announced before the push: the sync driver runs the job inside it, and the
+    # cause must precede its effects on a timeline.
+    await _announce(manager, [envelope], connection=connection, deferred=False)
     return await target.push(envelope)
 
 
@@ -253,16 +309,19 @@ async def dispatch_many(
     envelopes = [
         Envelope.seal(job, delay=_seconds(delay), queue=on, context=travelling) for job in jobs
     ]
-    target = queue(connection)
+    manager = current_queue_manager()
+    target = manager.connection(connection)
 
     if after_commit:
 
         async def push() -> None:
+            await _announce(manager, envelopes, connection=connection, deferred=True)
             await target.push_many(envelopes)
 
         if defer_until_commit(push):
             return [envelope.id for envelope in envelopes]
 
+    await _announce(manager, envelopes, connection=connection, deferred=False)
     return await target.push_many(envelopes)
 
 
@@ -289,6 +348,7 @@ async def dispatch_now(job: Job) -> None:
 
 __all__ = [
     "INHERITED_FIELDS",
+    "JobDispatched",
     "bound_queue_manager",
     "current_queue_manager",
     "dispatch",

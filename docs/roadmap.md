@@ -71,14 +71,14 @@ the slice two review found that one transient Redis error killed the loop and
 cancelled running jobs. A driver fault now pauses the loop that hit it, under a
 backoff, and leaves the rest of the worker alone.
 
-**Left:** the request inspector, and metrics.
+**Slice three is done** ([ADR 0011](adr/0011-the-request-inspector.md)): the
+request inspector. Under `DEBUG` every request is one timeline — its queries
+with durations, cache hits and misses, dispatches and whether they waited for
+the commit, and its log lines — served from `/_inspector`. It closed ADR 0001's
+open question: cache events stay on the `Store`, because the inspector wants
+every round trip rather than the repository's intent.
 
-ADR 0001 still leaves one question open for this phase: whether cache events are
-emitted from the `Store` or the `Repository`. The inspector is the first
-consumer with a real opinion. Slice one removed a confounder — a cache event
-from either layer is now correlatable without plumbing, so the decision can be
-made on what the inspector wants to *see* rather than on which layer can reach a
-request id.
+**Left:** metrics.
 
 ## Beyond, unscheduled
 

@@ -1,0 +1,94 @@
+"""The request inspector, through the application under ``DEBUG``.
+
+What this pins: a request is one timeline with its status on it, the inspector
+does not record itself, nothing about it is reachable without ``DEBUG``, and the
+one secret a registration writes — the password hash, which travels as a bind
+parameter — is on the trace only when ``INSPECTOR_PARAMETERS`` says so.
+"""
+
+from __future__ import annotations
+
+import json
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+
+import pytest
+from httpx import ASGITransport, AsyncClient
+from keel.database import current_database
+from keel.testing import rolled_back_database
+
+from app.main import create_app
+from app.settings import InspectorSettings, Settings
+
+pytestmark = pytest.mark.anyio
+
+
+@asynccontextmanager
+async def serving(settings: Settings, *, parameters: bool = False) -> AsyncIterator[AsyncClient]:
+    """A client against an application built with ``DEBUG`` on."""
+    debug = settings.model_copy(
+        update={"debug": True, "inspector": InspectorSettings(parameters=parameters)}
+    )
+    application = create_app(debug)
+    async with (
+        application.router.lifespan_context(application),
+        rolled_back_database(current_database()),
+    ):
+        transport = ASGITransport(app=application)
+        async with AsyncClient(transport=transport, base_url="http://test") as http:
+            yield http
+
+
+@pytest.fixture
+async def debug_client(settings: Settings) -> AsyncIterator[AsyncClient]:
+    async with serving(settings) as http:
+        yield http
+
+
+async def test_a_request_is_recorded_as_one_timeline(
+    debug_client: AsyncClient, user_payload: dict[str, str]
+) -> None:
+    created = await debug_client.post("/users", json=user_payload)
+    assert created.status_code == 201
+
+    listing = (await debug_client.get("/_inspector/requests")).json()
+    names = [recorded["name"] for recorded in listing]
+    assert names[0] == "POST /users", "newest first"
+    assert not any(name.startswith("GET /_inspector") for name in names)
+
+    summary = listing[0]
+    assert summary["fields"]["status"] == "201"
+    assert summary["fields"]["request_id"] == created.headers["X-Request-ID"]
+    assert summary["counts"]["query"] >= 1
+    assert summary["duration"] > 0
+
+    detail = (await debug_client.get(f"/_inspector/requests/{summary['id']}")).json()
+    kinds = {entry["kind"] for entry in detail["entries"]}
+    assert {"query", "log"} <= kinds
+    assert any(entry["summary"].startswith("INSERT INTO users") for entry in detail["entries"])
+
+
+@pytest.mark.parametrize("parameters", [False, True], ids=["off", "on"])
+async def test_the_password_hash_is_on_the_trace_only_when_parameters_are(
+    settings: Settings, user_payload: dict[str, str], parameters: bool
+) -> None:
+    """The plaintext never reaches a bind parameter; the Argon2 hash always does."""
+    async with serving(settings, parameters=parameters) as http:
+        assert (await http.post("/users", json=user_payload)).status_code == 201
+        summary = (await http.get("/_inspector/requests")).json()[0]
+        detail = (await http.get(f"/_inspector/requests/{summary['id']}")).json()
+
+    rendered = json.dumps(detail)
+    assert user_payload["password"] not in rendered
+    assert ("$argon2" in rendered) is parameters
+
+
+async def test_the_inspector_is_not_mounted_without_debug(client: AsyncClient) -> None:
+    assert (await client.get("/_inspector/requests")).status_code == 404
+
+
+async def test_a_dropped_request_is_a_problem(debug_client: AsyncClient) -> None:
+    response = await debug_client.get("/_inspector/requests/nope")
+
+    assert response.status_code == 404
+    assert response.headers["content-type"].startswith("application/problem+json")

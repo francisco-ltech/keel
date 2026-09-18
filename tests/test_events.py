@@ -24,6 +24,8 @@ from keel.cache.events import (
     CounterIncremented,
     KeyForgotten,
     KeyWritten,
+    LockAcquired,
+    LockReleased,
 )
 from keel.cache.stores.array import ArrayStore
 from keel.cache.stores.eventful import EventfulStore
@@ -493,23 +495,54 @@ async def test_flush_emits_cache_flushed(store: EventfulStore, seen: list[CacheE
     assert seen == [CacheFlushed("sessions")]
 
 
-async def test_a_lock_is_delegated_without_emitting_cache_events(
+async def test_a_lock_announces_itself_but_not_its_reads_and_writes(
     store: EventfulStore, seen: list[CacheEvent]
 ) -> None:
-    """A lock's reads and writes are coordination, not caching."""
+    """A lock's reads and writes are coordination, not caching; the lock itself is news.
+
+    The first rule stood alone until the request inspector needed to explain a
+    single-flight wait (ADR 0011): now taking and releasing are announced, and
+    the key traffic underneath still is not.
+    """
     lock = store.lock("resource", 30)
 
     assert await lock.acquire() is True
     assert await lock.get_owner() == lock.owner
     assert await lock.release() is True
+    assert await lock.release() is False, "not held, so nothing to announce"
 
-    assert seen == []
+    assert seen == [
+        LockAcquired("sessions", "resource", lock.owner),
+        LockReleased("sessions", "resource"),
+    ]
+
+
+async def test_a_blocked_lock_reports_its_wait(
+    store: EventfulStore, seen: list[CacheEvent]
+) -> None:
+    holder = store.lock("resource", 30)
+    assert await holder.acquire()
+    waiter = store.lock("resource", 30)
+
+    async def let_go() -> None:
+        await anyio.sleep(0.1)
+        await holder.release()
+
+    async with anyio.create_task_group() as tasks:
+        tasks.start_soon(let_go)
+        await waiter.block(2.0, poll=0.01)
+
+    acquired = [event for event in seen if isinstance(event, LockAcquired)]
+    assert [event.waited >= 0.05 for event in acquired] == [False, True]
 
 
 async def test_lock_construction_is_delegated_to_the_inner_store(store: EventfulStore) -> None:
     from keel.cache.lock import StoreLock
+    from keel.cache.stores.eventful import EventfulLock
 
-    assert isinstance(store.lock("resource"), StoreLock)
+    lock = store.lock("resource")
+    assert isinstance(lock, EventfulLock)
+    assert isinstance(lock._inner, StoreLock)
 
 
 def test_the_wrapper_delegates_its_capability_report(store: EventfulStore) -> None:

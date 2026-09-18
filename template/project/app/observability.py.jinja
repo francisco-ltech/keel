@@ -34,6 +34,13 @@ application: ``ServerErrorMiddleware`` sees a response already started and does
 what it does for any half-sent response — re-raises, so the server still logs the
 traceback and still counts the failure.
 
+**Under ``DEBUG`` the request is also recorded.** The same block that binds the
+id opens a :func:`keel.observability.trace`, so every query, cache call,
+dispatch and log line the request produces lands on one timeline, tagged with
+the status on the way out; ``app/inspector.py`` serves them. With the inspector
+off, ``trace`` yields ``None`` and costs a function call. The inspector's own
+requests are not recorded, or the listing would fill with itself.
+
 **This middleware lives here rather than in Keel**, for the reason
 ``app/security.py`` does: it is web-framework vocabulary, and Keel's core imports
 no web framework so that a worker-only service does not pay for one.
@@ -44,10 +51,11 @@ from __future__ import annotations
 import logging
 import re
 import time
-from typing import TYPE_CHECKING, Final
+from contextlib import nullcontext
+from typing import TYPE_CHECKING, Any, Final
 from uuid import uuid4
 
-from keel.observability import correlate
+from keel.observability import correlate, trace
 from starlette.datastructures import MutableHeaders
 from starlette.requests import Request
 
@@ -64,6 +72,11 @@ REQUEST_ID_HEADER: Final = "X-Request-ID"
 One name for both directions, so a client can quote back the id it was given and
 a caller that minted its own sees the same value it sent.
 """
+
+INSPECTOR_PREFIX: Final = "/_inspector"
+"""Where ``app/inspector.py`` mounts. Nothing under it is recorded, or the listing
+would fill with itself. Defined here so the router imports the middleware's
+constant rather than the middleware importing a router."""
 
 SAFE_REQUEST_ID: Final = re.compile(r"\A[A-Za-z0-9._-]{1,128}\Z")
 """What an inbound request id may contain. Anything else is replaced, not cleaned.
@@ -130,10 +143,16 @@ class RequestContext:
             return
 
         request_id = inbound_request_id(scope) or uuid4().hex
+        method, path = scope.get("method", "-"), scope.get("path", "-")
         began = time.perf_counter()
         status = 500
         replied = False
         failure: BaseException | None = None
+        recording = (
+            nullcontext(None)
+            if path == INSPECTOR_PREFIX or path.startswith(f"{INSPECTOR_PREFIX}/")
+            else trace(f"{method} {path}")
+        )
 
         async def relay(message: Message) -> None:
             """Pass *message* on, stamping the id onto the response head."""
@@ -144,7 +163,7 @@ class RequestContext:
                 MutableHeaders(scope=message)[REQUEST_ID_HEADER] = request_id
             await send(message)
 
-        with correlate(request_id=request_id):
+        with correlate(request_id=request_id), recording as recorded:
             try:
                 await self.app(scope, receive, relay)
             except Exception as exc:
@@ -153,15 +172,28 @@ class RequestContext:
                     await server_error(scope, receive, relay)
                 raise
             finally:
+                if recorded is not None:
+                    recorded.tag(status=status)
                 logger.log(
                     logging.ERROR if failure is not None else logging.INFO,
                     "%s %s %s in %.1fms",
-                    scope.get("method", "-"),
-                    scope.get("path", "-"),
+                    method,
+                    path,
                     status,
                     (time.perf_counter() - began) * 1000,
                     exc_info=failure,
                 )
+
+
+def on_listener_error(error: BaseException, event: Any) -> None:
+    """Report an event listener that raised, without failing the request that emitted.
+
+    Args:
+        error: What the listener raised.
+        event: The event being dispatched. ``Any`` because a dispatcher routes
+            every event type through one handler.
+    """
+    logger.warning("event listener failed on %r: %s", event, error)
 
 
 async def server_error(scope: Scope, receive: Receive, send: Send) -> None:
@@ -187,9 +219,11 @@ async def server_error(scope: Scope, receive: Receive, send: Send) -> None:
 
 
 __all__ = [
+    "INSPECTOR_PREFIX",
     "REQUEST_ID_HEADER",
     "SAFE_REQUEST_ID",
     "RequestContext",
     "inbound_request_id",
+    "on_listener_error",
     "server_error",
 ]

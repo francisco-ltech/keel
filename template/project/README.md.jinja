@@ -56,6 +56,7 @@ app/
   errors.py        the error taxonomy{% if has_api %}, and RFC 9457 problem+json for it{% endif %}
 {% if has_api %}  security.py      the bearer-token dependency: Caller and MaybeCaller
   observability.py the request id: bound for the request, returned on the reply
+  inspector.py     /_inspector under DEBUG: each request as a timeline of what it did
 {% endif %}  policies.py      who may do what, per resource type
   modules/
     __init__.py    the registry: {% if has_api %}MODULES{% if has_worker %} and JOBS{% endif %}{% else %}JOBS{% endif %}
@@ -327,6 +328,15 @@ inbound `X-Request-ID`, once it has checked the value is short and has no quotes
 or newlines in it — binds it for the request, and returns it on the response.
 Every line written while that request is being served carries it, including
 lines from modules that only ever called `logging.getLogger`.
+
+**Under `DEBUG=true`, every request is also recorded as a timeline.**
+`app/inspector.py` serves the last `INSPECTOR_RETAIN` requests at
+`/_inspector/requests`: each one's queries with their durations, cache hits and
+misses,{% if has_worker %} jobs dispatched and whether they waited for the commit,{% endif %} and the log
+lines it wrote. It is the tool for "this endpoint is slow" — open the trace and
+count the queries. The endpoint exists only under `DEBUG`, because it shows SQL
+and log text to whoever can reach it, and bind parameters stay out unless
+`INSPECTOR_PARAMETERS=true`.
 {% endif %}{% if has_worker %}
 **And it travels.** `dispatch()` seals the fields in effect onto the envelope,
 and the worker binds them again around the attempt. So the `IndexItem` line the

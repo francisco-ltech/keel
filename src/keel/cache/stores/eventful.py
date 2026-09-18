@@ -21,8 +21,10 @@ dispatch loop.
 
 from __future__ import annotations
 
+import time
 from collections.abc import Mapping, Sequence
-from typing import Any
+from types import TracebackType
+from typing import Any, Self
 
 from keel.cache.events import (
     CacheFlushed,
@@ -31,8 +33,11 @@ from keel.cache.events import (
     CounterIncremented,
     KeyForgotten,
     KeyWritten,
+    LockAcquired,
+    LockReleased,
 )
 from keel.contracts.cache import Lock, Store
+from keel.exceptions import LockTimeoutError
 from keel.support.events import EventDispatcher
 from keel.support.keys import KeyNamespace
 from keel.support.sentinels import Maybe, is_missing
@@ -214,11 +219,13 @@ class EventfulStore:
         return flushed
 
     def lock(self, name: str, ttl: float = 60.0, *, owner: str | None = None) -> Lock:
-        """Build a lock on the wrapped store.
+        """Build a lock on the wrapped store, announcing when it is taken and let go.
 
-        Locks are delegated undecorated: a lock's reads and writes are
-        coordination, not caching, and surfacing them as cache hits would make
-        an observer's timeline misleading.
+        The lock's own reads and writes stay silent: they are coordination, not
+        caching, and surfacing them as cache hits would make an observer's
+        timeline misleading. What *is* worth showing is the lock itself — a
+        single-flight ``remember`` that waited five seconds behind another
+        caller's recompute is five seconds an inspector must be able to explain.
 
         Args:
             name: The lock's name.
@@ -228,8 +235,116 @@ class EventfulStore:
         Returns:
             An unacquired lock.
         """
-        return self._inner.lock(name, ttl, owner=owner)
+        return EventfulLock(self._inner.lock(name, ttl, owner=owner), self._events, self._name)
 
     async def close(self) -> None:
         """Close the wrapped store."""
         await self._inner.close()
+
+
+class EventfulLock:
+    """Wraps a lock and announces it being taken and released.
+
+    The same Decorator as :class:`EventfulStore`, one level down: every call is
+    forwarded to the wrapped lock, and two of them are reported. ``block``
+    reports how long it waited, because that wait is the thing a timeline has
+    to account for.
+
+    Args:
+        inner: The lock to wrap.
+        events: The dispatcher to publish to.
+        store: The store's configured name, carried on every event.
+    """
+
+    __slots__ = ("_events", "_inner", "_store")
+
+    def __init__(self, inner: Lock, events: EventDispatcher, store: str) -> None:
+        self._inner = inner
+        self._events = events
+        self._store = store
+
+    @property
+    def name(self) -> str:
+        """Delegated to the wrapped lock."""
+        return self._inner.name
+
+    @property
+    def owner(self) -> str:
+        """Delegated to the wrapped lock."""
+        return self._inner.owner
+
+    async def acquire(self) -> bool:
+        """Attempt to take the lock, announcing success.
+
+        Returns:
+            Whether it was taken.
+        """
+        taken = await self._inner.acquire()
+        if taken:
+            await self._events.dispatch(LockAcquired(self._store, self.name, self.owner))
+        return taken
+
+    async def release(self) -> bool:
+        """Release the lock if this instance owns it, announcing when it did.
+
+        Returns:
+            Whether it was released.
+        """
+        released = await self._inner.release()
+        if released:
+            await self._events.dispatch(LockReleased(self._store, self.name))
+        return released
+
+    async def force_release(self) -> None:
+        """Release the lock whoever holds it, and say so."""
+        await self._inner.force_release()
+        await self._events.dispatch(LockReleased(self._store, self.name))
+
+    async def get_owner(self) -> str | None:
+        """Delegated to the wrapped lock.
+
+        Returns:
+            The owner token, or ``None`` if the lock is free.
+        """
+        return await self._inner.get_owner()
+
+    async def block(self, timeout: float, *, poll: float = 0.05) -> Self:
+        """Wait for the lock, then take it, reporting how long the wait was.
+
+        Args:
+            timeout: Seconds to wait before giving up.
+            poll: Seconds between attempts.
+
+        Returns:
+            This lock, now held.
+
+        Raises:
+            LockTimeoutError: If the lock could not be taken within *timeout*.
+        """
+        began = time.monotonic()
+        await self._inner.block(timeout, poll=poll)
+        waited = time.monotonic() - began
+        await self._events.dispatch(LockAcquired(self._store, self.name, self.owner, waited))
+        return self
+
+    async def __aenter__(self) -> Self:
+        """Acquire the lock, or fail at once.
+
+        Returns:
+            The held lock.
+
+        Raises:
+            LockTimeoutError: If the lock is already held elsewhere.
+        """
+        if not await self.acquire():
+            raise LockTimeoutError(self.name, 0.0)
+        return self
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+    ) -> None:
+        """Release the lock, including when the body raised."""
+        await self.release()

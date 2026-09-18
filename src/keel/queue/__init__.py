@@ -48,6 +48,7 @@ from keel.queue.backoff import (
 )
 from keel.queue.config import QueueConfig
 from keel.queue.dispatch import (
+    JobDispatched,
     bound_queue_manager,
     current_queue_manager,
     dispatch,
@@ -69,10 +70,13 @@ from keel.queue.job import (
     resolve_job,
 )
 from keel.queue.manager import QueueManager
+from keel.support.events import EventDispatcher
 
 
 @asynccontextmanager
-async def queue_lifespan(config: QueueConfig) -> AsyncIterator[QueueManager]:
+async def queue_lifespan(
+    config: QueueConfig, events: EventDispatcher | None = None
+) -> AsyncIterator[QueueManager]:
     """Bind a queue manager for the life of the process.
 
     Framework-agnostic, like the cache's and the database's: it drops into a
@@ -85,12 +89,13 @@ async def queue_lifespan(config: QueueConfig) -> AsyncIterator[QueueManager]:
 
     Args:
         config: How to reach the queue.
+        events: A dispatcher to announce dispatches on, or ``None`` for none.
 
     Yields:
         The bound manager.
     """
     previous = bound_queue_manager()
-    manager = QueueManager(config)
+    manager = QueueManager(config, events)
     set_queue_manager(manager)
     try:
         yield manager
@@ -221,6 +226,7 @@ __all__ = [
     "IntervalTrigger",
     "Job",
     "JobDeadLettered",
+    "JobDispatched",
     "JobError",
     "JobEvent",
     "JobRecovered",

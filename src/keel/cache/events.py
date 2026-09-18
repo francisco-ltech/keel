@@ -111,7 +111,23 @@ class LockAcquired(CacheEvent):
     Attributes:
         name: The lock's name.
         owner: The token identifying the holder.
+        waited: Seconds spent in ``block()`` before it was taken; zero for an
+            immediate ``acquire()``. The number a request inspector shows when
+            a single-flight ``remember`` spent its time waiting rather than
+            computing.
     """
 
     name: str = ""
     owner: str = field(default="", repr=False)
+    waited: float = 0.0
+
+
+@dataclass(frozen=True, slots=True)
+class LockReleased(CacheEvent):
+    """A lock was let go, by its holder or by force.
+
+    Attributes:
+        name: The lock's name.
+    """
+
+    name: str = ""
