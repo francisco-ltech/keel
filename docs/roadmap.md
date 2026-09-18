@@ -75,6 +75,16 @@ Four slices, each an ADR, plus one fix the second slice's review found:
 **Not built:** tracing. Exported spans with sampling and retention have no
 caller, and the inspector answers the development half of that question.
 
+## Distribution
+
+Not a phase, and done alongside the last one ([ADR
+0013](adr/0013-the-installer.md)): `uv tool install` from the repository puts a
+`keel` command on the path, `keel new` generates a service pinned to the commit
+its scaffold came from, and `keel update` brings it forward. PyPI is the next
+step there, and needs a release discipline before it needs code — and a
+`LICENSE` file before either, MIT like Laravel's, which the repository does not
+yet carry.
+
 ## Next
 
 Nothing is scheduled. Phase 5 closed with metrics; see below for what would

@@ -23,8 +23,9 @@ Each subsystem is reached the same way: a **facade** the application calls, a
 tests can assert on it. That uniformity is the whole idea, it is what makes a
 set of features feel like one framework.
 
-Everything is local. Nothing is published to any index; the template depends on
-the library by path.
+Nothing is published to an index yet. `keel new` installs the library from this
+repository, pinned to the commit the scaffold came from; a contributor's
+project links a checkout by path instead.
 
 ## Layout
 
@@ -53,25 +54,33 @@ Mail, storage and rate limiting are not in the box yet.
 
 ## Getting started
 
-`just`, not make. `just` alone lists every recipe.
+Install the command once, then generate a service:
+
+```bash
+uv tool install "keel[cli] @ git+https://github.com/francisco-ltech/keel"
+keel new invoices     # asks for a name, a description and the shape
+cd invoices && just up && just migrate && just dev
+```
+
+`keel new` copies the template from this repository, pins the project's Keel
+dependency to the commit the scaffold came from, runs `uv sync`, and makes the
+first commit. `keel update invoices` brings a project forward when the template
+moves. Nothing is on PyPI yet; the git install is the installer ([ADR
+0013](docs/adr/0013-the-installer.md)).
+
+Working on Keel itself is `just`, not make; `just` alone lists every recipe.
 
 ```bash
 just install          # uv sync, every extra included
 just hooks            # the pre-commit and pre-push hooks
 just up               # postgres + redis + mailpit
 just check            # lint, both type checkers, tests
+just new ../my-api    # a project linked to this checkout, editable
 ```
 
 Postgres is on **5433** and Redis on **6380**, to avoid clashing with anything
 already running on the default ports. Override `DATABASE_URL` or `REDIS_URL` to
 point elsewhere. `just doctor` says whether they are actually answering.
-
-Generate an application, then bring it up to date later as the template moves:
-
-```bash
-just new ../my-api    # copier asks for a name, a description and the shape
-just update ../my-api
-```
 
 ## The one rule worth knowing before you write code
 
@@ -102,6 +111,9 @@ starves. See [ADR 0002](docs/adr/0002-the-unit-of-work.md).
   this rather than depending on Advanced-Alchemy.
 - [ADR 0004 — two type checkers](docs/adr/0004-two-type-checkers.md): ty for the
   inner loop, mypy as the gate, and the criteria for dropping one.
+- [ADR 0013 — the installer](docs/adr/0013-the-installer.md): `keel new` and
+  `keel update`, why the template's config moved to the repository root, and why
+  a project pins Keel to the commit its scaffold came from.
 - [ADR 0012 — metrics](docs/adr/0012-metrics.md): a second Observer over the
   inspector's sources, why `prometheus_client` was taken where `structlog` was
   not, every label bounded by construction, and the worker's liveness read at

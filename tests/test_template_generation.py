@@ -34,7 +34,8 @@ import pytest
 import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-TEMPLATE = REPO_ROOT / "template"
+TEMPLATE = REPO_ROOT
+"""The template's root is the repository: copier reads ``copier.yml`` there."""
 
 if not (TEMPLATE / "copier.yml").is_file():  # pragma: no cover - a layout change, not a run
     raise RuntimeError(
@@ -325,10 +326,16 @@ def generated(
             "copy",
             "--trust",
             "--defaults",
+            # HEAD rather than the latest tag, and dirty: the suite must generate
+            # from this working tree, which is what it is checking.
+            "--vcs-ref",
+            "HEAD",
             "--data",
             f"service_shape={shape.name}",
-            # Explicit rather than the template's default: the generated project
-            # depends on Keel by path, which breaks on a checkout elsewhere (as in CI).
+            # By path, not by git: the project must link this checkout, whatever
+            # the repository holds and wherever the checkout lives (as in CI).
+            "--data",
+            "keel_source=path",
             "--data",
             f"keel_path={REPO_ROOT}",
             str(TEMPLATE),

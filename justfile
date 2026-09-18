@@ -175,9 +175,9 @@ doctor:
 # Generate a new application from the starter template.
 [group('scaffold')]
 new DEST:
-    uv run copier copy --trust template {{ DEST }}
+    uv run keel new --source . {{ DEST }}
 
 # Re-apply the template to a project generated earlier, bringing it up to date.
 [group('scaffold')]
 update DEST:
-    cd {{ DEST }} && uv run copier update --trust
+    uv run keel update {{ DEST }}

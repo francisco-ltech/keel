@@ -1,0 +1,12 @@
+# The environment is local; .env.example is the documented one.
+.env
+
+.venv/
+__pycache__/
+*.py[co]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+dist/

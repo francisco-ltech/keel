@@ -622,6 +622,9 @@ dependencies = [
 auth = [
     { name = "pwdlib", extra = ["argon2"] },
 ]
+cli = [
+    { name = "copier" },
+]
 factories = [
     { name = "polyfactory" },
 ]
@@ -641,10 +644,9 @@ queue = [
 [package.dev-dependencies]
 dev = [
     { name = "anyio" },
-    { name = "copier" },
     { name = "fastapi" },
     { name = "httpx" },
-    { name = "keel", extra = ["auth", "factories", "metrics", "migrations", "postgres", "queue"] },
+    { name = "keel", extra = ["auth", "cli", "factories", "metrics", "migrations", "postgres", "queue"] },
     { name = "mypy" },
     { name = "pytest" },
     { name = "pytest-cov" },
@@ -658,6 +660,7 @@ dev = [
 requires-dist = [
     { name = "alembic", marker = "extra == 'migrations'", specifier = ">=1.13" },
     { name = "asyncpg", marker = "extra == 'postgres'", specifier = ">=0.30" },
+    { name = "copier", marker = "extra == 'cli'", specifier = ">=9.4" },
     { name = "polyfactory", marker = "extra == 'factories'", specifier = ">=2.18" },
     { name = "prometheus-client", marker = "extra == 'metrics'", specifier = ">=0.21" },
     { name = "pwdlib", extras = ["argon2"], marker = "extra == 'auth'", specifier = ">=0.2" },
@@ -665,15 +668,14 @@ requires-dist = [
     { name = "saq", marker = "extra == 'queue'", specifier = ">=0.22" },
     { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0.40" },
 ]
-provides-extras = ["postgres", "migrations", "factories", "queue", "auth", "metrics"]
+provides-extras = ["postgres", "migrations", "factories", "queue", "auth", "metrics", "cli"]
 
 [package.metadata.requires-dev]
 dev = [
     { name = "anyio", specifier = ">=4.0" },
-    { name = "copier", specifier = ">=9.4" },
     { name = "fastapi", specifier = ">=0.115" },
     { name = "httpx", specifier = ">=0.27" },
-    { name = "keel", extras = ["postgres", "migrations", "factories", "queue", "auth", "metrics"], editable = "." },
+    { name = "keel", extras = ["postgres", "migrations", "factories", "queue", "auth", "metrics", "cli"], editable = "." },
     { name = "mypy", specifier = ">=1.11" },
     { name = "pytest", specifier = ">=8.0" },
     { name = "pytest-cov", specifier = ">=5.0" },

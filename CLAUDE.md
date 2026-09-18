@@ -41,6 +41,7 @@ them, or the copy drifts and starts lying.
 | `just check` | quick + test. What pre-push runs. |
 | `just test-generator` | generates the template in 3 shapes, ~70s |
 | `just doctor` | whether Postgres and Redis actually answer |
+| `just new DEST` | a project linked to this checkout; `keel new` for users. ADR 0013 |
 
 Postgres is on **5433**, Redis on **6380**, to avoid clashing with anything on
 the default ports. `just up` starts them.
@@ -100,7 +101,7 @@ src/keel/
   observability/  logging, correlation re-exports, readiness checks, the request inspector, metrics
   contracts/  the protocols drivers implement
   support/    binding, manager, events, keys, serialization — subsystem-agnostic
-template/     copier template; three service shapes
+template/     the starter template, three service shapes; copier.yml is at the root
 docs/adr/     why things are the way they are
 ```
 

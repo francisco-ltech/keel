@@ -22,20 +22,27 @@ ruff, ty and mypy inside it. Nothing else proves a template change works.
 To look at output by hand:
 
 ```sh
-uv run copier copy --trust --defaults \
-  --data service_shape=worker \
-  --data keel_path="$PWD" \
-  template /tmp/gen && cd /tmp/gen && uv sync && just check
+uv run keel new --source . --shape worker --defaults /tmp/gen && cd /tmp/gen && just check
 ```
 
-Always pass `keel_path` explicitly.
+`--source .` links the checkout by path. Calling copier directly, pass
+`--vcs-ref HEAD` (or it generates from the last commit, not the working tree),
+`--data keel_source=path` and `--data keel_path="$PWD"`, and give it the
+repository root: `copier.yml` lives there, not under `template/`, because copier
+reads a git template's config from its root (ADR 0013).
 
 ## Traps that have already bitten
 
 - **A default that is only right on one machine.** `keel_path` defaulted to an
   absolute home directory, and the generator test passed `--defaults`, so CI
-  generated projects pointing at a directory that did not exist. Derive from
-  `{{ _copier_conf.src_path }}` and pass it explicitly in tests.
+  generated projects pointing at a directory that did not exist. It is now asked
+  only for `keel_source=path`, and the tests pass it explicitly.
+- **Generating from the last commit.** A local git checkout is a VCS template
+  to copier, and its default revision is the latest tag, or `HEAD` clean. Only
+  `--vcs-ref HEAD` includes the working tree's uncommitted changes — and a
+  project generated that way cannot be `keel update`d, because the commit it
+  records is a temporary one. Generate from a clean checkout when the update
+  path matters.
 - **A module a worker cannot import.** `errors.py` imported FastAPI at module
   scope, and the job handler catches its exceptions — so a worker-only project
   could not import its own error taxonomy. Keep exception classes

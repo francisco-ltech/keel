@@ -19,9 +19,9 @@ a command rather than a project.
 {% if has_api %}| API | `uvicorn app.main:app` | serves HTTP{% if has_worker %}, dispatches jobs{% endif %} |
 {% endif %}{% if has_worker %}| Worker | `python -m app.worker` | consumes jobs, runs the schedule |
 {% endif %}
-{% if not has_worker %}Adding the worker half later is `copier update --trust -d service_shape=both` —
+{% if not has_worker %}Adding the worker half later is `keel update --data service_shape=both` —
 it writes `app/worker.py`, `app/healthcheck.py`, `app/modules/<domain>/jobs.py`
-and the queue's migration into the project you already have.{% elif not has_api %}Adding the API half later is `copier update --trust -d service_shape=api` — it
+and the queue's migration into the project you already have.{% elif not has_api %}Adding the API half later is `keel update --data service_shape=both` — it
 writes `app/main.py` and the routers into the project you already have.{% else %}Both run from the same image with the same configuration. A job handler calls
 the same service function a router calls; there is no worker-only path into a
 domain, which is what stops the two halves from drifting.{% endif %}

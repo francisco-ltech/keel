@@ -1,13 +1,18 @@
 # Copier template for a new Keel application.
 #
-# Everything here is local: the generated project depends on the Keel package by
-# path, nothing is published to an index, and no git remote is involved.
+# At the repository root rather than under template/, because copier reads a
+# git template's configuration from its root: that is what lets
+# `keel new invoices` copy straight from the repository, and `keel update` bring
+# a project forward when the template moves. The files rendered are the ones
+# under `_subdirectory`; nothing else in this repository reaches a project.
 #
-#     uv run copier copy --trust template /path/to/new-app
+#     keel new /path/to/new-app                 # from the repository
+#     uv run keel new --source . /path/to/app   # from this checkout, by path
 #
-# `--trust` is needed because the template renders file *names* from answers.
+# `--trust` (unsafe) is needed because the template renders file *names* from
+# answers; the CLI passes it.
 
-_subdirectory: "project"
+_subdirectory: "template/project"
 _templates_suffix: ".jinja"
 
 # `_exclude` is templated: one block decides what each service shape scaffolds,
@@ -58,10 +63,10 @@ _message_after_copy: |
   {{ postgres_port }} and {{ redis_port }}; `just up` starts its own if you need them.
   {% if not has_worker %}
   This is an API-only scaffold. Adding the worker half later is
-  `copier update --trust -d service_shape=both`, not a new project.
+  `keel update --data service_shape=both`, not a new project.
   {% elif not has_api %}
   This is a worker-only scaffold. Adding the API half later is
-  `copier update --trust -d service_shape=both`, not a new project.
+  `keel update --data service_shape=both`, not a new project.
   {% endif %}
 
 project_name:
@@ -127,10 +132,25 @@ redis_port:
   help: Host port Redis listens on
   default: 6380
 
-keel_path:
+keel_source:
   type: str
   help: >-
-    Path to the Keel package this project depends on. Derived from where the
-    template was copied from, so it is correct on any checkout rather than
-    hardcoding one person's directory.
-  default: "{{ _copier_conf.src_path }}/.."
+    Where the generated project takes the Keel library from. `git` pins it to the
+    exact commit this template came from, so the scaffold and the library never
+    disagree; `path` links a local checkout, editable, for developing Keel itself.
+  default: git
+  choices:
+    "The Keel repository, pinned to this template's commit": git
+    "A local checkout, editable": path
+
+keel_repository:
+  type: str
+  help: The git URL the generated project installs Keel from.
+  default: https://github.com/francisco-ltech/keel
+  when: "{{ keel_source == 'git' }}"
+
+keel_path:
+  type: str
+  help: Absolute path to the Keel checkout to link.
+  default: "{{ _copier_conf.src_path }}"
+  when: "{{ keel_source == 'path' }}"
