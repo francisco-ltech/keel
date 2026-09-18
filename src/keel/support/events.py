@@ -107,3 +107,62 @@ class EventDispatcher:
     def clear(self) -> None:
         """Remove every listener. Intended for test teardown."""
         self._listeners.clear()
+
+
+class Subscriptions:
+    """What an observer holds so it can let go of every source exactly once.
+
+    The request inspector and metrics each attach to several sources — an
+    engine's events, a dispatcher, the logging root — and each attachment
+    returns a remover. Three rules fall out of that, and this is where they
+    live so neither observer re-derives them: attaching to the same source
+    twice attaches once, or every statement is counted twice; a source stays
+    attached until every holder that asked for it has let go, or the first
+    holder's exit silently stops the second one's counting; and removing more
+    times than adding is harmless, because a lifespan's exit and a handle a
+    test holds may both try.
+    """
+
+    __slots__ = ("_holders", "_removers")
+
+    def __init__(self) -> None:
+        self._removers: dict[object, Callable[[], None]] = {}
+        self._holders: dict[object, int] = {}
+
+    def add(self, key: object, attach: Callable[[], Callable[[], None]]) -> object:
+        """Attach to a source, or count one more holder of it.
+
+        Args:
+            key: What identifies the source, such as ``("engine", id(engine))``.
+            attach: Performs the attachment and returns what undoes it. Called
+                only for the first holder.
+
+        Returns:
+            The key, for a caller that will hand it back to :meth:`remove`.
+        """
+        if key not in self._removers:
+            self._removers[key] = attach()
+        self._holders[key] = self._holders.get(key, 0) + 1
+        return key
+
+    def remove(self, key: object) -> None:
+        """Let go of one source; it is detached once nobody else holds it.
+
+        Args:
+            key: The key given to :meth:`add`.
+        """
+        remaining = self._holders.get(key)
+        if remaining is None:
+            return
+        if remaining > 1:
+            self._holders[key] = remaining - 1
+            return
+        del self._holders[key]
+        self._removers.pop(key)()
+
+    def clear(self) -> None:
+        """Detach from every source, whoever else holds it."""
+        self._holders.clear()
+        for remover in list(self._removers.values()):
+            remover()
+        self._removers.clear()

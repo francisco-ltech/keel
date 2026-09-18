@@ -7,7 +7,7 @@ requires-python = ">={{ python_version }}"
 dependencies = [
     # Keel is a path dependency: nothing here is published to an index. The extras
     # track the shape — `auth` pulls in Argon2, `queue` the worker runtime SAQ.
-    "keel[auth,postgres{% if has_worker %},queue{% endif %}]",
+    "keel[auth,postgres,metrics{% if has_worker %},queue{% endif %}]",
 {%- if has_api %}
     "fastapi>=0.115",
 {%- endif %}

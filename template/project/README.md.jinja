@@ -277,6 +277,11 @@ compose healthcheck. A draining worker still reports alive — liveness that fai
 during a graceful shutdown gets the container killed mid-job. There is no worker
 readiness probe: readiness decides where traffic goes, and a worker takes none.
 
+**Its metrics are the one listener it opens, and only when asked.**
+`WORKER_METRICS_PORT` serves jobs by name and outcome, faults, the jobs in flight
+and how long since the queue last answered — the number that climbs through a
+Redis outage while liveness, correctly, stays green. Zero opens nothing.
+
 Exhausted jobs land in `keel_failed_jobs` with the whole envelope and the
 original traceback, so they can be retried by hand. `app/worker.py` prunes that
 table nightly through `SCHEDULE`, which is also where recurring work goes.
@@ -337,6 +342,12 @@ lines it wrote. It is the tool for "this endpoint is slow" — open the trace an
 count the queries. The endpoint exists only under `DEBUG`, because it shows SQL
 and log text to whoever can reach it, and bind parameters stay out unless
 `INSPECTOR_PARAMETERS=true`.
+
+**In production, the same sources feed `/metrics`.** Requests by route
+template and status with their latency, statements by operation, cache round
+trips by outcome{% if has_worker %}, dispatches, jobs by name and outcome{% endif %}, readiness checks by
+result, and the process's memory and CPU, in Prometheus' format. No path, id or
+statement ever becomes a label. `METRICS_ENABLED=false` leaves it unmounted.
 {% endif %}{% if has_worker %}
 **And it travels.** `dispatch()` seals the fields in effect onto the envelope,
 and the worker binds them again around the attempt. So the `IndexItem` line the

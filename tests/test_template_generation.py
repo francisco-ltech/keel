@@ -189,6 +189,7 @@ QUEUE_VARIABLES = {
     "QUEUE_CONCURRENCY": "23",
     "WORKER_HEALTH_FILE": "/tmp/probe-worker.health",
     "WORKER_HEALTH_MAX_AGE": "29",
+    "WORKER_METRICS_PORT": "9464",
 }
 
 TOKEN_VARIABLES = {
@@ -222,7 +223,7 @@ SHAPES = (
         absent=WORKER_FILES,
         # `pwdlib` arrives through the `keel[auth]` extra rather than directly,
         # and every shape hashes: the users service does it on create.
-        importable=("fastapi", "uvicorn", "pwdlib"),
+        importable=("fastapi", "uvicorn", "pwdlib", "prometheus_client"),
         # The point of the question. `saq` is a worker runtime, and a replica
         # that only serves HTTP should not ship one.
         uninstallable=("saq",),
@@ -234,7 +235,7 @@ SHAPES = (
         name="worker",
         present=WORKER_FILES,
         absent=API_FILES,
-        importable=("saq", "pwdlib"),
+        importable=("saq", "pwdlib", "prometheus_client"),
         # Not merely unused: nothing in a worker-only project may import
         # FastAPI, so a shared module that quietly does fails here.
         uninstallable=("fastapi", "uvicorn"),
@@ -245,7 +246,7 @@ SHAPES = (
     Shape(
         name="both",
         present=API_FILES + WORKER_FILES,
-        importable=("fastapi", "uvicorn", "saq", "pwdlib"),
+        importable=("fastapi", "uvicorn", "saq", "pwdlib", "prometheus_client"),
         variables=QUEUE_VARIABLES | TOKEN_VARIABLES | INSPECTOR_VARIABLES,
         processes=("api", "worker"),
     ),
@@ -605,6 +606,7 @@ def test_every_documented_environment_variable_is_actually_read(
         "LOG_FORMAT": "text",
         "APP_NAME": "Probe App",
         "DEBUG": "true",
+        "METRICS_ENABLED": "false",
         **shape.variables,
     }
     unread = sorted(set(documented) - set(overrides))

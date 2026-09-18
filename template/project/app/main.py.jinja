@@ -50,12 +50,13 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from keel.auth import hashing_lifespan, token_lifespan
 from keel.cache import cache_lifespan
 from keel.database import current_database, database_lifespan
 from keel.observability import (
     Check,
+    bound_metrics,
     check_cache,
     check_database,
 {%- if has_worker %}
@@ -63,7 +64,9 @@ from keel.observability import (
 {%- endif %}
     check_tokens,
     configure_logging,
+    current_metrics,
     inspector_lifespan,
+    metrics_lifespan,
     probe,
 )
 {%- if has_worker %}
@@ -75,7 +78,7 @@ from app import __version__
 from app.errors import register_error_handlers
 from app.inspector import router as inspector_router
 from app.modules import include_modules
-from app.observability import RequestContext, on_listener_error
+from app.observability import METRICS_PATH, RequestContext, on_listener_error
 from app.settings import Settings, get_settings
 
 READINESS: dict[str, Check] = {
@@ -128,6 +131,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             inspector_lifespan(
                 config.inspector_config(), database=current_database(), events=events
             ),
+            metrics_lifespan(config.metrics_config(), database=current_database(), events=events),
         ):
             yield
 
@@ -172,7 +176,25 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         what stops a replica with a wrong ``DATABASE_URL`` from taking traffic.
         """
         report = await probe(READINESS)
+        if (metrics := bound_metrics()) is not None:
+            metrics.readiness(report)
         return JSONResponse(status_code=200 if report.ok else 503, content=report.as_dict())
+
+    if config.metrics.enabled:
+
+        @app.get(METRICS_PATH, tags=["health"], include_in_schema=False)
+        async def metrics_exposition() -> Response:
+            """What a Prometheus scraper reads.
+
+            Requests by route template, statements by operation, cache round
+            trips by outcome, jobs by name and outcome, readiness checks by
+            result, and the process's own memory and CPU. No identifiers and no
+            statement text, which is why it is served to whoever asks; a
+            deployment that wants it private puts the scraper on the same
+            network and the port behind it.
+            """
+            body, content_type = current_metrics().render()
+            return Response(content=body, media_type=content_type)
 
     return app
 

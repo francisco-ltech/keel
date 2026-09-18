@@ -79,6 +79,7 @@ from sqlalchemy import event as sqla_event
 from keel.exceptions import ConfigurationError
 from keel.support.binding import Binding
 from keel.support.correlation import correlation
+from keel.support.events import Subscriptions
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -115,18 +116,6 @@ _TIMER_KEY: Final = "keel_inspector_began"
 """Where the statement's start time is parked on the connection between the two engine hooks."""
 
 _WHITESPACE: Final = re.compile(r"\s+")
-
-_CACHE_VERBS: Final[Mapping[str, str]] = {
-    "CacheHit": "hit",
-    "CacheMissed": "miss",
-    "KeyWritten": "write",
-    "KeyForgotten": "forget",
-    "CounterIncremented": "increment",
-    "CacheFlushed": "flush",
-    "LockAcquired": "lock",
-    "LockReleased": "unlock",
-}
-"""How each cache event reads on the timeline. Keyed by class name so nothing is imported."""
 
 _NEVER_RECORDED: Final[frozenset[str]] = frozenset({"value", "owner"})
 """Cache event fields kept off the trace: a value may be a secret, an owner is a lock token."""
@@ -408,12 +397,11 @@ class Inspector:
         config: What to record and how much to keep.
     """
 
-    __slots__ = ("_config", "_detach", "_watched", "recent")
+    __slots__ = ("_config", "_subscriptions", "recent")
 
     def __init__(self, config: InspectorConfig) -> None:
         self._config = config
-        self._detach: dict[object, Callable[[], None]] = {}
-        self._watched: set[object] = set()
+        self._subscriptions = Subscriptions()
         self.recent: deque[Trace] = deque(maxlen=config.retain)
 
     @property
@@ -504,38 +492,24 @@ class Inspector:
         keys: list[object] = []
         if not self._config.enabled:
             return lambda: None
+        held = self._subscriptions
         if database is not None:
             engine = database.engine.sync_engine
-            keys.append(
-                self._subscribe(("engine", id(engine)), lambda: self._watch_engine(database))
-            )
+            keys.append(held.add(("engine", id(engine)), lambda: self._watch_engine(database)))
         if events is not None:
-            keys.append(self._subscribe(("events", id(events)), lambda: self._watch_events(events)))
+            keys.append(held.add(("events", id(events)), lambda: self._watch_events(events)))
         if logs:
-            keys.append(self._subscribe("logs", self._watch_logging))
+            keys.append(held.add("logs", self._watch_logging))
 
         def detach() -> None:
             for key in keys:
-                self._unsubscribe(key)
+                held.remove(key)
 
         return detach
 
     def detach(self) -> None:
         """Remove every subscription made through :meth:`watch`."""
-        for key in list(self._detach):
-            self._unsubscribe(key)
-
-    def _subscribe(self, key: object, attach: Callable[[], Callable[[], None]]) -> object:
-        if key not in self._watched:
-            self._watched.add(key)
-            self._detach[key] = attach()
-        return key
-
-    def _unsubscribe(self, key: object) -> None:
-        remover = self._detach.pop(key, None)
-        if remover is not None:
-            self._watched.discard(key)
-            remover()
+        self._subscriptions.clear()
 
     def _watch_engine(self, database: Database) -> Callable[[], None]:
         engine = database.engine.sync_engine
@@ -605,10 +579,11 @@ class Inspector:
         trace = _current.get()
         if trace is None:
             return
-        name = type(event).__name__
-        verb = _CACHE_VERBS.get(name, name.lower())
+        from keel.cache.events import verb
+
+        reading = verb(event)
         subject = getattr(event, "key", None) or getattr(event, "name", None)
-        summary = f"{verb} {subject}" if subject else verb
+        summary = f"{reading} {subject}" if subject else reading
         waited = getattr(event, "waited", 0.0)
         if waited >= 0.001:
             summary += f" after waiting {waited * 1000:.0f}ms"

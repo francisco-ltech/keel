@@ -1,0 +1,36 @@
+"""The worker process's wiring, entered the way ``serve`` enters it.
+
+One dispatcher feeds the cache, ``dispatch()``, the worker and metrics. The
+review of ``app/worker.py`` found the cache and the queue bound with no
+dispatcher at all, so a worker's cache and dispatch metrics could never move;
+this pins that every one of them does.
+"""
+
+from __future__ import annotations
+
+import pytest
+from keel.cache import cache
+from keel.queue import dispatch
+
+from app.modules.items.jobs import IndexItem
+from app.settings import Settings
+from app.worker import wired
+
+pytestmark = pytest.mark.anyio
+
+
+async def test_the_worker_counts_its_cache_and_its_dispatches(settings: Settings) -> None:
+    async with wired(settings) as (worker, metrics):
+        assert worker.running is False, "wired, not yet serving"
+        await cache.put("wiring:probe", 1)
+        assert await cache.get("wiring:probe") == 1
+        nil = "00000000-0000-4000-8000-000000000000"
+        probe = IndexItem(item_id=nil, owner_id=nil)
+        await dispatch(probe, after_commit=False)
+
+        body = metrics.render()[0].decode()
+
+    assert 'keel_cache_operations_total{operation="write",store="default"} 1.0' in body
+    assert 'keel_cache_operations_total{operation="hit",store="default"} 1.0' in body
+    assert 'keel_jobs_dispatched_total{deferred="false",queue="default"} 1.0' in body
+    assert "keel_worker_jobs_in_flight 0.0" in body

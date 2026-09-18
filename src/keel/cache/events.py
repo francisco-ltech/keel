@@ -12,8 +12,10 @@ what reached the backend. An observer showing ``user:42`` is useful; one showing
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Any
+from types import MappingProxyType
+from typing import Any, Final
 
 
 @dataclass(frozen=True, slots=True)
@@ -131,3 +133,30 @@ class LockReleased(CacheEvent):
     """
 
     name: str = ""
+
+
+EVENT_VERBS: Final[Mapping[type[CacheEvent], str]] = MappingProxyType(
+    {
+        CacheHit: "hit",
+        CacheMissed: "miss",
+        KeyWritten: "write",
+        KeyForgotten: "forget",
+        CounterIncremented: "increment",
+        CacheFlushed: "flush",
+        LockAcquired: "lock",
+        LockReleased: "unlock",
+    }
+)
+"""How each event reads as one word: a timeline's verb, a counter's label."""
+
+
+def verb(event: CacheEvent) -> str:
+    """Return the one-word reading of *event*.
+
+    Args:
+        event: Any cache event, including one a driver added.
+
+    Returns:
+        The verb from :data:`EVENT_VERBS`, or the class name lowercased.
+    """
+    return EVENT_VERBS.get(type(event), type(event).__name__.lower())

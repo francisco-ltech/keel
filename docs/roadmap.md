@@ -16,6 +16,7 @@ which is Phase 4"), so they are stable once assigned.
 | 2 | **The data layer.** Generic repository, UUIDv7 keys, soft deletes as a global scope, keyset pagination, observers after commit, factories and seeders, advisory-locked migrations. | [0003](adr/0003-the-data-layer.md) |
 | 3 | **The queue.** Jobs as Commands, dispatch that waits for the commit, the SAQ driver, a supervised worker with orphan recovery, durable failed jobs, and cron. | [0006](adr/0006-the-queue.md) |
 | 4 | **Auth and authz.** The current-identity context, Argon2 hashing, bearer tokens, and authorization policies. Detail below. | [0007](adr/0007-identity-and-tokens.md), [0008](adr/0008-authorization-policies.md) |
+| 5 | **Observability.** Correlation and structured logging, readiness checks, the worker's fault handling, a development request inspector, and Prometheus metrics over the same sources. Detail below. | [0009](adr/0009-correlation-and-logging.md), [0010](adr/0010-readiness-checks.md), [0011](adr/0011-the-request-inspector.md), [0012](adr/0012-metrics.md) |
 
 Phase 1 ran before Phase 0 on purpose. The cache is the smallest subsystem that
 still needs every part of the shape — facade, driver, fake, contract suite — so
@@ -50,35 +51,34 @@ ADR 0003 because they needed a current-user context, and multi-tenancy, whose
 mechanism is the global query scope the soft-delete listener demonstrates.
 Neither is built.
 
+### Phase 5 in detail
+
+Four slices, each an ADR, plus one fix the second slice's review found:
+
+* **Correlation and logging** ([0009](adr/0009-correlation-and-logging.md)) —
+  a context of fields, a record factory that puts them on every log line, and
+  `dispatch()` sealing them onto the envelope so a worker's lines name the
+  request that caused the work.
+* **Readiness** ([0010](adr/0010-readiness-checks.md)) — `probe()` over named
+  checks, concurrent and each under a deadline, on a database connection of
+  its own.
+* **The worker survives a driver fault** ([0006, decision
+  10](adr/0006-the-queue.md)) — a loop that hits a Redis error pauses under a
+  backoff rather than cancelling every running job.
+* **The request inspector** ([0011](adr/0011-the-request-inspector.md)) —
+  under `DEBUG`, every request as one timeline. It closed ADR 0001's open
+  question: cache events stay on the `Store`.
+* **Metrics** ([0012](adr/0012-metrics.md)) — Prometheus counters and
+  histograms over the same sources, every label bounded by construction, and
+  the worker's liveness numbers read off the worker at scrape time.
+
+**Not built:** tracing. Exported spans with sampling and retention have no
+caller, and the inspector answers the development half of that question.
+
 ## Next
 
-### Phase 5 — observability
-
-**Slice one is done** ([ADR 0009](adr/0009-correlation-and-logging.md)): a
-correlation context, structured logging that carries it wherever a record is
-emitted, and `dispatch()` sealing it onto the envelope so a worker's log lines
-name the request that caused the work. `Envelope.context` has promised that
-since Phase 3 and nothing had ever filled it.
-
-**Slice two is done** ([ADR 0010](adr/0010-readiness-checks.md)): `probe()`
-runs a set of named checks concurrently, each under a deadline, and the
-template's `/ready` asks every dependency the API binds rather than Postgres
-alone. The database is probed on a connection of its own, so a busy request pool
-does not take the fleet out of rotation.
-
-**The worker fix is done** ([ADR 0006, decision 10](adr/0006-the-queue.md)):
-the slice two review found that one transient Redis error killed the loop and
-cancelled running jobs. A driver fault now pauses the loop that hit it, under a
-backoff, and leaves the rest of the worker alone.
-
-**Slice three is done** ([ADR 0011](adr/0011-the-request-inspector.md)): the
-request inspector. Under `DEBUG` every request is one timeline — its queries
-with durations, cache hits and misses, dispatches and whether they waited for
-the commit, and its log lines — served from `/_inspector`. It closed ADR 0001's
-open question: cache events stay on the `Store`, because the inspector wants
-every round trip rather than the repository's intent.
-
-**Left:** metrics.
+Nothing is scheduled. Phase 5 closed with metrics; see below for what would
+get a number next and why nothing has one yet.
 
 ## Beyond, unscheduled
 

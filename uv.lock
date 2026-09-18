@@ -625,6 +625,9 @@ auth = [
 factories = [
     { name = "polyfactory" },
 ]
+metrics = [
+    { name = "prometheus-client" },
+]
 migrations = [
     { name = "alembic" },
 ]
@@ -641,7 +644,7 @@ dev = [
     { name = "copier" },
     { name = "fastapi" },
     { name = "httpx" },
-    { name = "keel", extra = ["auth", "factories", "migrations", "postgres", "queue"] },
+    { name = "keel", extra = ["auth", "factories", "metrics", "migrations", "postgres", "queue"] },
     { name = "mypy" },
     { name = "pytest" },
     { name = "pytest-cov" },
@@ -656,12 +659,13 @@ requires-dist = [
     { name = "alembic", marker = "extra == 'migrations'", specifier = ">=1.13" },
     { name = "asyncpg", marker = "extra == 'postgres'", specifier = ">=0.30" },
     { name = "polyfactory", marker = "extra == 'factories'", specifier = ">=2.18" },
+    { name = "prometheus-client", marker = "extra == 'metrics'", specifier = ">=0.21" },
     { name = "pwdlib", extras = ["argon2"], marker = "extra == 'auth'", specifier = ">=0.2" },
     { name = "redis", specifier = ">=6.0" },
     { name = "saq", marker = "extra == 'queue'", specifier = ">=0.22" },
     { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0.40" },
 ]
-provides-extras = ["postgres", "migrations", "factories", "queue", "auth"]
+provides-extras = ["postgres", "migrations", "factories", "queue", "auth", "metrics"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -669,7 +673,7 @@ dev = [
     { name = "copier", specifier = ">=9.4" },
     { name = "fastapi", specifier = ">=0.115" },
     { name = "httpx", specifier = ">=0.27" },
-    { name = "keel", extras = ["postgres", "migrations", "factories", "queue", "auth"], editable = "." },
+    { name = "keel", extras = ["postgres", "migrations", "factories", "queue", "auth", "metrics"], editable = "." },
     { name = "mypy", specifier = ">=1.11" },
     { name = "pytest", specifier = ">=8.0" },
     { name = "pytest-cov", specifier = ">=5.0" },
@@ -942,6 +946,15 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/85/68/7717bd9e63ed254617a7d3dc9260904fb736d6ea203e58ffddcb186c64e4/polyfactory-3.3.0.tar.gz", hash = "sha256:237258b6ff43edf362ffd1f68086bb796466f786adfa002b0ac256dbf2246e9a", size = 348668, upload-time = "2026-02-22T09:46:28.01Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/dd/34/b6f19941adcdaf415b5e8a8d577499f5b6a76b59cbae37f9b125a9ffe9f2/polyfactory-3.3.0-py3-none-any.whl", hash = "sha256:686abcaa761930d3df87b91e95b26b8d8cb9fdbbbe0b03d5f918acff5c72606e", size = 62707, upload-time = "2026-02-22T09:46:25.985Z" },
+]
+
+[[package]]
+name = "prometheus-client"
+version = "0.26.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/52/73/f1334c29c2af4cd9dba6c7817e61b611bd0215e2eb5565c6064a4de18802/prometheus_client-0.26.0.tar.gz", hash = "sha256:04a91bcf94e2cf74a44a1a874d651a2e853ed354b6e822f3b7487751465d5c2b", size = 92910, upload-time = "2026-07-24T19:36:41.893Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/eb/a3/b69efbf4143b5b9859b977770bbbabcc2796b702fa69dc40271e45cd5a56/prometheus_client-0.26.0-py3-none-any.whl", hash = "sha256:fa93d06737aa02bacd05794768508bb97d2fbee28cb3bca04eaae92f0ca953d6", size = 64494, upload-time = "2026-07-24T19:36:40.854Z" },
 ]
 
 [[package]]

@@ -32,6 +32,7 @@ _exclude:
   - "{% if not has_api %}app/modules/items/router.py{% endif %}"
   - "{% if not has_api %}tests/test_health.py{% endif %}"
   - "{% if not has_api %}tests/test_inspector.py{% endif %}"
+  - "{% if not has_api %}tests/test_metrics.py{% endif %}"
   - "{% if not has_api %}tests/test_sessions.py{% endif %}"
   - "{% if not has_api %}tests/test_users.py{% endif %}"
   - "{% if not has_api %}tests/test_items.py{% endif %}"
@@ -40,6 +41,7 @@ _exclude:
   - "{% if not has_worker %}app/worker.py{% endif %}"
   - "{% if not has_worker %}app/healthcheck.py{% endif %}"
   - "{% if not has_worker %}app/modules/items/jobs.py{% endif %}"
+  - "{% if not has_worker %}tests/test_worker_wiring.py{% endif %}"
   - "{% if not has_worker %}app/migrations/versions/0002_queue_tables.py{% endif %}"
   - "{% if not has_worker %}tests/test_jobs.py{% endif %}"
 

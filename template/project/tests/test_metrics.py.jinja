@@ -1,0 +1,79 @@
+"""Metrics, read from ``/metrics`` the way a scraper would.
+
+What this pins: a request is counted under its route template and not its
+path, an unmatched path is one series, the scrape itself is not a request,
+the queries a request ran are counted by operation, readiness probes are
+counted per check, and ``METRICS_ENABLED=false`` leaves nothing mounted.
+"""
+
+from __future__ import annotations
+
+import pytest
+from fastapi import FastAPI
+from httpx import ASGITransport, AsyncClient
+
+from app.main import create_app
+from app.settings import MetricsSettings, Settings
+
+pytestmark = pytest.mark.anyio
+
+
+async def test_requests_are_counted_by_route_template(
+    client: AsyncClient, user_payload: dict[str, str]
+) -> None:
+    assert (await client.post("/users", json=user_payload)).status_code == 201
+    assert (await client.get("/nowhere/at/all")).status_code == 404
+
+    body = (await client.get("/metrics")).text
+    assert 'keel_http_requests_total{method="POST",route="/users",status="201"} 1.0' in body
+    assert 'keel_http_requests_total{method="GET",route="unmatched",status="404"} 1.0' in body
+    assert "/nowhere" not in body, "a path is never a label"
+    assert 'keel_db_queries_total{operation="INSERT"}' in body
+    assert 'route="/metrics"' not in body, "the scrape is not a request"
+
+
+async def test_an_unknown_method_is_one_series(client: AsyncClient) -> None:
+    """A parser that accepts PROPFIND accepts a series per word a client invents."""
+    for method in ("PROPFIND", "PURGE", "MKCALENDAR"):
+        await client.request(method, "/health")
+
+    body = (await client.get("/metrics")).text
+    assert 'keel_http_requests_total{method="OTHER",route="/health",status="405"} 3.0' in body
+    assert "PROPFIND" not in body
+
+
+async def test_a_mounted_subapplication_keeps_its_prefix(settings: Settings) -> None:
+    """Without the prefix, /v2/items/{item_id} would alias onto /items/{item_id}."""
+    application = create_app(settings)
+    inner = FastAPI()
+
+    @inner.get("/items/{item_id}")
+    async def item(item_id: str) -> dict[str, str]:
+        return {"item_id": item_id}
+
+    application.mount("/v2", inner)
+    async with application.router.lifespan_context(application):
+        transport = ASGITransport(app=application)
+        async with AsyncClient(transport=transport, base_url="http://test") as http:
+            assert (await http.get("/v2/items/42")).status_code == 200
+            body = (await http.get("/metrics")).text
+
+    assert 'route="/v2/items/{item_id}"' in body
+    assert 'route="/items/{item_id}"' not in body
+
+
+async def test_readiness_probes_are_counted_per_check(client: AsyncClient) -> None:
+    assert (await client.get("/ready")).status_code == 200
+
+    body = (await client.get("/metrics")).text
+    assert 'keel_readiness_checks_total{check="database",result="ok"} 1.0' in body
+    assert 'keel_readiness_checks_total{check="cache",result="ok"} 1.0' in body
+
+
+async def test_metrics_can_be_switched_off(settings: Settings) -> None:
+    quiet = create_app(settings.model_copy(update={"metrics": MetricsSettings(enabled=False)}))
+    async with quiet.router.lifespan_context(quiet):
+        transport = ASGITransport(app=quiet)
+        async with AsyncClient(transport=transport, base_url="http://test") as http:
+            assert (await http.get("/metrics")).status_code == 404
+            assert (await http.get("/health")).status_code == 200

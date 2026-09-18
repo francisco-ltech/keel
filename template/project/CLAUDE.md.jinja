@@ -36,6 +36,11 @@ thing: the endpoints over Keel's request inspector, mounted only under `DEBUG`.
 {% endif %}
 ## Rules
 
+**A metric label is a route template, an operation, a store or a job name.**
+Never a path, an id, a key or a statement: a label with unbounded values is a
+memory leak with a dashboard. `app/observability.py` reads the route template
+off the scope; do the same, or label it `unmatched`.
+
 **Never write a `get_session` dependency.** A session held across a request hits
 an open FastAPI deadlock and starves the pool while p99 still looks healthy.
 Routes take services; services open the transaction:

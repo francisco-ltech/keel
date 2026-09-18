@@ -41,6 +41,16 @@ the status on the way out; ``app/inspector.py`` serves them. With the inspector
 off, ``trace`` yields ``None`` and costs a function call. The inspector's own
 requests are not recorded, or the listing would fill with itself.
 
+**Every request is counted**, by method, route *template* and status, with its
+latency — never by path, because a label per path is a memory leak with a
+dashboard. FastAPI leaves the matched route on the scope, and the mount prefix
+in ``root_path``, so a route under ``app.mount("/v2", …)`` is labelled with its
+prefix rather than aliasing onto the parent's. A request no route claimed is
+labelled ``unmatched`` so a scan of guessed URLs is one series, and Keel folds
+any method outside the nine it knows into ``OTHER``. The scraper's own
+``GET /metrics`` is left out, or the most frequent request on every dashboard
+would be the dashboard.
+
 **This middleware lives here rather than in Keel**, for the reason
 ``app/security.py`` does: it is web-framework vocabulary, and Keel's core imports
 no web framework so that a worker-only service does not pay for one.
@@ -55,7 +65,7 @@ from contextlib import nullcontext
 from typing import TYPE_CHECKING, Any, Final
 from uuid import uuid4
 
-from keel.observability import correlate, trace
+from keel.observability import UNMATCHED_ROUTE, bound_metrics, correlate, trace
 from starlette.datastructures import MutableHeaders
 from starlette.requests import Request
 
@@ -72,6 +82,9 @@ REQUEST_ID_HEADER: Final = "X-Request-ID"
 One name for both directions, so a client can quote back the id it was given and
 a caller that minted its own sees the same value it sent.
 """
+
+METRICS_PATH: Final = "/metrics"
+"""Where ``app.main`` serves the exposition. A scrape is not counted as a request."""
 
 INSPECTOR_PREFIX: Final = "/_inspector"
 """Where ``app/inspector.py`` mounts. Nothing under it is recorded, or the listing
@@ -172,17 +185,39 @@ class RequestContext:
                     await server_error(scope, receive, relay)
                 raise
             finally:
+                elapsed = time.perf_counter() - began
                 if recorded is not None:
                     recorded.tag(status=status)
+                if path != METRICS_PATH and (metrics := bound_metrics()) is not None:
+                    metrics.request(method, route_template(scope), status, elapsed)
                 logger.log(
                     logging.ERROR if failure is not None else logging.INFO,
                     "%s %s %s in %.1fms",
                     method,
                     path,
                     status,
-                    (time.perf_counter() - began) * 1000,
+                    elapsed * 1000,
                     exc_info=failure,
                 )
+
+
+def route_template(scope: Scope) -> str:
+    """Return the label a request is counted under.
+
+    FastAPI's router writes the matched route onto this same scope dict, and a
+    mounted sub-application writes its prefix into ``root_path``; together
+    they name the endpoint without naming the path.
+
+    Args:
+        scope: The ASGI scope, after the application has run.
+
+    Returns:
+        The route template with any mount prefix, or :data:`UNMATCHED_ROUTE`.
+    """
+    template = getattr(scope.get("route"), "path", None)
+    if not template:
+        return UNMATCHED_ROUTE
+    return f"{scope.get('root_path', '')}{template}"
 
 
 def on_listener_error(error: BaseException, event: Any) -> None:
@@ -220,10 +255,12 @@ async def server_error(scope: Scope, receive: Receive, send: Send) -> None:
 
 __all__ = [
     "INSPECTOR_PREFIX",
+    "METRICS_PATH",
     "REQUEST_ID_HEADER",
     "SAFE_REQUEST_ID",
     "RequestContext",
     "inbound_request_id",
     "on_listener_error",
+    "route_template",
     "server_error",
 ]

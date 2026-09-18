@@ -97,7 +97,7 @@ src/keel/
   cache/      facade, drivers, locks, fake
   database/   engine, uow, repository, soft delete, observers, migrations
   queue/      jobs, dispatch, drivers, worker, failed jobs, scheduler
-  observability/  logging, correlation re-exports, readiness checks, the request inspector
+  observability/  logging, correlation re-exports, readiness checks, the request inspector, metrics
   contracts/  the protocols drivers implement
   support/    binding, manager, events, keys, serialization — subsystem-agnostic
 template/     copier template; three service shapes

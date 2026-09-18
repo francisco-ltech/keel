@@ -38,6 +38,11 @@ dispatches and log lines it produced can be read back as one timeline —
     with trace(f"{method} {path}") as recorded:
         ...
 
+And in production, counters and histograms over the same sources, rendered
+for a scraper — :mod:`keel.observability.metrics`::
+
+    body, content_type = current_metrics().render()
+
 :func:`correlate` and :func:`correlation` live in
 :mod:`keel.support.correlation`, because the queue seals those fields onto every
 envelope and a tenant is not a logging concept. They are re-exported here the
@@ -81,6 +86,19 @@ from keel.observability.logs import (
     TextFormatter,
     configure_logging,
 )
+from keel.observability.metrics import (
+    DURATION_BUCKETS,
+    HTTP_METHODS,
+    SQL_OPERATIONS,
+    UNMATCHED_ROUTE,
+    Metrics,
+    MetricsConfig,
+    bound_metrics,
+    current_metrics,
+    metrics_lifespan,
+    set_metrics,
+    use_metrics,
+)
 from keel.support.correlation import (
     RESERVED_FIELDS,
     SECRET_MARKERS,
@@ -93,12 +111,16 @@ __all__ = [
     "ADOPTED_LOGGERS",
     "CORRELATION_KEY",
     "DEFAULT_TIMEOUT",
+    "DURATION_BUCKETS",
     "FORMATTERS",
     "HANDLER_NAME",
+    "HTTP_METHODS",
     "LEVELS",
     "PROBE_KEY",
     "RESERVED_FIELDS",
     "SECRET_MARKERS",
+    "SQL_OPERATIONS",
+    "UNMATCHED_ROUTE",
     "Check",
     "CheckResult",
     "Entry",
@@ -107,9 +129,12 @@ __all__ = [
     "InspectorConfig",
     "JsonFormatter",
     "LoggingConfig",
+    "Metrics",
+    "MetricsConfig",
     "TextFormatter",
     "Trace",
     "bound_inspector",
+    "bound_metrics",
     "check_cache",
     "check_database",
     "check_queue",
@@ -119,10 +144,14 @@ __all__ = [
     "correlation",
     "correlation_fields",
     "current_inspector",
+    "current_metrics",
     "current_trace",
     "inspector_lifespan",
+    "metrics_lifespan",
     "probe",
     "set_inspector",
+    "set_metrics",
     "trace",
     "use_inspector",
+    "use_metrics",
 ]

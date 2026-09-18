@@ -29,6 +29,9 @@ queue = ["saq>=0.22"]
 # Password hashing. Optional because a service that authenticates by token, or
 # not at all, stores no passwords and should not carry an Argon2 binding.
 auth = ["pwdlib[argon2]>=0.2"]
+# Prometheus exposition. Optional because a service that is scraped by nothing
+# should not carry a registry, and the format is not worth writing twice.
+metrics = ["prometheus-client>=0.21"]
 
 
 [tool.hatch.build.targets.wheel]
@@ -42,7 +45,7 @@ keel = { workspace = true }
 
 [dependency-groups]
 dev = [
-    "keel[postgres,migrations,factories,queue,auth]",
+    "keel[postgres,migrations,factories,queue,auth,metrics]",
     "pytest>=8.0",
     "pytest-cov>=5.0",
     "anyio>=4.0",

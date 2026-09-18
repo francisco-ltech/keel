@@ -30,6 +30,12 @@ age. Starting an HTTP server inside the worker just to answer a probe was
 declined: a second listener, a second port and a second graceful shutdown, in a
 process whose entire purpose is not to listen.
 
+**Metrics are the one listener, and only when asked.** A scrape is a pull, and
+there is no file-shaped substitute for it, so ``WORKER_METRICS_PORT`` opens a
+plain HTTP listener on a thread serving nothing but the exposition — jobs by
+name and outcome, faults, the jobs in flight and how long since the queue last
+answered, read off the worker itself. Zero, the default, opens nothing.
+
 Two properties of that file are load-bearing. It must be **local to the
 container** — on a shared volume a dead replica's file keeps a live replica's
 probe green. And it is refreshed from ``healthy`` rather than from ``accepting``,
@@ -66,6 +72,8 @@ Declined, deliberately:
 from __future__ import annotations
 
 import logging
+from collections.abc import AsyncIterator, Callable
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, ClassVar, Final
@@ -73,8 +81,8 @@ from typing import Any, ClassVar, Final
 import anyio
 from keel.auth import hashing_lifespan
 from keel.cache import cache_lifespan
-from keel.database import database_lifespan, uow
-from keel.observability import configure_logging
+from keel.database import current_database, database_lifespan, uow
+from keel.observability import Metrics, configure_logging, metrics_lifespan
 from keel.queue import (
     DatabaseFailureSink,
     FailedJobs,
@@ -252,33 +260,66 @@ async def heartbeat(worker: Worker, path: Path, interval: float = HEARTBEAT_INTE
         path.unlink(missing_ok=True)
 
 
-async def serve(settings: Settings | None = None) -> None:
-    """Run the worker until it is asked to stop.
+def expose_metrics(metrics: Metrics, port: int) -> Callable[[], None]:
+    """Serve the exposition on *port* from a thread, and return what stops it.
 
-    Returns when :meth:`keel.queue.Worker.run` returns — after SIGTERM, once
-    in-flight jobs have drained or the grace period has run out. The heartbeat
-    and the scheduler are cancelled at that point rather than joined: neither
-    has any work to finish, and both would otherwise keep the process alive.
+    ``prometheus_client``'s own server: a ``wsgiref`` listener that reads the
+    registry on each request. It runs on a thread because the worker's loop
+    must not answer HTTP, and a thread reading counters needs no coordination
+    with the loop that increments them.
 
     Args:
-        settings: Configuration to use. Defaults to reading the environment,
-            which is what a real deployment does.
+        metrics: Whose registry to serve.
+        port: The port to listen on.
+
+    Returns:
+        A function that shuts the listener down.
     """
-    config = settings if settings is not None else get_settings()
+    from prometheus_client import start_http_server
+
+    server, thread = start_http_server(port, registry=metrics.registry)
+    logger.info("metrics on :%d", port)
+
+    def stop() -> None:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+    return stop
+
+
+@asynccontextmanager
+async def wired(config: Settings) -> AsyncIterator[tuple[Worker, Metrics]]:
+    """Bind everything a worker needs, with one dispatcher feeding all of it.
+
+    The cache, ``dispatch()``, the worker and both of Keel's observers announce
+    on and listen to the same :class:`~keel.support.events.EventDispatcher`.
+    Hand the cache a different one — or none — and a worker's cache metrics
+    stay at zero for ever, which is the defect the review of this file found.
+
+    A context manager rather than the body of :func:`serve`, so a test can
+    enter exactly the wiring the process runs with and assert on it.
+
+    Args:
+        config: Configuration to bind from.
+
+    Yields:
+        The worker, not yet running, and the metrics bound around it.
+    """
     queue_config = config.queue_config()
+    # The default error handler discards listener failures: a worker that stopped
+    # logging its own jobs would look exactly like one with nothing to do.
+    events = EventDispatcher(on_error=on_listener_error)
+    log_events(events)
 
     async with (
         database_lifespan(config.database_config()),
-        cache_lifespan(config.cache_config()),
+        cache_lifespan(config.cache_config(), events),
         # Hashing but no token store: a job may create a user, none issues a
         # credential, and `acting_as` needs nothing bound to carry a caller.
         hashing_lifespan(config.hashing_config()),
-        queue_lifespan(queue_config),
+        queue_lifespan(queue_config, events),
     ):
-        # The default error handler discards listener failures: a worker that stopped
-        # logging its own jobs would look exactly like one with nothing to do.
-        events = EventDispatcher(on_error=on_listener_error)
-        log_events(events)
         worker = Worker(
             queue_config,
             queues=(queue_config.default_queue,),
@@ -287,14 +328,42 @@ async def serve(settings: Settings | None = None) -> None:
             failure_sink=DatabaseFailureSink(),
             events=events,
         )
-        logger.info("%d job types registered", len(JOBS))
+        async with metrics_lifespan(
+            config.metrics_config(), database=current_database(), events=events, worker=worker
+        ) as metrics:
+            yield worker, metrics
 
-        async with anyio.create_task_group() as tasks:
-            tasks.start_soon(heartbeat, worker, config.worker.health_file)
-            if len(SCHEDULE):
-                tasks.start_soon(Scheduler(SCHEDULE).run)
-            await worker.run()
-            tasks.cancel_scope.cancel()
+
+async def serve(settings: Settings | None = None) -> None:
+    """Run the worker until it is asked to stop.
+
+    Returns when :meth:`keel.queue.Worker.run` returns — after SIGTERM, once
+    in-flight jobs have drained or the grace period has run out. The heartbeat
+    and the scheduler are cancelled at that point rather than joined: neither
+    has any work to finish, and both would otherwise keep the process alive.
+    The metrics listener, if one was opened, is closed after the drain, so a
+    scrape during shutdown still answers.
+
+    Args:
+        settings: Configuration to use. Defaults to reading the environment,
+            which is what a real deployment does.
+    """
+    config = settings if settings is not None else get_settings()
+
+    async with wired(config) as (worker, metrics):
+        logger.info("%d job types registered", len(JOBS))
+        port = config.worker.metrics_port
+        stop_exposing = expose_metrics(metrics, port) if port and metrics.enabled else None
+        try:
+            async with anyio.create_task_group() as tasks:
+                tasks.start_soon(heartbeat, worker, config.worker.health_file)
+                if len(SCHEDULE):
+                    tasks.start_soon(Scheduler(SCHEDULE).run)
+                await worker.run()
+                tasks.cancel_scope.cancel()
+        finally:
+            if stop_exposing is not None:
+                stop_exposing()
 
 
 def main() -> None:
@@ -319,6 +388,7 @@ __all__ = [
     "log_events",
     "main",
     "serve",
+    "wired",
 ]
 
 
