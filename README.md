@@ -53,20 +53,24 @@ Mail, storage and rate limiting are not in the box yet.
 
 ## Getting started
 
+`just`, not make. `just` alone lists every recipe.
+
 ```bash
-make install          # uv sync
-make up               # postgres + redis + mailpit
-make check            # lint, types, tests
+just install          # uv sync, every extra included
+just hooks            # the pre-commit and pre-push hooks
+just up               # postgres + redis + mailpit
+just check            # lint, both type checkers, tests
 ```
 
 Postgres is on **5433** and Redis on **6380**, to avoid clashing with anything
 already running on the default ports. Override `DATABASE_URL` or `REDIS_URL` to
-point elsewhere.
+point elsewhere. `just doctor` says whether they are actually answering.
 
-Generate an application:
+Generate an application, then bring it up to date later as the template moves:
 
 ```bash
-make new DEST=../my-api
+just new ../my-api    # copier asks for a name, a description and the shape
+just update ../my-api
 ```
 
 ## The one rule worth knowing before you write code
