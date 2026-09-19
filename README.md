@@ -62,11 +62,12 @@ keel new invoices     # asks for a name, a description and the shape
 cd invoices && just up && just migrate && just dev
 ```
 
-`keel new` copies the template from this repository, pins the project's Keel
-dependency to the commit the scaffold came from, runs `uv sync`, and makes the
-first commit. `keel update invoices` brings a project forward when the template
-moves. Nothing is on PyPI yet; the git install is the installer ([ADR
-0013](docs/adr/0013-the-installer.md)).
+`keel new` copies the template from this repository at its latest release,
+pins the project's Keel dependency to the commit the scaffold came from, runs
+`uv sync`, and makes the first commit. `keel update invoices` brings a project
+forward to a newer release. Nothing is on PyPI yet; the git install is the
+installer ([ADR 0013](docs/adr/0013-the-installer.md)), and releases are tags
+([CHANGELOG](CHANGELOG.md)).
 
 Working on Keel itself is `just`, not make; `just` alone lists every recipe.
 

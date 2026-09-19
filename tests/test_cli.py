@@ -167,7 +167,22 @@ def test_new_from_the_repository_pins_the_library_to_the_templates_commit(
 
     # A git+file URL is a git source to copier, not a directory, so `keel_source` stays `git`.
     source = f"git+file://{committed_keel}"
-    assert main(["new", str(dest), "--source", source, "--defaults", "--no-sync", "--no-git"]) == 0
+    assert (
+        main(
+            [
+                "new",
+                str(dest),
+                "--source",
+                source,
+                "--ref",
+                "HEAD",
+                "--defaults",
+                "--no-sync",
+                "--no-git",
+            ]
+        )
+        == 0
+    )
 
     pyproject = (dest / "pyproject.toml").read_text()
     assert f'rev = "{head}"' in pyproject
@@ -210,7 +225,10 @@ def test_update_of_an_untouched_git_project_leaves_no_conflicts(
     """The template moves by one commit; a project nobody edited must merge cleanly."""
     dest = tmp_path / "svc"
     source = f"git+file://{committed_keel}"
-    assert main(["new", str(dest), "--source", source, "--defaults", "--no-sync"]) == 0
+    assert (
+        main(["new", str(dest), "--source", source, "--ref", "HEAD", "--defaults", "--no-sync"])
+        == 0
+    )
     before = git("rev-parse", "HEAD", cwd=committed_keel).strip()
 
     errors = committed_keel / "template" / "project" / "app" / "errors.py.jinja"
@@ -232,7 +250,10 @@ def test_update_reports_a_conflict_and_does_not_exit_zero(
 ) -> None:
     dest = tmp_path / "svc"
     source = f"git+file://{committed_keel}"
-    assert main(["new", str(dest), "--source", source, "--defaults", "--no-sync"]) == 0
+    assert (
+        main(["new", str(dest), "--source", source, "--ref", "HEAD", "--defaults", "--no-sync"])
+        == 0
+    )
 
     errors = committed_keel / "template" / "project" / "app" / "errors.py.jinja"
     errors.write_text(errors.read_text() + "\n# upstream version\n")
@@ -255,10 +276,11 @@ def test_update_of_a_project_from_a_dirty_checkout_says_what_to_do(
 ) -> None:
     """The limit ADR 0013 records, stated by the command rather than dumped by git."""
     dest = tmp_path / "svc"
-    assert main(["new", str(dest), "--source", str(REPO_ROOT), "--defaults", "--no-sync"]) == 0
+    # Dirty at generation time: that is when copier records the commit that exists nowhere.
     marker = REPO_ROOT / "template" / "project" / ".keel-dirty-probe"
     marker.write_text("dirty\n")
     try:
+        assert main(["new", str(dest), "--source", str(REPO_ROOT), "--defaults", "--no-sync"]) == 0
         code = main(["update", str(dest), "--defaults"])
     finally:
         marker.unlink()
@@ -267,3 +289,21 @@ def test_update_of_a_project_from_a_dirty_checkout_says_what_to_do(
     assert code == 1
     assert "Traceback" not in err
     assert "checkout with uncommitted changes" in err
+
+
+@pytest.mark.generator
+def test_the_default_revision_is_the_latest_tag(tmp_path: Path, committed_keel: Path) -> None:
+    """A release exists, so `keel new` with no `--ref` generates the release, not main."""
+    tagged = git("rev-parse", "HEAD", cwd=committed_keel).strip()
+    git("tag", "-a", "v99.0.0", "-m", "a release above any real one", cwd=committed_keel)
+    errors = committed_keel / "template" / "project" / "app" / "errors.py.jinja"
+    errors.write_text(errors.read_text() + "\n# after the release\n")
+    git("commit", "-q", "-am", "unreleased", cwd=committed_keel)
+    dest = tmp_path / "svc"
+
+    source = f"git+file://{committed_keel}"
+    assert main(["new", str(dest), "--source", source, "--defaults", "--no-sync", "--no-git"]) == 0
+
+    assert f'rev = "{tagged}"' in (dest / "pyproject.toml").read_text()
+    assert "_commit: v99.0.0" in (dest / ".copier-answers.yml").read_text()
+    assert "# after the release" not in (dest / "app" / "errors.py").read_text()

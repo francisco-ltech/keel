@@ -80,9 +80,10 @@ caller, and the inspector answers the development half of that question.
 Not a phase, and done alongside the last one ([ADR
 0013](adr/0013-the-installer.md)): `uv tool install` from the repository puts a
 `keel` command on the path, `keel new` generates a service pinned to the commit
-its scaffold came from, and `keel update` brings it forward. PyPI is the next
-step there, and needs a release discipline before it needs code. The
-repository carries an MIT license, like Laravel's.
+its scaffold came from, and `keel update` brings it forward. Releases are tags,
+`v0.1.0` the first, recorded in the changelog; `keel new` generates from the
+latest one. PyPI is the next step, needing a name check and a publish workflow.
+The repository carries an MIT license, like Laravel's.
 
 ## Next
 
