@@ -23,9 +23,9 @@ Each subsystem is reached the same way: a **facade** the application calls, a
 tests can assert on it. That uniformity is the whole idea, it is what makes a
 set of features feel like one framework.
 
-Nothing is published to an index yet. `keel new` installs the library from this
-repository, pinned to the commit the scaffold came from; a contributor's
-project links a checkout by path instead.
+The repository is public. `keel new` installs the library from here, pinned to
+the commit the scaffold came from, and needs no account or credentials; a
+contributor's project links a checkout by path instead.
 
 ## Layout
 
@@ -43,10 +43,10 @@ docs/adr/          why things are shaped the way they are
 | `keel.cache` | Cache, atomic locks, `remember` with single-flight. Drivers: Redis, in-memory, null. Recording fake with assertions. |
 | `keel.database` | Async engine, pooling with a statement timeout, the `uow()` transaction idiom, declarative base with a migration-safe naming convention. |
 | `keel.testing` | `fake_cache()` and `rolled_back_database()`. |
-| `keel.database` (Phase 2) | Generic repository, UUIDv7 keys, soft deletes as a global query scope, keyset pagination, model observers that fire after commit, factories and seeders, advisory-locked migrations with drift detection. |
-| `keel.queue` (Phase 3) | Jobs as Commands, dispatch that waits for the transaction to commit, SAQ driver, a supervised worker with graceful shutdown and orphan recovery, durable failed jobs, and cron guarded by an advisory lock. |
-| `keel.auth` (Phase 4) | The current-identity context, Argon2 password hashing with rehash-on-login, hashed-at-rest bearer tokens, and authorization policies registered per resource type with `authorize()` / `allows()`. Drivers: Redis, in-memory. Recording fake. No guard protocol. |
-| `keel.observability` (Phase 5) | A correlation context, structured JSON logging that carries it onto every record including third-party ones, jobs that inherit the request id that dispatched them, readiness checks, a development request inspector that records each request's queries, cache calls, dispatches and log lines as one timeline, and Prometheus metrics over the same sources. |
+| `keel.database` | Generic repository, UUIDv7 keys, soft deletes as a global query scope, keyset pagination, model observers that fire after commit, factories and seeders, advisory-locked migrations with drift detection. |
+| `keel.queue` | Jobs as Commands, dispatch that waits for the transaction to commit, SAQ driver, a supervised worker with graceful shutdown and orphan recovery, durable failed jobs, and cron guarded by an advisory lock. |
+| `keel.auth` | The current-identity context, Argon2 password hashing with rehash-on-login, hashed-at-rest bearer tokens, and authorization policies registered per resource type with `authorize()` / `allows()`. Drivers: Redis, in-memory. Recording fake. No guard protocol. |
+| `keel.observability` | A correlation context, structured JSON logging that carries it onto every record including third-party ones, jobs that inherit the request id that dispatched them, readiness checks, a development request inspector that records each request's queries, cache calls, dispatches and log lines as one timeline, and Prometheus metrics over the same sources. |
 | `template/` | Generates a service in three shapes — API, worker, or both — with domain modules, Alembic, tests and Docker. |
 
 Mail, storage and rate limiting are not in the box yet.
@@ -54,22 +54,56 @@ Mail, storage and rate limiting are not in the box yet.
 
 ## Getting started
 
-Install the command once, then generate a service:
+You need [uv](https://docs.astral.sh/uv/), [just](https://just.systems/) and
+Docker. Install the command once, then generate a service:
 
 ```bash
 uv tool install "keel[cli] @ git+https://github.com/francisco-ltech/keel"
 keel new invoices     # asks for a name, a description and the shape
-cd invoices && just up && just migrate && just dev
+cd invoices
+just up               # Postgres on 5433 and Redis on 6380, via Docker Compose
+just migrate
+just test
+just dev              # http://localhost:8000/docs
 ```
+
+### What that buys you
+
+- Registration at `POST /users`, sign-in at `POST /sessions` that issues a
+  bearer token, `GET /sessions/current` for who you are, and an owner-scoped
+  `items` module showing the shape every domain follows: models, schemas,
+  repository, service and router, plus one line in the registry. All of it
+  in the OpenAPI document at `/docs`.
+- Every write inside a unit of work, and no session ever held across a
+  request. Authorization policies checked in the service, not the router, so a
+  job and a route share one answer to "may this caller do that".
+- With the `both` shape, `just dev` runs the API and the worker side by side
+  from one codebase: creating an item dispatches a job that runs only after
+  the commit, and a nightly schedule prunes dead letters.
+- Structured JSON logs carrying a request id from the API call into the worker
+  that runs its job, `/health` and `/ready` that ask every dependency,
+  Prometheus metrics at `/metrics`, and a request inspector at `/_inspector`
+  under `DEBUG=true` that shows each request's queries, cache calls, dispatches
+  and log lines as one timeline.
+- Alembic migrations that run under an advisory lock, a test suite that runs
+  against the real Postgres inside a transaction rolled back per test, and Docker
+  Compose for the services.
+
+That install line takes the `keel` command from the tip of `main`. The
+template it generates from, and the Keel version a project pins, come from the
+latest release regardless. To hold the command itself at a release, name the
+tag: `uv tool install "keel[cli] @ git+https://github.com/francisco-ltech/keel@v0.1.0"`.
 
 `keel new` copies the template from this repository at its latest release,
 pins the project's Keel dependency to the commit the scaffold came from, runs
-`uv sync`, and makes the first commit. `keel update invoices` brings a project
-forward to a newer release. Nothing is on PyPI yet; the git install is the
-installer ([ADR 0013](docs/adr/0013-the-installer.md)), and releases are tags
-([CHANGELOG](CHANGELOG.md)).
+`uv sync`, and makes the first commit; `keel new invoices --defaults` asks
+nothing. `keel update invoices` brings a project forward to a newer release.
+The git install is the installer ([ADR 0013](docs/adr/0013-the-installer.md)),
+and releases are tags ([CHANGELOG](CHANGELOG.md)). If Postgres and Redis
+already run on those ports, skip `just up` and point `DATABASE_URL` and
+`REDIS_URL` in `.env` at them.
 
-Working on Keel itself is `just`, not make; `just` alone lists every recipe.
+Working on Keel itself is `just`.
 
 ```bash
 just install          # uv sync, every extra included
@@ -140,4 +174,4 @@ starves. See [ADR 0002](docs/adr/0002-the-unit-of-work.md).
 
 ## License
 
-MIT, like Laravel's. See [LICENSE](LICENSE).
+MIT, see [LICENSE](LICENSE).
