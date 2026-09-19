@@ -4,7 +4,7 @@ Releases are tags. `keel new` generates from the latest one, and `keel update`
 moves a project between them. Entries say what changed for someone building on
 Keel; the ADRs say why.
 
-## Unreleased
+## v0.1.3 — 2026-09-19
 
 - **The app containers migrate the database on start.** `just dev` ran the
   API against whatever schema the host's `just migrate` had reached, and a
