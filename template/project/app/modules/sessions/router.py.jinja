@@ -17,7 +17,7 @@ from fastapi import APIRouter, Header, status
 
 from app.modules.sessions import service
 from app.modules.sessions.schemas import SessionRead, SignIn
-from app.modules.users.schemas import UserRead
+from app.modules.users.schemas import Profile
 from app.security import BearerToken, Caller
 
 router = APIRouter(prefix="/sessions", tags=["sessions"])
@@ -43,8 +43,8 @@ async def sign_in(
 
 
 @router.get("/current", summary="The signed-in user")
-async def current_session(_: Caller) -> UserRead:
-    """Return the caller's own user record.
+async def current_session(_: Caller) -> Profile:
+    """Return the caller's own profile.
 
     Args:
         _: Declared for the dependency rather than for the body — it is what
@@ -53,7 +53,7 @@ async def current_session(_: Caller) -> UserRead:
             caller from the context, exactly as a job would.
 
     Returns:
-        The caller's user record.
+        The caller's profile, with no id: the session names them.
     """
     return await service.current_user()
 

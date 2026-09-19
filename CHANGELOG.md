@@ -10,6 +10,9 @@ Keel; the ADRs say why.
   never sends its user id over the wire to work with its items.
   `/users/{owner_id}/items` stays for an administrator acting for somebody,
   and both go through the same service and policy.
+- **`GET /sessions/current` returns a profile, not a user record.** No id:
+  the session names the caller. `UserRead`, with the id, stays on the routes
+  that address somebody else.
 
 ## v0.1.3 — 2026-09-19
 

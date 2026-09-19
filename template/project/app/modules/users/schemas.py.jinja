@@ -104,4 +104,27 @@ class UserRead(BaseModel):
     updated_at: datetime
 
 
-__all__ = ["PasswordChange", "UserCreate", "UserRead", "UserUpdate"]
+class Profile(BaseModel):
+    """What a caller sees of their own account.
+
+    No ``id``: the session already names the caller, and every route that acts
+    on the caller's own things reads who they are from it. An identifier over
+    the wire is only for addressing somebody *else*, which is
+    :class:`UserRead`'s job on the routes an administrator uses.
+
+    Attributes:
+        email: The caller's address.
+        full_name: Display name.
+        is_active: Whether the account is enabled.
+        created_at: When the account was created, UTC-aware.
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    email: EmailStr
+    full_name: str
+    is_active: bool
+    created_at: datetime
+
+
+__all__ = ["PasswordChange", "Profile", "UserCreate", "UserRead", "UserUpdate"]

@@ -106,7 +106,9 @@ async def test_a_token_authenticates_a_request(client: AsyncClient) -> None:
     response = await client.get("/sessions/current", headers=bearer(token))
 
     assert response.status_code == 200, response.text
-    assert response.json()["email"] == DEFAULT_USER["email"]
+    body = response.json()
+    assert body["email"] == DEFAULT_USER["email"]
+    assert "id" not in body, "the session names the caller; no id goes over the wire"
 
 
 async def test_an_unauthenticated_request_is_refused(client: AsyncClient) -> None:

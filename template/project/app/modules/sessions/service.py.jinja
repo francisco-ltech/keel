@@ -41,7 +41,7 @@ from keel.database import uow
 from app.errors import AuthenticationError
 from app.modules.sessions.schemas import SessionRead, SignIn
 from app.modules.users.repository import UserRepository
-from app.modules.users.schemas import UserRead
+from app.modules.users.schemas import Profile
 
 LABEL_MAX_LENGTH = 100
 """Cap on the free text stored beside a token. It comes from a request header,
@@ -116,15 +116,16 @@ async def sign_out(token: str) -> None:
     await revoke_token(token)
 
 
-async def current_user() -> UserRead:
-    """Return the signed-in user's own record.
+async def current_user() -> Profile:
+    """Return the signed-in user's own profile.
 
     Reads the caller from the context rather than taking it as an argument,
     which is what makes the same call work unchanged inside a job running under
     ``acting_as``.
 
     Returns:
-        The caller's user record.
+        The caller's profile: what they see of themselves, without an id, since
+        the session is what names them.
 
     Raises:
         AuthenticationError: If the row behind the token has since been deleted.
@@ -136,7 +137,7 @@ async def current_user() -> UserRead:
         user = await UserRepository(session).get(identity.id)
         if user is None:
             raise AuthenticationError("this account no longer exists")
-        return UserRead.model_validate(user)
+        return Profile.model_validate(user)
 
 
 __all__ = ["INVALID_CREDENTIALS", "LABEL_MAX_LENGTH", "current_user", "sign_in", "sign_out"]
