@@ -1,10 +1,11 @@
 """HTTP for items.
 
-Items are addressed under their owner — ``/users/{owner_id}/items`` — so the
-scope is in the path rather than in a query parameter a client can forget. To
-scope them to the caller instead, drop ``owner_id`` from the paths and pass
-``caller.id`` where it goes — the service calls below already take it as an
-argument, so nothing beneath this file moves.
+Two routers over one service. ``/items`` is the caller's own: the session
+already names the owner, so a client never sends its own id over the wire.
+``/users/{owner_id}/items`` names an owner, which is what an administrator
+needs to act for somebody, and the policy decides whether they may. Both call
+the same service functions with an owner id, which is why nothing beneath this
+file knows there are two.
 
 **Every route takes ``Caller``, and none of them decides ownership.** The 401
 for a missing token is this file's; the 403 for somebody else's items is
@@ -29,15 +30,97 @@ from app.modules.items.repository import DEFAULT_PAGE_SIZE
 from app.modules.items.schemas import ItemCreate, ItemRead, ItemUpdate
 from app.security import Caller
 
-router = APIRouter(prefix="/users/{owner_id}/items", tags=["items"])
+mine = APIRouter(prefix="/items", tags=["items"])
+"""The caller's own items. The session names the owner, so the URL does not."""
+
+of_owner = APIRouter(prefix="/users/{owner_id}/items", tags=["items"])
+"""One named owner's items: what an administrator uses to act for somebody."""
+
+router = APIRouter()
+router.include_router(mine)
+router.include_router(of_owner)
 
 
-@router.post("", status_code=status.HTTP_201_CREATED, summary="Create an item")
+@mine.post("", status_code=status.HTTP_201_CREATED, summary="Create one of my items")
+async def create_my_item(payload: ItemCreate, caller: Caller) -> ItemRead:
+    """Create an item owned by the caller.
+
+    Args:
+        payload: The requested item.
+        caller: Whose item it becomes.
+
+    Returns:
+        The created item.
+    """
+    return await service.create_item(caller.id, payload)
+
+
+@mine.get("", summary="List my items")
+async def list_my_items(
+    caller: Caller,
+    limit: Annotated[int, Query(ge=1, le=200)] = DEFAULT_PAGE_SIZE,
+    offset: Annotated[int, Query(ge=0)] = 0,
+) -> list[ItemRead]:
+    """Return a page of the caller's items, oldest first.
+
+    Args:
+        caller: Whose items to return.
+        limit: Maximum rows to return.
+        offset: Rows to skip.
+
+    Returns:
+        The page.
+    """
+    return await service.list_items(caller.id, limit=limit, offset=offset)
+
+
+@mine.get("/{item_id}", summary="Fetch one of my items")
+async def get_my_item(item_id: UUID, caller: Caller) -> ItemRead:
+    """Return one of the caller's items.
+
+    Args:
+        item_id: The item's id.
+        caller: Who it must belong to.
+
+    Returns:
+        The item.
+    """
+    return await service.get_item(item_id, caller.id)
+
+
+@mine.patch("/{item_id}", summary="Update one of my items")
+async def update_my_item(item_id: UUID, payload: ItemUpdate, caller: Caller) -> ItemRead:
+    """Apply a partial update to one of the caller's items.
+
+    Args:
+        item_id: The item's id.
+        payload: The fields to change.
+        caller: Who it must belong to.
+
+    Returns:
+        The updated item.
+    """
+    return await service.update_item(item_id, caller.id, payload)
+
+
+@mine.delete("/{item_id}", status_code=status.HTTP_204_NO_CONTENT, summary="Delete one of my items")
+async def delete_my_item(item_id: UUID, caller: Caller) -> None:
+    """Delete one of the caller's items.
+
+    Args:
+        item_id: The item's id.
+        caller: Who it must belong to.
+    """
+    await service.delete_item(item_id, caller.id)
+
+
+@of_owner.post("", status_code=status.HTTP_201_CREATED, summary="Create an item for an owner")
 async def create_item(owner_id: UUID, payload: ItemCreate, _: Caller) -> ItemRead:
     """Create an item owned by the user in the path.
 
     Ownership comes from the URL and is not a body field, so a request cannot
-    create an item for somebody else by disagreeing with its own path.
+    create an item for somebody else by disagreeing with its own path. Whether
+    the caller may act for that owner is the policy's answer.
 
     Args:
         owner_id: The owning user.
@@ -50,7 +133,7 @@ async def create_item(owner_id: UUID, payload: ItemCreate, _: Caller) -> ItemRea
     return await service.create_item(owner_id, payload)
 
 
-@router.get("", summary="List an owner's items")
+@of_owner.get("", summary="List an owner's items")
 async def list_items(
     owner_id: UUID,
     _: Caller,
@@ -71,7 +154,7 @@ async def list_items(
     return await service.list_items(owner_id, limit=limit, offset=offset)
 
 
-@router.get("/{item_id}", summary="Fetch an item")
+@of_owner.get("/{item_id}", summary="Fetch an owner's item")
 async def get_item(owner_id: UUID, item_id: UUID, _: Caller) -> ItemRead:
     """Return one of an owner's items.
 
@@ -86,7 +169,7 @@ async def get_item(owner_id: UUID, item_id: UUID, _: Caller) -> ItemRead:
     return await service.get_item(item_id, owner_id)
 
 
-@router.patch("/{item_id}", summary="Update an item")
+@of_owner.patch("/{item_id}", summary="Update an owner's item")
 async def update_item(owner_id: UUID, item_id: UUID, payload: ItemUpdate, _: Caller) -> ItemRead:
     """Apply a partial update.
 
@@ -102,7 +185,9 @@ async def update_item(owner_id: UUID, item_id: UUID, payload: ItemUpdate, _: Cal
     return await service.update_item(item_id, owner_id, payload)
 
 
-@router.delete("/{item_id}", status_code=status.HTTP_204_NO_CONTENT, summary="Delete an item")
+@of_owner.delete(
+    "/{item_id}", status_code=status.HTTP_204_NO_CONTENT, summary="Delete an owner's item"
+)
 async def delete_item(owner_id: UUID, item_id: UUID, _: Caller) -> None:
     """Delete one of an owner's items.
 
@@ -112,6 +197,3 @@ async def delete_item(owner_id: UUID, item_id: UUID, _: Caller) -> None:
         _: Declared for the dependency.
     """
     await service.delete_item(item_id, owner_id)
-
-
-__all__ = ["router"]

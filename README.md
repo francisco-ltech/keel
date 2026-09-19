@@ -66,10 +66,11 @@ project's suite against the same Postgres.
 ### What that buys you
 
 - Registration at `POST /users`, sign-in at `POST /sessions` that issues a
-  bearer token, `GET /sessions/current` for who you are, and an owner-scoped
-  `items` module showing the shape every domain follows: models, schemas,
-  repository, service and router, plus one line in the registry. All of it
-  in the OpenAPI document at `/docs`.
+  bearer token, `GET /sessions/current` for who you are, and an `items` module
+  showing the shape every domain follows: models, schemas, repository, service
+  and router, plus one line in the registry. `/items` is the caller's own, with
+  the owner taken from the session; `/users/{id}/items` is how an admin acts
+  for somebody. All of it in the OpenAPI document at `/docs`.
 - Every write inside a unit of work, and no session ever held across a
   request. Authorization policies checked in the service, not the router, so a
   job and a route share one answer to "may this caller do that".
@@ -99,19 +100,20 @@ curl -s -X POST localhost:8000/sessions -H 'Content-Type: application/json' \
   -d '{"email":"ada@example.com","password":"correct-horse-battery-staple"}'
 ```
 
-The first answers with the user, id included. The second answers with
-`access_token`, readable there and nowhere else: tokens are stored hashed. Put
-the two values in variables and use them for everything that needs a caller:
+The first answers with the user. The second answers with `access_token`,
+readable there and nowhere else: tokens are stored hashed. From here the
+session names the caller, so nothing below sends an id over the wire:
 
 ```bash
 TOKEN=...      # access_token from the sign-in
-USER_ID=...    # id from the registration
 
 curl -s localhost:8000/sessions/current -H "Authorization: Bearer $TOKEN"
 
-curl -s -X POST localhost:8000/users/$USER_ID/items \
+curl -s -X POST localhost:8000/items \
   -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
   -H 'X-Request-ID: demo-1' -d '{"name":"First item"}'
+
+curl -s localhost:8000/items -H "Authorization: Bearer $TOKEN"
 ```
 
 Creating the item dispatches a job, pushed only after the transaction commits.

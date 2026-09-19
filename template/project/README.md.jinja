@@ -189,7 +189,8 @@ next section.
 | `GET /users/{id}` | `Caller` + `view` | any caller today; one arm of the policy narrows it |
 | `PATCH`, `DELETE /users/{id}` | `Caller` + `update` / `delete` | the owner, or an admin |
 | `PUT /users/{id}/password` | `Caller` + `change-password` + the current password | the owner alone |
-| `/users/{owner_id}/items` | `Caller` + the items policy | the owner, or an admin |
+| `/items` | `Caller` | the caller's own; the session names the owner, so the URL does not |
+| `/users/{owner_id}/items` | `Caller` + the items policy | the owner, or an admin acting for them |
 
 The password lives on its own route rather than in `UserUpdate` because a
 password set without proving knowledge of the old one is a takeover primitive
@@ -364,7 +365,7 @@ it{% else %} carries whatever the caller bound{% endif %} — one query, both ha
 
 ```sh
 {% if has_api %}just dev
-curl -s -X POST localhost:8000/users/<id>/items -H "X-Request-ID: demo-1" ...{% else %}just worker{% endif %}
+curl -s -X POST localhost:8000/items -H "Authorization: Bearer <token>" -H "X-Request-ID: demo-1" ...{% else %}just worker{% endif %}
 # then, in the logs
 grep '"request_id": "demo-1"' ...
 ```

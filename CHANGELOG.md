@@ -4,6 +4,13 @@ Releases are tags. `keel new` generates from the latest one, and `keel update`
 moves a project between them. Entries say what changed for someone building on
 Keel; the ADRs say why.
 
+## Unreleased
+
+- **`/items` is the caller's own.** The session names the owner, so a client
+  never sends its user id over the wire to work with its items.
+  `/users/{owner_id}/items` stays for an administrator acting for somebody,
+  and both go through the same service and policy.
+
 ## v0.1.3 — 2026-09-19
 
 - **The app containers migrate the database on start.** `just dev` ran the

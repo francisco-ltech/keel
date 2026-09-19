@@ -17,7 +17,7 @@ deploy chose.
 
 **The direction of the call is the point.** ``handle`` calls
 :func:`app.modules.items.service.get_item` — the same function
-``GET /users/{owner_id}/items/{item_id}`` calls. There is no worker-only copy of
+``GET /items/{item_id}`` calls. There is no worker-only copy of
 the read, so a change to how an item is fetched cannot be right for HTTP and
 wrong for the queue.
 
