@@ -335,19 +335,21 @@ def _copier(command: str) -> Any:
 
 @contextmanager
 def _quiet_about_dirty_checkouts() -> Iterator[None]:
-    """Silence copier's warning that a local checkout's uncommitted changes were used.
+    """Silence copier's warnings about the shape of a local checkout.
 
-    That is the point of ``--source .``: a contributor generates from the code
-    they are changing. Warned about, it is noise; under a suite where warnings
-    are errors, it is a failure.
+    Uncommitted changes are the point of ``--source .``: a contributor
+    generates from the code they are changing. A shallow clone is what a CI
+    runner checks out. Warned about, both are noise; under a suite where
+    warnings are errors, both are failures.
 
     Yields:
         Nothing; run copier inside the block.
     """
-    from copier.errors import DirtyLocalWarning
+    from copier.errors import DirtyLocalWarning, ShallowCloneWarning
 
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", DirtyLocalWarning)
+        warnings.simplefilter("ignore", ShallowCloneWarning)
         yield
 
 

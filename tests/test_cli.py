@@ -130,6 +130,14 @@ GIT_IDENTITY = ["-c", "user.name=keel tests", "-c", "user.email=tests@keel.inval
 """So a commit in a scratch clone works where no identity is configured, as in CI."""
 
 
+@pytest.fixture(autouse=True)
+def _git_identity(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The CLI's own first commit needs an identity too, and a CI runner has none."""
+    for role in ("AUTHOR", "COMMITTER"):
+        monkeypatch.setenv(f"GIT_{role}_NAME", "keel tests")
+        monkeypatch.setenv(f"GIT_{role}_EMAIL", "tests@keel.invalid")
+
+
 def git(*args: str, cwd: Path) -> str:
     """Run git in *cwd* with a fixed identity and return its output."""
     return subprocess.run(
@@ -210,7 +218,12 @@ def test_update_adds_the_worker_half_to_an_api_project(
     assert main(["new", str(dest), "--shape", "api", *common]) == 0
     assert not (dest / "app" / "worker.py").exists()
 
-    assert main(["update", str(dest), "--data", "service_shape=both", "--defaults"]) == 0
+    # HEAD by name: with a release tagged, copier's default is the tag, and the
+    # clone's HEAD is the working tree this test exists to check.
+    assert (
+        main(["update", str(dest), "--ref", "HEAD", "--data", "service_shape=both", "--defaults"])
+        == 0
+    )
 
     assert (dest / "app" / "worker.py").is_file()
     assert (dest / "app" / "modules" / "items" / "jobs.py").is_file()

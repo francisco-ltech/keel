@@ -53,6 +53,11 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Full history and tags: the installer's tests clone this checkout as a
+          # template, and copier reads its revisions. A shallow clone warns, and
+          # the suite makes warnings errors.
+          fetch-depth: 0
 
       - uses: astral-sh/setup-uv@v5
         with:
