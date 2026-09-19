@@ -85,6 +85,42 @@ just dev              # the app in containers next to them: http://localhost:800
   against the real Postgres inside a transaction rolled back per test, and Docker
   Compose for the services.
 
+### Try it
+
+With `just dev` running, register a user and sign in:
+
+```bash
+curl -s -X POST localhost:8000/users -H 'Content-Type: application/json' \
+  -d '{"email":"ada@example.com","full_name":"Ada Lovelace","password":"correct-horse-battery-staple"}'
+
+curl -s -X POST localhost:8000/sessions -H 'Content-Type: application/json' \
+  -d '{"email":"ada@example.com","password":"correct-horse-battery-staple"}'
+```
+
+The first answers with the user, id included. The second answers with
+`access_token`, readable there and nowhere else: tokens are stored hashed. Put
+the two values in variables and use them for everything that needs a caller:
+
+```bash
+TOKEN=...      # access_token from the sign-in
+USER_ID=...    # id from the registration
+
+curl -s localhost:8000/sessions/current -H "Authorization: Bearer $TOKEN"
+
+curl -s -X POST localhost:8000/users/$USER_ID/items \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -H 'X-Request-ID: demo-1' -d '{"name":"First item"}'
+```
+
+Creating the item dispatches a job, pushed only after the transaction commits.
+With the `both` shape, `docker compose logs worker | grep demo-1` shows the
+worker running it a moment later, with the request id the request carried.
+Then the operator's endpoints, no token needed: `/ready` asks every dependency,
+`/metrics` is what Prometheus scrapes, and with `DEBUG=true` in `.env`,
+`/_inspector/requests` lists the requests above as timelines of their queries,
+cache calls, dispatches and log lines. Without a token, `/sessions/current` and
+the items routes answer 401.
+
 That install line takes the `keel` command from the tip of `main`. The
 template it generates from, and the Keel version a project pins, come from the
 latest release regardless. To hold the command itself at a release, name the
