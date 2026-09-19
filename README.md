@@ -56,10 +56,12 @@ uv tool install "keel[cli] @ git+https://github.com/francisco-ltech/keel"
 keel new invoices     # asks for a name, a description and the shape
 cd invoices
 just up               # Postgres on 5433 and Redis on 6380, via Docker Compose
-just migrate
-just test
 just dev              # the app in containers next to them: http://localhost:8000/docs
 ```
+
+The app containers migrate the database on start, so `just dev` is enough.
+`just migrate` applies migrations from the host, and `just test` runs the
+project's suite against the same Postgres.
 
 ### What that buys you
 

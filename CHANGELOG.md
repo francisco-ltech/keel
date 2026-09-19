@@ -4,6 +4,18 @@ Releases are tags. `keel new` generates from the latest one, and `keel update`
 moves a project between them. Entries say what changed for someone building on
 Keel; the ADRs say why.
 
+## Unreleased
+
+- **The app containers migrate the database on start.** `just dev` ran the
+  API against whatever schema the host's `just migrate` had reached, and a
+  database it had not reached answered every request with a 500. Both
+  containers now run `python -m app.migrate` before their process, and so
+  does `just migrate`.
+- **Migrations run under Keel's advisory lock.** `app.migrate` calls Keel's
+  locked `upgrade`, and the generated `env.py` now honours the connection it
+  hands in; before, nothing in a generated project ever took the lock, so two
+  replicas starting together could both run the DDL.
+
 ## v0.1.2 — 2026-09-19
 
 - **The app containers can fetch Keel.** A project generated from the

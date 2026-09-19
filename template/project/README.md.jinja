@@ -32,7 +32,7 @@ domain, which is what stops the two halves from drifting.{% endif %}
 just install          # uv sync
 just up               # Postgres and Redis, if you are not already running them
 cp .env.example .env  # optional; every value has a working default
-just migrate          # apply migrations
+just migrate          # apply migrations from the host; `just dev` also does it on start
 just dev              # {% if service_shape == 'api' %}the API in a container: http://localhost:8000/docs{% elif service_shape == 'worker' %}the worker in a container{% else %}the API on :8000 and the worker, in containers{% endif %}
 ```
 

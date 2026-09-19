@@ -1,0 +1,61 @@
+"""Apply every pending migration, under Keel's advisory lock.
+
+    python -m app.migrate
+
+What every app container runs before its process, and what ``just migrate``
+runs on the host. Keel's :func:`~keel.database.migrations.upgrade` takes a
+session-level Postgres advisory lock first, so any number of replicas starting
+at once produce one migration and the rest wait, then find nothing to do.
+Without it, two containers starting together both read an empty
+``alembic_version``, both run the DDL, and one crash-loops on a duplicate
+table — which is why the bare ``alembic upgrade head`` is not what runs here.
+
+The lock lives in Keel rather than in ``migrations/env.py`` so that ``env.py``
+stays Alembic's own shape; it honours the connection this module hands it, and
+that is the whole of the coupling.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+from pathlib import Path
+
+from keel.database import Database
+from keel.database.migrations import AlembicConfig, upgrade
+
+from app.settings import Settings, get_settings
+
+MIGRATIONS = AlembicConfig(
+    script_location=Path(__file__).resolve().parent / "migrations",
+    ini_path=Path(__file__).resolve().parents[1] / "alembic.ini",
+)
+"""Found from this file rather than the working directory, so the command runs from anywhere."""
+
+
+async def migrate(settings: Settings | None = None) -> None:
+    """Upgrade the configured database to the latest revision.
+
+    Args:
+        settings: Configuration to use. Defaults to reading the environment,
+            which is what a container and a shell both do.
+    """
+    config = settings if settings is not None else get_settings()
+    database = Database(config.database_config())
+    try:
+        await upgrade(database, MIGRATIONS)
+    finally:
+        await database.close()
+
+
+def main() -> None:
+    """Run the migration with a log line per revision applied. The console entrypoint."""
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
+    asyncio.run(migrate())
+
+
+__all__ = ["MIGRATIONS", "main", "migrate"]
+
+
+if __name__ == "__main__":
+    main()

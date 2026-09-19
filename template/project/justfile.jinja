@@ -66,9 +66,9 @@ types:
 types-mypy:
     uv run mypy app tests
 
-# Apply every pending migration.
+# Apply every pending migration, under the advisory lock the containers use too.
 migrate:
-    uv run alembic upgrade head
+    uv run python -m app.migrate
 
 # Autogenerate a migration: just revision "add widgets"
 revision MESSAGE:

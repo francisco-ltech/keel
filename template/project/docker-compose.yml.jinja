@@ -57,7 +57,7 @@ services:
       [
         "sh",
         "-c",
-        "uv sync && exec uv run uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload --no-access-log",
+        "uv sync && uv run python -m app.migrate && exec uv run uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload --no-access-log",
       ]
     environment:
       UV_PROJECT_ENVIRONMENT: /opt/venv
@@ -88,7 +88,9 @@ services:
     # inside the container to fetch it. A path-linked checkout needs no git.
     image: ghcr.io/astral-sh/uv:python{{ python_version }}-bookworm{% if keel_source == 'path' %}-slim{% endif %}
     working_dir: /srv/app
-    command: ["sh", "-c", "uv sync && exec uv run python -m app.worker"]
+    # Migrates first, like the API: app.migrate takes an advisory lock, so two
+    # containers doing it at once is one migration and one wait.
+    command: ["sh", "-c", "uv sync && uv run python -m app.migrate && exec uv run python -m app.worker"]
     environment:
       UV_PROJECT_ENVIRONMENT: /opt/venv
       UV_LINK_MODE: copy
