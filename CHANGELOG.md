@@ -4,6 +4,14 @@ Releases are tags. `keel new` generates from the latest one, and `keel update`
 moves a project between them. Entries say what changed for someone building on
 Keel; the ADRs say why.
 
+## Unreleased
+
+- **The app containers can fetch Keel.** A project generated from the
+  repository depends on Keel as a git source, and the slim image `just dev`
+  ran had no git, so `uv sync` in the container failed with "Git executable
+  not found". Such a project now uses the full uv image; a checkout-linked
+  project keeps the slim one.
+
 ## v0.1.1 — 2026-09-19
 
 The first release's last step, `just dev`, failed on a fresh Mac and could

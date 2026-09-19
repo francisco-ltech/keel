@@ -47,7 +47,9 @@ services:
 
   api:
     profiles: ["app"]
-    image: ghcr.io/astral-sh/uv:python{{ python_version }}-bookworm-slim
+    # The full image, not `-slim`, when Keel is a git dependency: uv needs git
+    # inside the container to fetch it. A path-linked checkout needs no git.
+    image: ghcr.io/astral-sh/uv:python{{ python_version }}-bookworm{% if keel_source == 'path' %}-slim{% endif %}
     working_dir: /srv/app
     # `--no-access-log`: app/observability.py writes that line itself, in the
     # configured format and with the request id on it.
@@ -82,7 +84,9 @@ services:
 
   worker:
     profiles: ["app"]
-    image: ghcr.io/astral-sh/uv:python{{ python_version }}-bookworm-slim
+    # The full image, not `-slim`, when Keel is a git dependency: uv needs git
+    # inside the container to fetch it. A path-linked checkout needs no git.
+    image: ghcr.io/astral-sh/uv:python{{ python_version }}-bookworm{% if keel_source == 'path' %}-slim{% endif %}
     working_dir: /srv/app
     command: ["sh", "-c", "uv sync && exec uv run python -m app.worker"]
     environment:
