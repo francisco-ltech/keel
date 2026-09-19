@@ -4,7 +4,7 @@ Releases are tags. `keel new` generates from the latest one, and `keel update`
 moves a project between them. Entries say what changed for someone building on
 Keel; the ADRs say why.
 
-## Unreleased
+## v0.1.2 — 2026-09-19
 
 - **The app containers can fetch Keel.** A project generated from the
   repository depends on Keel as a git source, and the slim image `just dev`
