@@ -19,8 +19,9 @@ Validating into a :class:`~app.modules.users.schemas.UserRead` inside the block
 makes that class of bug unrepresentable.
 
 **Authorization is here, not in the router.** Every function that acts on a
-named account opens with ``authorize``, before any unit of work, and the rule it
-consults lives in ``app/policies.py``. The router says who is calling; this
+named account resolves the ``pid`` the route named to its row and then calls
+``authorize`` with the row's primary key, and the rule it consults lives in
+``app/policies.py``. The router says who is calling; this
 layer says what they may do with that. Putting it on the HTTP edge would guard
 only the callers who arrive over HTTP, and this module is reachable from
 {% if has_worker %}a job handler, {% endif %}a management command and a test. ``create_user`` is the

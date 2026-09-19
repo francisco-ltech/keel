@@ -40,7 +40,7 @@ from sqlalchemy import ColumnExpressionArgument, CursorResult, func, literal, se
 from sqlalchemy import delete as sql_delete
 from sqlalchemy.orm import selectinload
 
-from keel.database.model import Model
+from keel.database.model import Model, PublicId
 from keel.database.pagination import Page, clamp_limit, decode_cursor, encode_cursor
 from keel.database.soft_delete import SoftDeleteMixin, with_deleted
 from keel.exceptions import RecordNotFoundError
@@ -192,31 +192,14 @@ class Repository[ModelT: Model]:
             The row, or ``None`` if it does not exist or is soft deleted.
 
         Raises:
-            TypeError: If the model has no ``pid`` column. A wiring mistake,
-                named as one, rather than an ``AttributeError`` from SQLAlchemy.
+            TypeError: If the model does not mix in ``PublicId``. Checked on
+                the class rather than by looking for an attribute called
+                ``pid``, which a property or a plain attribute would satisfy
+                while the query silently matched nothing.
         """
-        column = getattr(self.model, "pid", None)
-        if column is None:
+        if not issubclass(self.model, PublicId):
             raise TypeError(f"{self.model.__name__} has no pid; mix in keel.database.PublicId")
-        return await self.first_from(self.query().where(column == pid), *options)
-
-    async def get_by_pid_or_fail(self, pid: uuid.UUID, *options: Any) -> ModelT:
-        """Fetch one row by its public identifier, or raise.
-
-        Args:
-            pid: The public identifier.
-            *options: Loader options.
-
-        Returns:
-            The row.
-
-        Raises:
-            RecordNotFoundError: If no such row is visible.
-        """
-        found = await self.get_by_pid(pid, *options)
-        if found is None:
-            raise RecordNotFoundError(self.model.__name__, pid)
-        return found
+        return await self.first_from(self.query().where(self.model.pid == pid), *options)
 
     async def first(
         self,

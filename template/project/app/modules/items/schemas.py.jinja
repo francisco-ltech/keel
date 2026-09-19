@@ -2,10 +2,12 @@
 
 Pydantic only; no model imports.
 
-``owner_id`` appears on :class:`ItemRead` but on neither write schema. The owner
-is addressed in the URL — ``/users/{id}/items`` — so it cannot be set or changed
-by a body that disagrees with the path, and transferring ownership stays a
-distinct operation with its own rules rather than a field in a partial update.
+No schema carries an owner. The owner is whoever the route was addressed to —
+the caller at ``/items``, a named account at ``/users/{owner_pid}/items`` — so
+it cannot be set or changed by a body that disagrees with the path, and
+transferring ownership stays a distinct operation with its own rules rather
+than a field in a partial update. What comes back carries the item's ``pid``
+and never a primary key.
 """
 
 from __future__ import annotations

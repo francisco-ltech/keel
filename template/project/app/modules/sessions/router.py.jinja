@@ -53,7 +53,8 @@ async def current_session(_: Caller) -> Profile:
             caller from the context, exactly as a job would.
 
     Returns:
-        The caller's profile, with no id: the session names them.
+        The caller's profile: what they see of themselves, with their public
+        identifier and never the primary key.
     """
     return await service.current_user()
 

@@ -105,6 +105,18 @@ class Skus(Repository[Sku]):
     model = Sku
 
 
+class Label(Model, UUIDPrimaryKey):
+    """Not a PublicId model, but with something called pid, to fool a lazy check."""
+
+    __tablename__ = "keel_test_labels"
+
+    text_: Mapped[str] = mapped_column("text", String(50))
+
+    @property
+    def pid(self) -> str:
+        return "not a column"
+
+
 class Tags(Repository[Tag]):
     model = Tag
 
@@ -112,7 +124,7 @@ class Tags(Repository[Tag]):
 @pytest.fixture
 async def database(database_url: str) -> AsyncIterator[Database]:
     """A live database with the test tables created and dropped around it."""
-    tables = [cast("Table", model.__table__) for model in (Author, Book, Tag, Sku)]
+    tables = [cast("Table", model.__table__) for model in (Author, Book, Tag, Sku, Label)]
     instance = Database(DatabaseConfig(url=database_url))
     async with instance.connect() as connection:
         await connection.run_sync(Model.metadata.create_all, tables=tables)
@@ -566,19 +578,22 @@ async def test_get_by_pid_finds_the_row_and_only_that_row(database: Database) ->
 
 
 @pytest.mark.postgres
-async def test_get_by_pid_or_fail_names_the_model_and_the_pid(database: Database) -> None:
-    missing = uuid.uuid4()
-    async with uow() as session:
-        with pytest.raises(RecordNotFoundError) as error:
-            await Skus(session).get_by_pid_or_fail(missing)
-    assert "Sku" in str(error.value) and str(missing) in str(error.value)
-
-
-@pytest.mark.postgres
 async def test_a_model_without_a_pid_says_so(database: Database) -> None:
     async with uow() as session:
         with pytest.raises(TypeError, match="PublicId"):
             await Tags(session).get_by_pid(uuid.uuid4())
+
+
+@pytest.mark.postgres
+async def test_a_model_whose_pid_is_not_a_column_says_so(database: Database) -> None:
+    """An attribute called pid is not the mixin; matching nothing would be silent."""
+
+    class Labels(Repository[Label]):
+        model = Label
+
+    async with uow() as session:
+        with pytest.raises(TypeError, match="PublicId"):
+            await Labels(session).get_by_pid(uuid.uuid4())
 
 
 @pytest.mark.postgres

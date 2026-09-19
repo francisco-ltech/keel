@@ -15,7 +15,9 @@ waiting for compared a path parameter spelled ``user_id`` against the caller,
 and this path says ``owner_pid``, so it never fitted. A rule that takes the
 resource rather than the request does not care what the path spells.
 
-Every route carries a tag, and no route touches a session or a repository.
+Every route carries a tag, and no route touches a session or a repository: the
+owner-addressed ones call two service functions, one to resolve the owner and
+one to act, each its own unit of work.
 """
 
 from __future__ import annotations

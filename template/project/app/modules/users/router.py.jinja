@@ -20,12 +20,12 @@ router's, and "may that somebody" belongs with the operation, where a job or a
 management command reaching the same function gets the same answer. The
 reasoning behind each rule is worth keeping when you adapt this:
 
-* **The reads are behind a caller.** ``GET /users`` returns every registered
+* **The listing is an administrator's.** ``GET /users`` returns every registered
   email address, which is the exact question ``POST /sessions`` spends ~40 ms
   of Argon2 and a page of prose refusing to answer. An enumeration defence with
-  a JSON listing one route over is not a defence, and the cheap fix is the right
-  one. Open it up if your users are genuinely a public directory — but decide
-  that, rather than inherit it.
+  a JSON listing one route over is not a defence, so ``directory_policy`` hands
+  the listing to the admin role and nobody else. Widen it if your users are
+  genuinely a public directory — but decide that, rather than inherit it.
 * **The writes are behind ownership**, decided by ``account_policy``. ``PATCH``
   and ``DELETE`` change or remove an account, so an unauthenticated one is
   account takeover: read an address from the listing, set a password on it, sign

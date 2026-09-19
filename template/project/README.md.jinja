@@ -190,7 +190,7 @@ next section.
 | `PATCH`, `DELETE /users/{pid}` | `Caller` + `update` / `delete` | the owner, or an admin |
 | `PUT /users/{pid}/password` | `Caller` + `change-password` + the current password | the owner alone |
 | `/items` | `Caller` | the caller's own; the session names the owner, so the URL does not |
-| `/users/{owner_id}/items` | `Caller` + the items policy | the owner, or an admin acting for them |
+| `/users/{owner_pid}/items` | `Caller` + the items policy | the owner, or an admin acting for them |
 
 The password lives on its own route rather than in `UserUpdate` because a
 password set without proving knowledge of the old one is a takeover primitive

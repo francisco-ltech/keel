@@ -25,9 +25,12 @@ that is the only one clients ever see.
 `keel.database.PublicId` adds a `pid` column: unique, indexed, assigned
 eagerly like the primary key so a row has one before it is flushed, with a
 server default so a backfill or a `psql` insert cannot leave it empty. The
-repository gains `get_by_pid` and `get_by_pid_or_fail`, and a model without
-the mixin gets a `TypeError` naming it rather than an `AttributeError` from
-SQLAlchemy.
+repository gains `get_by_pid`, and a model without the mixin gets a `TypeError` naming it —
+checked on the class, since an attribute that merely happens to be called
+`pid` would let the query match nothing in silence. There is no
+`get_by_pid_or_fail`: the first draft had one, and nothing called it, because
+its `RecordNotFoundError` is a 500 to the template's error handlers rather
+than a 404.
 
 Two columns rather than a random primary key, because the two reasons pull
 apart: the index wants order, the wire wants unguessability, and one column
@@ -79,11 +82,42 @@ says it is not.
 an earlier release picks it up with `keel update`, and its containers migrate
 on start.
 
-**`card_key` and the index job carry the `pid`**, so a cached card never
-holds a primary key either.
+**A cached card holds no primary key**: `card_key` and the card carry the
+`pid`. The index job's payload does carry the owner's primary key, because it
+rebuilds `Identity(id=...)` to act with the owner's authority, and a queue
+payload is internal: serialised to Redis and, on exhaustion, to
+`keel_failed_jobs`, neither of which a client reads.
+
+**No error message names a primary key.** A `NotFoundError`'s detail is
+copied into the problem document, and the first draft's items messages named
+the owner's key on every 404, which a `timestamp_of` turns back into the
+account's creation time. They say `pid` or nothing now.
+
+**The profile carries the `pid`.** The first draft returned no identifier from
+`GET /sessions/current`, and a client that had stored only its credentials
+could then never reach `PUT /users/{pid}/password`, the one route this ADR
+calls the owner's alone. A `pid` is public by design; the caller's is the one
+identifier a client needs.
 
 **The generated README's try-it sequence names no identifier at all**: register,
 sign in, and work with `/items`.
+
+## What the review caught
+
+- **A primary key crossed the wire on every items 404**, in the message
+  copied into the problem document; `timestamp_of` on it gives the account's
+  creation time. Consequences.
+- **A returning client could not learn its own `pid`**, so it could never
+  change its own password. The profile carries it now.
+- **Five docstrings still described authorize-before-lookup**, the rule this
+  ADR reverses.
+- **`get_by_pid`'s guard looked for an attribute called `pid`**, which a
+  property satisfies while the query matches nothing; it checks the mixin now.
+- **`get_by_pid_or_fail` had no caller and could not have one.** Removed.
+- **The owner-addressed item routes resolve the owner in one unit of work and
+  act in another.** Kept, and the window's only symptom, a 404, names no key;
+  folding the resolution into every service function would give each two
+  owner parameters for one race that already answers correctly.
 
 ## Verification
 

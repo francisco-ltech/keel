@@ -11,13 +11,18 @@ service or repository, but nothing reaches upward into a router. Doing the check
 explicitly rather than letting the foreign key fail turns a 500 with an
 ``IntegrityError`` in the logs into a 404 that says which user is missing.
 
-**Every function opens with ``authorize``, before ``uow()``.** The rule lives in
-``app/policies.py``; this layer only says which ability is being exercised on
-whose items. It is here rather than in the router because this is the seam every
-entrypoint goes through — the router,
+**Every function that acts on an owner's items calls ``authorize`` with the
+owner's primary key.** The rule lives in ``app/policies.py``; this layer only
+says which ability is being exercised on whose items. It is here rather than in
+the router because this is the seam every entrypoint goes through — the router,
 {% if has_worker %}a job handler, {% endif %}a management command, a test — and a guard on the HTTP edge
-protects only the callers that arrive over HTTP. Refusing before the block also
-means a denied request opens no transaction and borrows no connection.
+protects only the callers that arrive over HTTP. The caller's own routes hand
+over the key the session already holds; the owner-addressed routes first turn
+the public identifier they were given into a key with :func:`resolve_owner`,
+one read by a random ``pid`` that an authenticated caller was given (ADR 0014).
+
+**No error message names a primary key.** A ``NotFoundError``'s detail is
+copied into the response body, so it says ``pid`` or nothing.
 {% if has_worker %}
 This module is also where the two entrypoints meet. ``create_item`` dispatches
 :class:`app.modules.items.jobs.IndexItem` from inside its unit of work, so the
@@ -56,9 +61,9 @@ async def create_item(owner_id: UUID, payload: ItemCreate) -> ItemRead:
 
     Raises:
         AuthorizationDeniedError: If the caller may not add to this owner's
-            items. Raised before the owner is looked up, so a stranger cannot
-            use a 404 to learn which ids are registered.
-        NotFoundError: If the owner does not exist.
+            items.
+        NotFoundError: If the owner does not exist. Without naming its key:
+            the detail reaches the response body.
     """
     authorize("create", ItemsOf(owner_id))
 {%- if has_worker %}
@@ -68,7 +73,7 @@ async def create_item(owner_id: UUID, payload: ItemCreate) -> ItemRead:
 {% endif %}
     async with uow() as session:
         if await UserRepository(session).get(owner_id) is None:
-            raise NotFoundError(f"no user with id {owner_id}")
+            raise NotFoundError("no such owner")
 
         item = await ItemRepository(session).create(
             name=payload.name,
@@ -91,7 +96,9 @@ async def resolve_owner(owner_pid: UUID) -> UUID:
 
     What the owner-addressed routes call first: the URL names a ``pid``, the
     service and the policy work in primary keys, and this is the one place
-    the translation happens.
+    the translation happens. It is its own unit of work, so an owner deleted
+    between this call and the next is a clean 404 from the next one — one
+    that names no key.
 
     Args:
         owner_pid: The owner's public identifier.
@@ -156,7 +163,7 @@ async def get_item(pid: UUID, owner_id: UUID) -> ItemRead:
     async with uow() as session:
         item = await ItemRepository(session).get_for_owner(pid, owner_id)
         if item is None:
-            raise NotFoundError(f"no item with pid {pid} for owner {owner_id}")
+            raise NotFoundError(f"no item with pid {pid}")
         return ItemRead.model_validate(item)
 
 
@@ -182,7 +189,7 @@ async def update_item(pid: UUID, owner_id: UUID, payload: ItemUpdate) -> ItemRea
         items = ItemRepository(session)
         item = await items.get_for_owner(pid, owner_id)
         if item is None:
-            raise NotFoundError(f"no item with pid {pid} for owner {owner_id}")
+            raise NotFoundError(f"no item with pid {pid}")
 
         changes: dict[str, Any] = payload.model_dump(exclude_unset=True)
         updated = await items.update(item, changes)
@@ -205,7 +212,7 @@ async def delete_item(pid: UUID, owner_id: UUID) -> None:
         items = ItemRepository(session)
         item = await items.get_for_owner(pid, owner_id)
         if item is None:
-            raise NotFoundError(f"no item with pid {pid} for owner {owner_id}")
+            raise NotFoundError(f"no item with pid {pid}")
         await items.delete(item)
 
 

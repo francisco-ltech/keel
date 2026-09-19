@@ -108,7 +108,26 @@ async def test_a_token_authenticates_a_request(client: AsyncClient) -> None:
     assert response.status_code == 200, response.text
     body = response.json()
     assert body["email"] == DEFAULT_USER["email"]
-    assert "id" not in body, "the session names the caller; no id goes over the wire"
+    assert "id" not in body, "never the primary key"
+    assert body["pid"], "the public identifier the account routes take"
+
+
+async def test_a_returning_caller_can_change_its_own_password(client: AsyncClient) -> None:
+    """Register, throw the response away, sign in: what the API hands back must be enough."""
+    token = await sign_in(client)  # registers, discards the creation response, signs in
+    me = (await client.get("/sessions/current", headers=bearer(token))).json()
+
+    changed = await client.put(
+        f"/users/{me['pid']}/password",
+        json={"current_password": DEFAULT_USER["password"], "new_password": "a-new-long-password"},
+        headers=bearer(token),
+    )
+
+    assert changed.status_code == 204, changed.text
+    again = await client.post(
+        "/sessions", json={"email": DEFAULT_USER["email"], "password": "a-new-long-password"}
+    )
+    assert again.status_code == 201
 
 
 async def test_an_unauthenticated_request_is_refused(client: AsyncClient) -> None:

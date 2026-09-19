@@ -124,8 +124,8 @@ async def current_user() -> Profile:
     ``acting_as``.
 
     Returns:
-        The caller's profile: what they see of themselves, without an id, since
-        the session is what names them.
+        The caller's profile: what they see of themselves, with their public
+        identifier and never the primary key.
 
     Raises:
         AuthenticationError: If the row behind the token has since been deleted.

@@ -14,9 +14,11 @@ Keel; the ADRs say why.
   the session names the caller.
 - **A primary key never crosses the wire.** `keel.database.PublicId` adds a
   random `pid` beside the time-ordered primary key, with `get_by_pid` on the
-  repository; every route that names a user or an item names its `pid`, and
-  every response carries the `pid` and nothing else. Migration
-  `0003_public_ids` backfills existing rows. ADR 0014.
+  repository; every route that names a user or an item names its `pid`, every
+  response carries the `pid` and nothing else, and no error message names a
+  key. `GET /sessions/current` carries the caller's `pid`, since the account
+  routes take it. Migration `0003_public_ids` backfills existing rows. ADR
+  0014.
 - **Administrative routes need an administrator.** Listing users is `list`
   on a `Directory` resource, granted to the admin role; reading another
   account is the owner's or an admin's, not any signed-in caller's.

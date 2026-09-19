@@ -108,12 +108,15 @@ class UserRead(BaseModel):
 class Profile(BaseModel):
     """What a caller sees of their own account.
 
-    No ``id``: the session already names the caller, and every route that acts
-    on the caller's own things reads who they are from it. An identifier over
-    the wire is only for addressing somebody *else*, which is
-    :class:`UserRead`'s job on the routes an administrator uses.
+    Carries the ``pid`` and never the primary key. A client that stored only
+    its credentials has no other way to learn the identifier its own account
+    routes take — ``PUT /users/{pid}/password`` is the owner's alone, and the
+    owner has to be able to reach it — and a ``pid`` is public by design: a
+    random value that says nothing about the row behind it. The routes for the
+    caller's own things that need no identifier, ``/items``, still take none.
 
     Attributes:
+        pid: The caller's public identifier, as the account routes take it.
         email: The caller's address.
         full_name: Display name.
         is_active: Whether the account is enabled.
@@ -122,6 +125,7 @@ class Profile(BaseModel):
 
     model_config = ConfigDict(from_attributes=True)
 
+    pid: UUID
     email: EmailStr
     full_name: str
     is_active: bool

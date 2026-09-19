@@ -71,7 +71,8 @@ class Account:
     """One user's account, as a caller addresses it.
 
     Attributes:
-        user_id: Whose account. The path parameter, before any row is read.
+        user_id: Whose account, by primary key: the row a service resolved from
+            the ``pid`` a route named.
     """
 
     user_id: UUID
@@ -92,8 +93,9 @@ class ItemsOf:
     """One owner's items, as a caller addresses them.
 
     The collection rather than the item, because every items route is scoped by
-    owner — ``/users/{owner_id}/items`` — and the service reads nothing that is
-    not already narrowed to that owner. A per-item rule would be asking the same
+    owner — the caller's own at ``/items``, a named one at
+    ``/users/{owner_pid}/items`` — and the service reads nothing that is not
+    already narrowed to that owner. A per-item rule would be asking the same
     question twice.
 
     Attributes:
