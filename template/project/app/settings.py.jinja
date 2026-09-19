@@ -24,7 +24,8 @@ to nothing does not raise.
 
 from __future__ import annotations
 
-from functools import lru_cache
+{% if has_worker %}import tempfile
+{% endif %}from functools import lru_cache
 {%- if has_worker %}
 from pathlib import Path
 {%- endif %}
@@ -318,7 +319,7 @@ class WorkerSettings(BaseSettings):
 
     model_config = SettingsConfigDict(env_prefix="WORKER_", env_file=".env", extra="ignore")
 
-    health_file: Path = Path("/tmp/{{ project_slug }}-worker.health")
+    health_file: Path = Path(tempfile.gettempdir()) / "{{ project_slug }}-worker.health"
     health_max_age: float = Field(default=30.0, gt=0)
     metrics_port: int = Field(default=0, ge=0, le=65535)
 

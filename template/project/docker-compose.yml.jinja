@@ -55,7 +55,7 @@ services:
       [
         "sh",
         "-c",
-        "uv sync && exec uv run uvicorn app.main:app --host 0.0.0.0 --port 8000 --no-access-log",
+        "uv sync && exec uv run uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload --no-access-log",
       ]
     environment:
       UV_PROJECT_ENVIRONMENT: /opt/venv
@@ -64,6 +64,9 @@ services:
       REDIS_URL: redis://redis:6379/0
     volumes:
       - .:/srv/app
+      # The container's virtualenv, kept across restarts so `uv sync` is a no-op
+      # the second time. Not `./.venv`: that holds host binaries.
+      - api-venv:/opt/venv
 {%- if keel_source == 'path' %}
       # Mounted at its host path so `[tool.uv.sources] keel = { path = ... }`
       # resolves to the same place inside the container as outside it.
@@ -91,6 +94,7 @@ services:
       WORKER_HEALTH_FILE: /tmp/{{ project_slug }}-worker.health
     volumes:
       - .:/srv/app
+      - worker-venv:/opt/venv
 {%- if keel_source == 'path' %}
       - {{ keel_path }}:{{ keel_path }}:ro
 {%- endif %}
@@ -112,3 +116,9 @@ services:
 volumes:
   postgres-data:
   redis-data:
+{%- if has_api %}
+  api-venv:
+{%- endif %}
+{%- if has_worker %}
+  worker-venv:
+{%- endif %}

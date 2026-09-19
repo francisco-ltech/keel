@@ -52,6 +52,13 @@ reads a git template's config from its root (ADR 0013).
   them. Autogenerate silently emits `drop_table` otherwise.
 - **A cycle between `jobs.py` and `service.py`.** The service dispatches the job
   and the handler calls the service. Defer one import inside the function.
+- **A recipe that is a shell script.** The `both` shape's `dev` was a bash
+  script with `wait -n`, which needs bash 4.3; macOS ships 3.2, so it exited 2
+  on a fresh Mac, and it could never have run under PowerShell. The generator
+  suite never runs `dev`, so nothing caught it. Every recipe in the generated
+  justfile is now a plain command that `sh` and PowerShell both accept, and
+  anything needing process supervision runs in Docker Compose. Keep it that
+  way, and exercise a recipe by hand when you change it.
 - **Workspace environment leaking into the generated project.** The justfile
   exports `DATABASE_URL`, and a real variable outranks a `.env` file in
   pydantic-settings, so a generated project silently used the wrong database.

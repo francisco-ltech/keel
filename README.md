@@ -48,7 +48,8 @@ docs/adr/          why things are shaped the way they are
 ## Getting started
 
 You need [uv](https://docs.astral.sh/uv/), [just](https://just.systems/) and
-Docker. Install the command once, then generate a service:
+Docker, on macOS, Linux or Windows. Install the command once, then generate a
+service:
 
 ```bash
 uv tool install "keel[cli] @ git+https://github.com/francisco-ltech/keel"
@@ -57,7 +58,7 @@ cd invoices
 just up               # Postgres on 5433 and Redis on 6380, via Docker Compose
 just migrate
 just test
-just dev              # http://localhost:8000/docs
+just dev              # the app in containers next to them: http://localhost:8000/docs
 ```
 
 ### What that buys you
@@ -70,9 +71,11 @@ just dev              # http://localhost:8000/docs
 - Every write inside a unit of work, and no session ever held across a
   request. Authorization policies checked in the service, not the router, so a
   job and a route share one answer to "may this caller do that".
-- With the `both` shape, `just dev` runs the API and the worker side by side
-  from one codebase: creating an item dispatches a job that runs only after
-  the commit, and a nightly schedule prunes dead letters.
+- `just dev` runs the application the way it deploys, in containers from the
+  mounted source, the same command on every OS. With the `both` shape that is
+  the API and the worker side by side from one codebase: creating an item
+  dispatches a job that runs only after the commit, and a nightly schedule
+  prunes dead letters.
 - Structured JSON logs carrying a request id from the API call into the worker
   that runs its job, `/health` and `/ready` that ask every dependency,
   Prometheus metrics at `/metrics`, and a request inspector at `/_inspector`

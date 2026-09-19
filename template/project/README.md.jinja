@@ -33,8 +33,16 @@ just install          # uv sync
 just up               # Postgres and Redis, if you are not already running them
 cp .env.example .env  # optional; every value has a working default
 just migrate          # apply migrations
-{% if service_shape == 'api' %}just dev              # http://localhost:8000/docs{% elif service_shape == 'worker' %}just worker           # the consume side{% else %}just dev              # API on :8000 and a worker, together{% endif %}
+just dev              # {% if service_shape == 'api' %}the API in a container: http://localhost:8000/docs{% elif service_shape == 'worker' %}the worker in a container{% else %}the API on :8000 and the worker, in containers{% endif %}
 ```
+
+`just dev` runs the application the way it deploys: in containers next to
+Postgres and Redis, from this directory mounted in, so it is the same command
+on macOS, Linux and Windows. {% if has_api %}The API reloads when a file changes{% if has_worker %}; the worker
+does not, so after changing a job run `docker compose restart worker`{% endif %}.
+`just serve` runs the API on the host instead, for a debugger.{% else %}The worker does not reload; after
+changing a job run `docker compose restart worker`, or run it on the host with
+`just worker`.{% endif %}
 
 `just` on its own runs the gate: `lint`, `types`, `test`.
 
@@ -447,9 +455,11 @@ Two things follow from that and will eventually surprise someone:
 {% endif %}
 ## Running it in Docker
 
-`just up` starts only Postgres and Redis. `docker compose --profile app up` adds
-{% if has_api and has_worker %}the API and the worker — the same image with a different command, which is the
-whole point of the table above.{% elif has_api %}the API.{% else %}the worker.{% endif %}
+`just up` starts only Postgres and Redis. `just dev` is `docker compose
+--profile app up`, which adds {% if has_api and has_worker %}the API and the worker — the same image with a
+different command, which is the whole point of the table above.{% elif has_api %}the API.{% else %}the worker.{% endif %} Each app
+container keeps its virtualenv in a named volume, so the `uv sync` on start is
+a no-op after the first time. `just down` stops all of it.
 {% if has_worker %}
 The worker's healthcheck is an *exec* probe rather than an HTTP one, since it
 serves no HTTP: `app.healthcheck` exits 0 while the heartbeat file is younger

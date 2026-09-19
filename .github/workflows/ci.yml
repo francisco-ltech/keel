@@ -92,3 +92,44 @@ jobs:
       # generated from it.
       - name: Template generation
         run: uv run pytest -m generator -q
+
+  windows:
+    name: windows (library, and a generated project)
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install Python
+        run: uv python install 3.13
+
+      - name: Install dependencies
+        run: uv sync --all-extras
+
+      # No Postgres or Redis here: service containers are Linux-only on Actions,
+      # so the service-backed tests skip. What this proves is that the library
+      # imports, type-checks and passes its pure tests on Windows, and that a
+      # project generated on Windows installs, lints and type-checks there.
+      - name: Ruff lint
+        run: uv run ruff check .
+
+      - name: Mypy
+        run: uv run mypy src tests
+
+      - name: Pytest, without services
+        run: uv run pytest -m "not generator" -q
+
+      - name: Generate a project on Windows
+        run: uv run keel new gen --source . --shape both --defaults --no-git
+
+      - name: The generated project lints and type-checks on Windows
+        working-directory: gen
+        run: |
+          uv run ruff check .
+          uv run mypy app tests

@@ -4,6 +4,21 @@ Releases are tags. `keel new` generates from the latest one, and `keel update`
 moves a project between them. Entries say what changed for someone building on
 Keel; the ADRs say why.
 
+## Unreleased
+
+- **`just dev` runs the application in Docker, on every OS.** It was a bash
+  script supervising two host processes, and it needed a bash macOS does not
+  ship, so the README's last step failed on a fresh Mac and could not have run
+  on Windows. It is `docker compose --profile app up` now, for every shape: the
+  app next to Postgres and Redis, from the mounted source, with the API
+  reloading on change and each container's virtualenv kept across restarts.
+  `just serve` runs the API on the host for a debugger; `just down` stops all
+  of it.
+- **The generated justfile runs under PowerShell.** Every recipe is a plain
+  command, and `windows-shell` is set, so `just` needs no `sh` on Windows.
+- **The worker's heartbeat file defaults to the OS temp directory** rather
+  than `/tmp`.
+
 ## v0.1.0 — 2026-09-19
 
 The first release: five phases and an installer, built from 2026-09-12.

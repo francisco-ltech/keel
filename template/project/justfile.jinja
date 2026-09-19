@@ -2,6 +2,10 @@
 #
 # `just` with no arguments lists everything; `just check` runs the full gate.
 
+# Recipes run through `sh` where there is one and PowerShell where there is
+# not, so every recipe here is a plain command that both accept.
+set windows-shell := ["powershell.exe", "-NoLogo", "-NoProfile", "-Command"]
+
 # Show the available recipes.
 default:
     @just --list --unsorted
@@ -14,39 +18,24 @@ install:
 up:
     docker compose up -d
 
-# Stop them, keeping the volumes.
-down:
-    docker compose down
+# Run the application the way it deploys: in containers next to Postgres and
+# Redis, from this directory mounted in. One recipe on every OS — no shell
+# script, no process supervision on the host — and the API reloads on change.
+dev:
+    docker compose --profile app up
 
-{% if service_shape == 'api' -%}
+# Stop everything `up` or `dev` started, keeping the volumes.
+down:
+    docker compose --profile app down
+{% if has_api %}
 # `--no-access-log` because app/observability.py already writes one line per
 # request, in the configured format and carrying the request id. Uvicorn's is
 # the same fact in a second shape, which is one line per request to ignore.
 
-# Run the API with reload on http://localhost:8000 (docs at /docs).
-dev:
+# Run the API on the host instead, for a debugger or a faster reload loop.
+serve:
     uv run uvicorn app.main:app --reload --port 8000 --no-access-log
-{%- elif service_shape == 'worker' -%}
-# Run the worker. The only entrypoint this service has.
-dev: worker
-{%- else -%}
-# Two processes from one codebase, exactly as production runs them — different
-# commands against the same image. `wait -n` returns as soon as either exits, so
-# a crashed worker does not leave a half-running stack that still looks fine in
-# the browser; the trap takes the other one down with it.
-
-# Run both entrypoints, the way the service actually deploys.
-dev:
-    #!/usr/bin/env bash
-    set -uo pipefail
-    uv run uvicorn app.main:app --reload --port 8000 --no-access-log &
-    api=$!
-    uv run python -m app.worker &
-    worker=$!
-    trap 'kill "$api" "$worker" 2>/dev/null' EXIT INT TERM
-    wait -n
-{%- endif %}
-{% if has_worker %}
+{% endif %}{% if has_worker %}
 # Run the worker: consumes jobs, runs the schedule, writes its heartbeat file.
 worker:
     uv run python -m app.worker
