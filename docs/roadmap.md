@@ -81,9 +81,8 @@ Not a phase, and done alongside the last one ([ADR
 0013](adr/0013-the-installer.md)): `uv tool install` from the repository puts a
 `keel` command on the path, `keel new` generates a service pinned to the commit
 its scaffold came from, and `keel update` brings it forward. PyPI is the next
-step there, and needs a release discipline before it needs code — and a
-`LICENSE` file before either, MIT like Laravel's, which the repository does not
-yet carry.
+step there, and needs a release discipline before it needs code. The
+repository carries an MIT license, like Laravel's.
 
 ## Next
 

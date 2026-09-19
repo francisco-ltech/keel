@@ -136,3 +136,7 @@ starves. See [ADR 0002](docs/adr/0002-the-unit-of-work.md).
 - [ADR 0006 — the queue](docs/adr/0006-the-queue.md): jobs as Commands, dispatch
   after commit, why the cache's shape did not transfer, and why Keel sweeps for
   orphans itself instead of using SAQ's.
+
+## License
+
+MIT, like Laravel's. See [LICENSE](LICENSE).

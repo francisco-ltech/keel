@@ -5,6 +5,8 @@ build-backend = "hatchling.build"
 [project]
 name = "keel"
 version = "0.1.0"
+license = "MIT"
+license-files = ["LICENSE"]
 description = "Batteries for FastAPI — a facade/driver/fake seam for application subsystems."
 readme = "README.md"
 requires-python = ">=3.13"
