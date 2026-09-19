@@ -4,7 +4,11 @@ Releases are tags. `keel new` generates from the latest one, and `keel update`
 moves a project between them. Entries say what changed for someone building on
 Keel; the ADRs say why.
 
-## Unreleased
+## v0.1.1 — 2026-09-19
+
+The first release's last step, `just dev`, failed on a fresh Mac and could
+not have run on Windows. A project generated from v0.1.0 gets all of this
+with `keel update`.
 
 - **`just dev` runs the application in Docker, on every OS.** It was a bash
   script supervising two host processes, and it needed a bash macOS does not
