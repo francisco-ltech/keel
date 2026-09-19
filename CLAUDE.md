@@ -1,6 +1,6 @@
 # Keel — working notes for agents
 
-Batteries for backend services. A core library (`src/keel`) plus a copier
+Backend services, batteries included. A core library (`src/keel`) plus a copier
 starter template (`template/`). A service is one bounded domain in one codebase,
 owning one schema, deployed as an API, a worker, or both from the same image.
 

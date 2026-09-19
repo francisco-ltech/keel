@@ -5,7 +5,7 @@
 *A keel is the backbone of a hull: the member everything else is fastened to,
 and what stops the boat being pushed sideways.*
 
-Batteries for backend services. A core library you install, and a starter
+Backend services, batteries included. A core library you install, and a starter
 template you generate from.
 
 A service is one bounded domain — `invoices`, say — in one codebase, owning one

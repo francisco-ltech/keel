@@ -99,7 +99,9 @@ def build_parser() -> argparse.ArgumentParser:
     Returns:
         The parser, with a ``handler`` default on each subcommand.
     """
-    parser = argparse.ArgumentParser(prog="keel", description="Batteries for backend services.")
+    parser = argparse.ArgumentParser(
+        prog="keel", description="Backend services, batteries included."
+    )
     parser.add_argument("--version", action="version", version=f"keel {installed_version()}")
     commands = parser.add_subparsers(title="commands")
 
