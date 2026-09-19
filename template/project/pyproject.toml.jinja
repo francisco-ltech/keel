@@ -5,8 +5,8 @@ description = "{{ description }}"
 readme = "README.md"
 requires-python = ">={{ python_version }}"
 dependencies = [
-    # Keel is a path dependency: nothing here is published to an index. The extras
-    # track the shape — `auth` pulls in Argon2, `queue` the worker runtime SAQ.
+    # Where Keel comes from is `[tool.uv.sources]` below. The extras track the
+    # shape — `auth` pulls in Argon2, `queue` the worker runtime SAQ.
     "keel[auth,postgres,metrics{% if has_worker %},queue{% endif %}]",
 {%- if has_api %}
     "fastapi>=0.115",
@@ -46,12 +46,10 @@ package = false
 {%- if keel_source == "path" %}
 # A local checkout, editable: a change under src/keel is live here at once.
 keel = { path = "{{ keel_path }}", editable = true }
-{%- elif _copier_conf.vcs_ref_hash %}
+{%- else %}
 # Pinned to the commit this scaffold was generated from, so the library and the
 # template never disagree. `keel update` moves both together.
 keel = { git = "{{ keel_repository }}", rev = "{{ _copier_conf.vcs_ref_hash }}" }
-{%- else %}
-keel = { git = "{{ keel_repository }}", branch = "main" }
 {%- endif %}
 
 # ---------------------------------------------------------------- ruff

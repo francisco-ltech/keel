@@ -2,7 +2,7 @@
 
 {{ description }}
 
-Built on **Keel** (`{{ keel_path }}`, a path dependency) — {% if has_api %}a FastAPI application{% else %}a queue worker{% endif %} with the
+Built on **Keel** ({% if keel_source == 'path' %}linked from `{{ keel_path }}`, editable{% else %}installed from its repository, pinned to the commit this scaffold came from{% endif %}) — {% if has_api %}a FastAPI application{% else %}a queue worker{% endif %} with the
 batteries already wired: a database subsystem with a unit-of-work idiom, a cache
 with a swappable driver and a recording fake,{% if has_worker %} a queue whose dispatches wait
 for the commit,{% endif %} Argon2 password hashing{% if has_api %} behind a bearer-token login{% endif %}, and a
@@ -463,13 +463,24 @@ failed — add to that mapping whenever you add a lifespan.
 {% endif %}
 ### Why there is no Dockerfile
 
+{% if keel_source == 'path' -%}
 Keel is a *path* dependency (`{{ keel_path }}`), which a build context cannot
 see. Compose mounts the source instead and lets uv install into a
 container-local virtualenv; `UV_PROJECT_ENVIRONMENT` keeps that out of `./.venv`,
 which holds host binaries that would not run in the container.
 
-Publishing Keel and adding a Dockerfile is the change that turns this into a
-deployment file rather than a development one.
+Generating from Keel's repository rather than a checkout (`keel new` without
+`--source`) removes that constraint: the dependency becomes a pinned git source
+a build context can fetch.
+{%- else -%}
+Compose runs the app from a mounted source tree and lets uv install into a
+container-local virtualenv; `UV_PROJECT_ENVIRONMENT` keeps that out of `./.venv`,
+which holds host binaries that would not run in the container. That is a
+development arrangement. Keel is a git dependency pinned to a commit, so a
+build context *can* fetch it, and a Dockerfile is a `uv sync --frozen` in an
+image away — left to the deployment, because the base image, the user and the
+entrypoint are its decisions.
+{%- endif %}
 
 ## What is deliberately not here yet
 

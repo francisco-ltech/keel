@@ -64,9 +64,11 @@ services:
       REDIS_URL: redis://redis:6379/0
     volumes:
       - .:/srv/app
+{%- if keel_source == 'path' %}
       # Mounted at its host path so `[tool.uv.sources] keel = { path = ... }`
       # resolves to the same place inside the container as outside it.
       - {{ keel_path }}:{{ keel_path }}:ro
+{%- endif %}
     ports:
       - "8000:8000"
     depends_on:
@@ -89,7 +91,9 @@ services:
       WORKER_HEALTH_FILE: /tmp/{{ project_slug }}-worker.health
     volumes:
       - .:/srv/app
+{%- if keel_source == 'path' %}
       - {{ keel_path }}:{{ keel_path }}:ro
+{%- endif %}
     healthcheck:
       # An **exec probe**, not HTTP: the worker serves no HTTP. `app.healthcheck`
       # exits 0 while the container-local heartbeat file is younger than its max age.

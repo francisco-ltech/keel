@@ -32,6 +32,7 @@ could not.
 from __future__ import annotations
 
 import argparse
+import shlex
 import shutil
 import subprocess
 import sys
@@ -45,13 +46,20 @@ from typing import Any, Final
 REPOSITORY: Final = "https://github.com/francisco-ltech/keel"
 """Where ``keel new`` copies the template from, and where a project installs Keel from."""
 
-DEFAULT_REF: Final = "HEAD"
-"""The template revision used when none is asked for.
+LOCAL_REF: Final = "HEAD"
+"""The revision used for a local checkout given as ``--source``.
 
-``HEAD`` for as long as there are no releases: copier's own default is the
-latest tag, and with none it would still work, but this says what happens
-rather than relying on a fallback. The day a tag exists this becomes the tag.
+Copier's own default is the template's latest tag, or its committed ``HEAD``
+without one, and that is what a git source gets: the first tag becomes the
+default the day it exists, with no change here. A checkout is different — a
+contributor generating from it wants the code they are changing — and copier
+includes uncommitted changes only when the revision is ``HEAD`` by name.
 """
+
+CONFLICT_HELP: Final = (
+    "resolve the markers, then `git add` the files; the template's version is "
+    "marked 'after updating'"
+)
 
 INSTALL_HINT: Final = "install the cli extra: keel[cli]"
 
@@ -75,7 +83,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     except AttributeError:
         parser.print_help()
         return 2
-    return int(handler(args))
+    try:
+        return int(handler(args))
+    except Exception as exc:
+        message = _explain(exc)
+        if message is None:
+            raise
+        print(message, file=sys.stderr)
+        return 1
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -96,7 +111,8 @@ def build_parser() -> argparse.ArgumentParser:
         help=f"the template: a git URL or a local checkout (default: {REPOSITORY})",
     )
     new.add_argument(
-        "--ref", default=DEFAULT_REF, help=f"template revision (default: {DEFAULT_REF})"
+        "--ref",
+        help="template revision (default: the latest tag, or HEAD; always HEAD for a checkout)",
     )
     new.add_argument("--shape", choices=SHAPES, help="answer the shape question up front")
     new.add_argument("--defaults", action="store_true", help="take every default; ask nothing")
@@ -109,10 +125,13 @@ def build_parser() -> argparse.ArgumentParser:
         "dest", type=Path, nargs="?", default=Path(), help="the service (default: .)"
     )
     update.add_argument(
-        "--ref", default=DEFAULT_REF, help=f"template revision (default: {DEFAULT_REF})"
+        "--ref", help="template revision (default: the latest tag, or HEAD without one)"
     )
     update.add_argument(
         "--data", action="append", default=[], metavar="NAME=VALUE", help="change an answer"
+    )
+    update.add_argument(
+        "--defaults", action="store_true", help="take the default for any new question; ask nothing"
     )
     update.set_defaults(handler=command_update)
 
@@ -147,7 +166,7 @@ def command_new(args: argparse.Namespace) -> int:
     if dest.exists() and any(dest.iterdir()):
         print(f"{dest} already exists and is not empty", file=sys.stderr)
         return 1
-    copier = _copier()
+    copier = _copier("new")
     if copier is None:
         return 2
 
@@ -155,38 +174,56 @@ def command_new(args: argparse.Namespace) -> int:
     if args.shape is not None:
         data["service_shape"] = args.shape
     source = args.source
+    ref = args.ref
     local = Path(source)
     if local.is_dir():
-        # A checkout: link it by path, editable, so the project follows its code.
+        # A checkout: link it by path, editable, so the project follows its code,
+        # and at HEAD by name, so its uncommitted changes are what is generated.
         source = str(local.resolve())
         data["keel_source"] = "path"
         data["keel_path"] = source
+        ref = ref or LOCAL_REF
 
     with _quiet_about_dirty_checkouts():
         copier.run_copy(
             source,
             dest,
             data=data,
-            vcs_ref=args.ref,
+            vcs_ref=ref,
             defaults=args.defaults,
             unsafe=True,
         )
 
-    if not args.no_sync:
-        _step(["uv", "sync"], cwd=dest, what="install its dependencies")
+    problems: list[str] = []
+    if not args.no_sync and not _step(["uv", "sync"], cwd=dest, what="install its dependencies"):
+        problems.append("dependencies are not installed")
     wants_git = not args.no_git and not (dest / ".git").exists()
-    if wants_git and _step(["git", "init", "-q"], cwd=dest, what="initialise a repository"):
-        _step(["git", "add", "-A"], cwd=dest, what="stage the scaffold")
-        _step(
-            ["git", "commit", "-q", "-m", "Scaffold from the Keel template"],
-            cwd=dest,
-            what="commit the scaffold",
+    if wants_git:
+        committed = (
+            _step(["git", "init", "-q"], cwd=dest, what="initialise a repository")
+            and _step(["git", "add", "-A"], cwd=dest, what="stage the scaffold")
+            and _step(
+                ["git", "commit", "-q", "-m", "Scaffold from the Keel template"],
+                cwd=dest,
+                what="commit the scaffold",
+            )
         )
+        if not committed:
+            problems.append("the scaffold is not committed, which `keel update` needs")
+    if problems:
+        # Last, so the failure is the last thing read rather than copier's banner.
+        print(f"{dest} was generated, but: {'; '.join(problems)}", file=sys.stderr)
+        return 1
     return 0
 
 
 def command_update(args: argparse.Namespace) -> int:
     """Replay a service's answers against the current template and merge the difference.
+
+    The recorded answers stand: only a question the template has gained since,
+    or one changed with ``--data``, is asked. Re-asking every answer on every
+    update is copier's default and the wrong one for a command run months
+    after the answers were given.
 
     Args:
         args: The parsed arguments.
@@ -201,7 +238,7 @@ def command_update(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 1
-    copier = _copier()
+    copier = _copier("update")
     if copier is None:
         return 2
     data: dict[str, object] = {}
@@ -212,12 +249,77 @@ def command_update(args: argparse.Namespace) -> int:
             return 1
         data[name] = value
     with _quiet_about_dirty_checkouts():
-        copier.run_update(dest, data=data, vcs_ref=args.ref, unsafe=True, overwrite=True)
+        copier.run_update(
+            dest,
+            data=data,
+            vcs_ref=args.ref,
+            defaults=args.defaults,
+            skip_answered=True,
+            unsafe=True,
+            overwrite=True,
+        )
+    conflicted = _conflicts(dest)
+    if conflicted:
+        # Copier writes the markers and says nothing; a zero exit would say "done".
+        print(f"updated with conflicts in: {', '.join(conflicted)}", file=sys.stderr)
+        print(CONFLICT_HELP, file=sys.stderr)
+        return 1
     return 0
 
 
-def _copier() -> Any:
+def _conflicts(dest: Path) -> list[str]:
+    """Return the files copier left with conflict markers.
+
+    Args:
+        dest: The project.
+
+    Returns:
+        The unmerged paths, as git reports them.
+    """
+    if shutil.which("git") is None:
+        return []
+    listed = subprocess.run(
+        ["git", "diff", "--name-only", "--diff-filter=U"],
+        cwd=dest,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return listed.stdout.split() if listed.returncode == 0 else []
+
+
+def _explain(exc: Exception) -> str | None:
+    """Return the one-line message an error deserves, or ``None`` for a real traceback.
+
+    Copier raises ``UserMessageError`` for what it means the user to read, and a
+    project generated from a checkout with uncommitted changes fails one level
+    down, in git, with a commit that exists nowhere — the limit ADR 0013 records
+    and the command should state rather than dump.
+
+    Args:
+        exc: What the command raised.
+
+    Returns:
+        The message, or ``None``.
+    """
+    name = type(exc).__name__
+    text = str(exc)
+    if name == "UserMessageError":
+        return text
+    if name == "ProcessExecutionError" and "did not match any file(s) known to git" in text:
+        return (
+            "this project records a template commit that does not exist: it was generated "
+            "from a checkout with uncommitted changes. Regenerate it from a clean checkout, "
+            "or from the repository, and try again"
+        )
+    return None
+
+
+def _copier(command: str) -> Any:
     """Import copier, or say what to install.
+
+    Args:
+        command: Which subcommand needs it, for the message.
 
     Returns:
         The module, or ``None`` after printing the hint. ``Any`` because a
@@ -226,7 +328,7 @@ def _copier() -> Any:
     try:
         import copier
     except ImportError:
-        print(f"keel new needs copier; {INSTALL_HINT}", file=sys.stderr)
+        print(f"keel {command} needs copier; {INSTALL_HINT}", file=sys.stderr)
         return None
     return copier
 
@@ -266,9 +368,9 @@ def _step(command: list[str], *, cwd: Path, what: str) -> bool:
         return False
     completed = subprocess.run(command, cwd=cwd, check=False)
     if completed.returncode != 0:
-        print(f"{' '.join(command)} failed; {what} yourself", file=sys.stderr)
+        print(f"`{shlex.join(command)}` failed; {what} yourself", file=sys.stderr)
         return False
     return True
 
 
-__all__ = ["DEFAULT_REF", "REPOSITORY", "SHAPES", "build_parser", "main"]
+__all__ = ["LOCAL_REF", "REPOSITORY", "SHAPES", "build_parser", "main"]

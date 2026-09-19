@@ -94,7 +94,7 @@ service_shape:
     Which entrypoints to scaffold. One codebase and one schema either way: a
     service deploys as an API process, a worker process, or both, from the same
     image with the entrypoint chosen per deployment. This answer decides what is
-    written now, not what is possible later — `copier update` adds the other
+    written now, not what is possible later — `keel update` adds the other
     half without regenerating anything.
   default: both
   choices:
@@ -104,8 +104,8 @@ service_shape:
 
 has_api:
   type: bool
-  # Computed, never asked. `when: false` derives it and records it in
-  # .copier-answers.yml, keeping the condition out of every template.
+  # Computed, never asked, and never recorded: copier leaves a `when: false`
+  # question out of the answers file and recomputes it from service_shape.
   when: false
   default: "{{ service_shape in ['api', 'both'] }}"
 
