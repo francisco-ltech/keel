@@ -4,7 +4,11 @@ Releases are tags. `keel new` generates from the latest one, and `keel update`
 moves a project between them. Entries say what changed for someone building on
 Keel; the ADRs say why.
 
-## Unreleased
+## v0.1.4 — 2026-09-19
+
+Identifiers on the wire, and who may see what. A project on an earlier
+release gets all of it with `keel update`; migration `0003_public_ids` runs
+when its containers next start.
 
 - **`/items` is the caller's own.** The session names the owner, so a client
   never sends its user id over the wire to work with its items.
