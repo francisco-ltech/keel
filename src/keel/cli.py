@@ -181,7 +181,9 @@ def command_new(args: argparse.Namespace) -> int:
         # and at HEAD by name, so its uncommitted changes are what is generated.
         source = str(local.resolve())
         data["keel_source"] = "path"
-        data["keel_path"] = source
+        # Forward slashes even on Windows: the path lands in a TOML string, where
+        # a backslash is an escape, and uv reads either form there.
+        data["keel_path"] = local.resolve().as_posix()
         ref = ref or LOCAL_REF
 
     with _quiet_about_dirty_checkouts():

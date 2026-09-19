@@ -45,7 +45,7 @@ package = false
 [tool.uv.sources]
 {%- if keel_source == "path" %}
 # A local checkout, editable: a change under src/keel is live here at once.
-keel = { path = "{{ keel_path }}", editable = true }
+keel = { path = '{{ keel_path }}', editable = true }
 {%- else %}
 # Pinned to the commit this scaffold was generated from, so the library and the
 # template never disagree. `keel update` moves both together.

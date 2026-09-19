@@ -18,6 +18,9 @@ Keel; the ADRs say why.
   command, and `windows-shell` is set, so `just` needs no `sh` on Windows.
 - **The worker's heartbeat file defaults to the OS temp directory** rather
   than `/tmp`.
+- **A project generated from a checkout on Windows installs.** The checkout's
+  path is written to `pyproject.toml` as a TOML literal string, with forward
+  slashes, so a drive letter and backslashes no longer make it unparseable.
 
 ## v0.1.0 — 2026-09-19
 

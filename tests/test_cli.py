@@ -116,7 +116,8 @@ def test_new_from_a_checkout_links_it_by_path_and_commits(tmp_path: Path) -> Non
     )
 
     pyproject = (dest / "pyproject.toml").read_text()
-    assert f'keel = {{ path = "{REPO_ROOT}", editable = true }}' in pyproject
+    # A literal string with forward slashes: valid TOML for a Windows path too.
+    assert f"keel = {{ path = '{REPO_ROOT.as_posix()}', editable = true }}" in pyproject
     assert (dest / "app" / "main.py").is_file()
     assert not (dest / "app" / "worker.py").exists()
     log = subprocess.run(
