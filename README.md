@@ -23,10 +23,6 @@ Each subsystem is reached the same way: a **facade** the application calls, a
 tests can assert on it. That uniformity is the whole idea, it is what makes a
 set of features feel like one framework.
 
-The repository is public. `keel new` installs the library from here, pinned to
-the commit the scaffold came from, and needs no account or credentials; a
-contributor's project links a checkout by path instead.
-
 ## Layout
 
 ```
@@ -48,9 +44,6 @@ docs/adr/          why things are shaped the way they are
 | `keel.auth` | The current-identity context, Argon2 password hashing with rehash-on-login, hashed-at-rest bearer tokens, and authorization policies registered per resource type with `authorize()` / `allows()`. Drivers: Redis, in-memory. Recording fake. No guard protocol. |
 | `keel.observability` | A correlation context, structured JSON logging that carries it onto every record including third-party ones, jobs that inherit the request id that dispatched them, readiness checks, a development request inspector that records each request's queries, cache calls, dispatches and log lines as one timeline, and Prometheus metrics over the same sources. |
 | `template/` | Generates a service in three shapes — API, worker, or both — with domain modules, Alembic, tests and Docker. |
-
-Mail, storage and rate limiting are not in the box yet.
-[The roadmap](docs/roadmap.md) says what is coming and in what order.
 
 ## Getting started
 
@@ -99,9 +92,10 @@ pins the project's Keel dependency to the commit the scaffold came from, runs
 `uv sync`, and makes the first commit; `keel new invoices --defaults` asks
 nothing. `keel update invoices` brings a project forward to a newer release.
 The git install is the installer ([ADR 0013](docs/adr/0013-the-installer.md)),
-and releases are tags ([CHANGELOG](CHANGELOG.md)). If Postgres and Redis
-already run on those ports, skip `just up` and point `DATABASE_URL` and
-`REDIS_URL` in `.env` at them.
+and releases are tags ([CHANGELOG](CHANGELOG.md)). `just up` also creates the
+`keel` database the defaults point at; `just migrate` only fills it. If Postgres
+and Redis already run on those ports, skip `just up`, create a database, and
+point `DATABASE_URL` and `REDIS_URL` in `.env` at them.
 
 Working on Keel itself is `just`.
 
