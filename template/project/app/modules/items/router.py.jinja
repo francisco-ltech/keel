@@ -2,7 +2,7 @@
 
 Two routers over one service. ``/items`` is the caller's own: the session
 already names the owner, so a client never sends its own id over the wire.
-``/users/{owner_id}/items`` names an owner, which is what an administrator
+``/users/{owner_pid}/items`` names an owner, which is what an administrator
 needs to act for somebody, and the policy decides whether they may. Both call
 the same service functions with an owner id, which is why nothing beneath this
 file knows there are two.
@@ -12,7 +12,7 @@ for a missing token is this file's; the 403 for somebody else's items is
 ``items_policy`` in ``app/policies.py``, asked by the service. That split is
 why these routes could finally be guarded at all: the dependency they were
 waiting for compared a path parameter spelled ``user_id`` against the caller,
-and this path says ``owner_id``, so it never fitted. A rule that takes the
+and this path says ``owner_pid``, so it never fitted. A rule that takes the
 resource rather than the request does not care what the path spells.
 
 Every route carries a tag, and no route touches a session or a repository.
@@ -33,7 +33,7 @@ from app.security import Caller
 mine = APIRouter(prefix="/items", tags=["items"])
 """The caller's own items. The session names the owner, so the URL does not."""
 
-of_owner = APIRouter(prefix="/users/{owner_id}/items", tags=["items"])
+of_owner = APIRouter(prefix="/users/{owner_pid}/items", tags=["items"])
 """One named owner's items: what an administrator uses to act for somebody."""
 
 router = APIRouter()
@@ -74,48 +74,48 @@ async def list_my_items(
     return await service.list_items(caller.id, limit=limit, offset=offset)
 
 
-@mine.get("/{item_id}", summary="Fetch one of my items")
-async def get_my_item(item_id: UUID, caller: Caller) -> ItemRead:
+@mine.get("/{pid}", summary="Fetch one of my items")
+async def get_my_item(pid: UUID, caller: Caller) -> ItemRead:
     """Return one of the caller's items.
 
     Args:
-        item_id: The item's id.
+        pid: The item's public identifier.
         caller: Who it must belong to.
 
     Returns:
         The item.
     """
-    return await service.get_item(item_id, caller.id)
+    return await service.get_item(pid, caller.id)
 
 
-@mine.patch("/{item_id}", summary="Update one of my items")
-async def update_my_item(item_id: UUID, payload: ItemUpdate, caller: Caller) -> ItemRead:
+@mine.patch("/{pid}", summary="Update one of my items")
+async def update_my_item(pid: UUID, payload: ItemUpdate, caller: Caller) -> ItemRead:
     """Apply a partial update to one of the caller's items.
 
     Args:
-        item_id: The item's id.
+        pid: The item's public identifier.
         payload: The fields to change.
         caller: Who it must belong to.
 
     Returns:
         The updated item.
     """
-    return await service.update_item(item_id, caller.id, payload)
+    return await service.update_item(pid, caller.id, payload)
 
 
-@mine.delete("/{item_id}", status_code=status.HTTP_204_NO_CONTENT, summary="Delete one of my items")
-async def delete_my_item(item_id: UUID, caller: Caller) -> None:
+@mine.delete("/{pid}", status_code=status.HTTP_204_NO_CONTENT, summary="Delete one of my items")
+async def delete_my_item(pid: UUID, caller: Caller) -> None:
     """Delete one of the caller's items.
 
     Args:
-        item_id: The item's id.
+        pid: The item's public identifier.
         caller: Who it must belong to.
     """
-    await service.delete_item(item_id, caller.id)
+    await service.delete_item(pid, caller.id)
 
 
 @of_owner.post("", status_code=status.HTTP_201_CREATED, summary="Create an item for an owner")
-async def create_item(owner_id: UUID, payload: ItemCreate, _: Caller) -> ItemRead:
+async def create_item(owner_pid: UUID, payload: ItemCreate, _: Caller) -> ItemRead:
     """Create an item owned by the user in the path.
 
     Ownership comes from the URL and is not a body field, so a request cannot
@@ -123,19 +123,19 @@ async def create_item(owner_id: UUID, payload: ItemCreate, _: Caller) -> ItemRea
     the caller may act for that owner is the policy's answer.
 
     Args:
-        owner_id: The owning user.
+        owner_pid: The owning user's public identifier.
         payload: The requested item.
         _: Declared for the dependency: 401 without a token.
 
     Returns:
         The created item.
     """
-    return await service.create_item(owner_id, payload)
+    return await service.create_item(await service.resolve_owner(owner_pid), payload)
 
 
 @of_owner.get("", summary="List an owner's items")
 async def list_items(
-    owner_id: UUID,
+    owner_pid: UUID,
     _: Caller,
     limit: Annotated[int, Query(ge=1, le=200)] = DEFAULT_PAGE_SIZE,
     offset: Annotated[int, Query(ge=0)] = 0,
@@ -143,7 +143,7 @@ async def list_items(
     """Return a page of one owner's items, oldest first.
 
     Args:
-        owner_id: Whose items to return.
+        owner_pid: Whose items to return, by public identifier.
         _: Declared for the dependency.
         limit: Maximum rows to return.
         offset: Rows to skip.
@@ -151,49 +151,48 @@ async def list_items(
     Returns:
         The page.
     """
+    owner_id = await service.resolve_owner(owner_pid)
     return await service.list_items(owner_id, limit=limit, offset=offset)
 
 
-@of_owner.get("/{item_id}", summary="Fetch an owner's item")
-async def get_item(owner_id: UUID, item_id: UUID, _: Caller) -> ItemRead:
+@of_owner.get("/{pid}", summary="Fetch an owner's item")
+async def get_item(owner_pid: UUID, pid: UUID, _: Caller) -> ItemRead:
     """Return one of an owner's items.
 
     Args:
-        owner_id: The owning user.
-        item_id: The item's id.
+        owner_pid: The owning user's public identifier.
+        pid: The item's public identifier.
         _: Declared for the dependency.
 
     Returns:
         The item.
     """
-    return await service.get_item(item_id, owner_id)
+    return await service.get_item(pid, await service.resolve_owner(owner_pid))
 
 
-@of_owner.patch("/{item_id}", summary="Update an owner's item")
-async def update_item(owner_id: UUID, item_id: UUID, payload: ItemUpdate, _: Caller) -> ItemRead:
+@of_owner.patch("/{pid}", summary="Update an owner's item")
+async def update_item(owner_pid: UUID, pid: UUID, payload: ItemUpdate, _: Caller) -> ItemRead:
     """Apply a partial update.
 
     Args:
-        owner_id: The owning user.
-        item_id: The item's id.
+        owner_pid: The owning user's public identifier.
+        pid: The item's public identifier.
         payload: The fields to change.
         _: Declared for the dependency.
 
     Returns:
         The updated item.
     """
-    return await service.update_item(item_id, owner_id, payload)
+    return await service.update_item(pid, await service.resolve_owner(owner_pid), payload)
 
 
-@of_owner.delete(
-    "/{item_id}", status_code=status.HTTP_204_NO_CONTENT, summary="Delete an owner's item"
-)
-async def delete_item(owner_id: UUID, item_id: UUID, _: Caller) -> None:
+@of_owner.delete("/{pid}", status_code=status.HTTP_204_NO_CONTENT, summary="Delete an owner's item")
+async def delete_item(owner_pid: UUID, pid: UUID, _: Caller) -> None:
     """Delete one of an owner's items.
 
     Args:
-        owner_id: The owning user.
-        item_id: The item's id.
+        owner_pid: The owning user's public identifier.
+        pid: The item's public identifier.
         _: Declared for the dependency.
     """
-    await service.delete_item(item_id, owner_id)
+    await service.delete_item(pid, await service.resolve_owner(owner_pid))

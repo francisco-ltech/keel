@@ -54,7 +54,7 @@ from keel.database import uow
 from app.errors import ConflictError, ForbiddenError, NotFoundError
 from app.modules.users.repository import DEFAULT_PAGE_SIZE, UserRepository
 from app.modules.users.schemas import PasswordChange, UserCreate, UserRead, UserUpdate
-from app.policies import Account
+from app.policies import Account, Directory
 
 
 async def hash_in_a_thread(plaintext: str) -> str:
@@ -107,11 +107,11 @@ async def create_user(payload: UserCreate) -> UserRead:
 async def list_users(*, limit: int = DEFAULT_PAGE_SIZE, offset: int = 0) -> list[UserRead]:
     """Return a page of users.
 
-    No ``authorize`` call, and that is the distinction worth keeping: a listing
-    names no resource, so "may I read *this*" has nothing to be asked about.
-    Requiring a caller at all is authentication, and the route declares it. A
-    listing that has to be filtered per row is a different function, and it
-    filters with ``keel.auth.allows`` rather than raising.
+    Authorized against :class:`~app.policies.Directory` rather than any one
+    account: a listing names every account, which is the enumeration the
+    sign-in path refuses to give, so only an administrator gets it. A listing
+    that has to be filtered per row is a different function, and it filters
+    with ``keel.auth.allows`` rather than raising.
 
     Args:
         limit: Maximum rows to return.
@@ -120,16 +120,17 @@ async def list_users(*, limit: int = DEFAULT_PAGE_SIZE, offset: int = 0) -> list
     Returns:
         The page, as schemas.
     """
+    authorize("list", Directory())
     async with uow() as session:
         found = await UserRepository(session).list(limit=limit, offset=offset)
         return [UserRead.model_validate(user) for user in found]
 
 
-async def get_user(user_id: UUID) -> UserRead:
+async def get_user(pid: UUID) -> UserRead:
     """Return one user.
 
     Args:
-        user_id: The primary key.
+        pid: The public identifier, as the route named it.
 
     Returns:
         The user.
@@ -138,22 +139,22 @@ async def get_user(user_id: UUID) -> UserRead:
         AuthorizationDeniedError: If the caller may not read this account.
         NotFoundError: If there is no such user.
     """
-    authorize("view", Account(user_id))
     async with uow() as session:
-        user = await UserRepository(session).get(user_id)
+        user = await UserRepository(session).get_by_pid(pid)
         if user is None:
-            raise NotFoundError(f"no user with id {user_id}")
+            raise NotFoundError(f"no user with pid {pid}")
+        authorize("view", Account(user.id))
         return UserRead.model_validate(user)
 
 
-async def update_user(user_id: UUID, payload: UserUpdate) -> UserRead:
+async def update_user(pid: UUID, payload: UserUpdate) -> UserRead:
     """Apply a partial update.
 
     Carries no password: replacing one is :func:`change_password`, which demands
     the current password first. See :class:`~app.modules.users.schemas.UserUpdate`.
 
     Args:
-        user_id: The primary key.
+        pid: The public identifier, as the route named it.
         payload: The fields to change. Unset fields are left alone.
 
     Returns:
@@ -161,17 +162,18 @@ async def update_user(user_id: UUID, payload: UserUpdate) -> UserRead:
 
     Raises:
         AuthorizationDeniedError: If the caller may not change this account.
-            Refused before the row is read, so a stranger learns nothing about
-            which ids exist.
+            The row is read first to learn whose it is; a public identifier
+            is random, so a stranger holding one was given it, and a 403 tells
+            them nothing they did not have.
         NotFoundError: If there is no such user.
         ConflictError: If the new email address belongs to someone else.
     """
-    authorize("update", Account(user_id))
     async with uow() as session:
         users = UserRepository(session)
-        user = await users.get(user_id)
+        user = await users.get_by_pid(pid)
         if user is None:
-            raise NotFoundError(f"no user with id {user_id}")
+            raise NotFoundError(f"no user with pid {pid}")
+        authorize("update", Account(user.id))
 
         # `exclude_unset`, not `exclude_none`: sending `is_active: null` means
         # something different from omitting it, and a partial update needs both.
@@ -190,13 +192,13 @@ async def update_user(user_id: UUID, payload: UserUpdate) -> UserRead:
     # After the commit and outside the block: revoking is a token-store round
     # trip, and an account whose tokens still work has not been disabled.
     if changes.get("is_active") is False:
-        await token_store().revoke_subject(user_id)
+        await token_store().revoke_subject(user.id)
 {%- endif %}
 
     return result
 
 
-async def change_password(user_id: UUID, payload: PasswordChange) -> None:
+async def change_password(pid: UUID, payload: PasswordChange) -> None:
     """Replace a password, having proved knowledge of the one in force.
 
     The current password is required even though the caller is already
@@ -210,7 +212,7 @@ async def change_password(user_id: UUID, payload: PasswordChange) -> None:
     a single ``UPDATE``.
 
     Args:
-        user_id: Whose password to change.
+        pid: The public identifier, as the route named it.
         payload: The current password and its replacement.
 
     Returns:
@@ -228,11 +230,12 @@ async def change_password(user_id: UUID, payload: PasswordChange) -> None:
             telling a client to re-authenticate would sign the caller out over a
             typo.
     """
-    authorize("change-password", Account(user_id))
     async with uow() as session:
-        user = await UserRepository(session).get(user_id)
+        user = await UserRepository(session).get_by_pid(pid)
         if user is None:
-            raise NotFoundError(f"no user with id {user_id}")
+            raise NotFoundError(f"no user with pid {pid}")
+        authorize("change-password", Account(user.id))
+        user_id = user.id
         stored = user.hashed_password
 
     hasher = password_hasher()
@@ -245,7 +248,7 @@ async def change_password(user_id: UUID, payload: PasswordChange) -> None:
         users = UserRepository(session)
         user = await users.get(user_id)
         if user is None:
-            raise NotFoundError(f"no user with id {user_id}")
+            raise NotFoundError(f"no user with pid {pid}")
         await users.update(user, {"hashed_password": hashed})
 {%- if has_api %}
 
@@ -255,28 +258,28 @@ async def change_password(user_id: UUID, payload: PasswordChange) -> None:
 {%- endif %}
 
 
-async def delete_user(user_id: UUID) -> None:
+async def delete_user(pid: UUID) -> None:
     """Delete a user, and by cascade everything they own.
 
     Args:
-        user_id: The primary key.
+        pid: The public identifier, as the route named it.
 
     Raises:
         AuthorizationDeniedError: If the caller may not delete this account.
         NotFoundError: If there is no such user.
     """
-    authorize("delete", Account(user_id))
     async with uow() as session:
         users = UserRepository(session)
-        user = await users.get(user_id)
+        user = await users.get_by_pid(pid)
         if user is None:
-            raise NotFoundError(f"no user with id {user_id}")
+            raise NotFoundError(f"no user with pid {pid}")
+        authorize("delete", Account(user.id))
         await users.delete(user)
 {%- if has_api %}
 
     # The row is gone; the tokens naming it are not, and one would still resolve
     # to an identity that passes an ownership check.
-    await token_store().revoke_subject(user_id)
+    await token_store().revoke_subject(user.id)
 {%- endif %}
 
 

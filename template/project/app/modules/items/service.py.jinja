@@ -80,10 +80,33 @@ async def create_item(owner_id: UUID, payload: ItemCreate) -> ItemRead:
 
         # Inside the unit of work deliberately: `dispatch` holds the push until the
         # transaction commits, so a worker never sees a job for a rolled-back row.
-        await dispatch(IndexItem(item_id=str(item.id), owner_id=str(owner_id)))
+        await dispatch(IndexItem(item_pid=str(item.pid), owner_id=str(owner_id)))
 {%- endif %}
 
         return result
+
+
+async def resolve_owner(owner_pid: UUID) -> UUID:
+    """Return the primary key behind an owner's public identifier.
+
+    What the owner-addressed routes call first: the URL names a ``pid``, the
+    service and the policy work in primary keys, and this is the one place
+    the translation happens.
+
+    Args:
+        owner_pid: The owner's public identifier.
+
+    Returns:
+        The owner's primary key.
+
+    Raises:
+        NotFoundError: If there is no such user.
+    """
+    async with uow() as session:
+        user = await UserRepository(session).get_by_pid(owner_pid)
+        if user is None:
+            raise NotFoundError(f"no user with pid {owner_pid}")
+        return user.id
 
 
 async def list_items(
@@ -111,7 +134,7 @@ async def list_items(
         return [ItemRead.model_validate(item) for item in found]
 
 
-async def get_item(item_id: UUID, owner_id: UUID) -> ItemRead:
+async def get_item(pid: UUID, owner_id: UUID) -> ItemRead:
     """Return one of an owner's items.
 
     An item belonging to someone else is reported as missing rather than as
@@ -119,7 +142,7 @@ async def get_item(item_id: UUID, owner_id: UUID) -> ItemRead:
     the existence of the resource.
 
     Args:
-        item_id: The item's id.
+        pid: The item's public identifier.
         owner_id: The owner it must belong to.
 
     Returns:
@@ -131,17 +154,17 @@ async def get_item(item_id: UUID, owner_id: UUID) -> ItemRead:
     """
     authorize("view", ItemsOf(owner_id))
     async with uow() as session:
-        item = await ItemRepository(session).get_for_owner(item_id, owner_id)
+        item = await ItemRepository(session).get_for_owner(pid, owner_id)
         if item is None:
-            raise NotFoundError(f"no item with id {item_id} for owner {owner_id}")
+            raise NotFoundError(f"no item with pid {pid} for owner {owner_id}")
         return ItemRead.model_validate(item)
 
 
-async def update_item(item_id: UUID, owner_id: UUID, payload: ItemUpdate) -> ItemRead:
+async def update_item(pid: UUID, owner_id: UUID, payload: ItemUpdate) -> ItemRead:
     """Apply a partial update to one of an owner's items.
 
     Args:
-        item_id: The item's id.
+        pid: The item's public identifier.
         owner_id: The owner it must belong to.
         payload: The fields to change. Unset fields are left alone; ``owner_id``
             is not among them, because transferring ownership is a different
@@ -157,20 +180,20 @@ async def update_item(item_id: UUID, owner_id: UUID, payload: ItemUpdate) -> Ite
     authorize("update", ItemsOf(owner_id))
     async with uow() as session:
         items = ItemRepository(session)
-        item = await items.get_for_owner(item_id, owner_id)
+        item = await items.get_for_owner(pid, owner_id)
         if item is None:
-            raise NotFoundError(f"no item with id {item_id} for owner {owner_id}")
+            raise NotFoundError(f"no item with pid {pid} for owner {owner_id}")
 
         changes: dict[str, Any] = payload.model_dump(exclude_unset=True)
         updated = await items.update(item, changes)
         return ItemRead.model_validate(updated)
 
 
-async def delete_item(item_id: UUID, owner_id: UUID) -> None:
+async def delete_item(pid: UUID, owner_id: UUID) -> None:
     """Delete one of an owner's items.
 
     Args:
-        item_id: The item's id.
+        pid: The item's public identifier.
         owner_id: The owner it must belong to.
 
     Raises:
@@ -180,9 +203,9 @@ async def delete_item(item_id: UUID, owner_id: UUID) -> None:
     authorize("delete", ItemsOf(owner_id))
     async with uow() as session:
         items = ItemRepository(session)
-        item = await items.get_for_owner(item_id, owner_id)
+        item = await items.get_for_owner(pid, owner_id)
         if item is None:
-            raise NotFoundError(f"no item with id {item_id} for owner {owner_id}")
+            raise NotFoundError(f"no item with pid {pid} for owner {owner_id}")
         await items.delete(item)
 
 
@@ -191,5 +214,6 @@ __all__ = [
     "delete_item",
     "get_item",
     "list_items",
+    "resolve_owner",
     "update_item",
 ]

@@ -11,15 +11,17 @@ the same schema produces different migration scripts on different backends.
 
 from __future__ import annotations
 
-from keel.database import Model, TimestampMixin, UUIDPrimaryKey
+from keel.database import Model, PublicId, TimestampMixin, UUIDPrimaryKey
 from sqlalchemy import String, true
 from sqlalchemy.orm import Mapped, mapped_column
 
 
-class User(Model, UUIDPrimaryKey, TimestampMixin):
+class User(Model, UUIDPrimaryKey, PublicId, TimestampMixin):
     """A person who can own items.
 
     Attributes:
+        pid: The public identifier, the only one a URL or a response
+            carries. The primary key never leaves the process.
         email: The natural key, unique and indexed. 320 characters is the
             maximum length RFC 5321 allows for an address.
         full_name: Display name.

@@ -14,15 +14,17 @@ from __future__ import annotations
 
 import uuid
 
-from keel.database import Model, TimestampMixin, UUIDPrimaryKey
+from keel.database import Model, PublicId, TimestampMixin, UUIDPrimaryKey
 from sqlalchemy import ForeignKey, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 
-class Item(Model, UUIDPrimaryKey, TimestampMixin):
+class Item(Model, UUIDPrimaryKey, PublicId, TimestampMixin):
     """Something a user owns.
 
     Attributes:
+        pid: The public identifier, the only one a URL or a response
+            carries. The primary key never leaves the process.
         name: Short label.
         description: Optional long text.
         owner_id: The owning user. ``ON DELETE CASCADE`` because an item with no

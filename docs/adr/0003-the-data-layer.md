@@ -72,6 +72,9 @@ forgotten argument should not be able to truncate a table.
 
 ### 3. Primary keys are UUIDv7, assigned at construction
 
+*Amended by [ADR 0014](0014-public-identifiers.md): the primary key never
+crosses the wire; a row a route can name carries a random `pid` beside it.*
+
 Random UUID4 keys scatter B-tree inserts across the index: every write dirties a
 different page, the index stops fitting in cache, and rows created together end
 up nowhere near each other on disk. That is a permanent cost paid for

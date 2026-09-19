@@ -1,0 +1,43 @@
+"""Public identifiers: a ``pid`` beside every primary key a route names.
+
+Revision ID: 0003_public_ids
+Revises: {% if has_worker %}0002_queue_tables{% else %}0001_initial{% endif %}
+
+The primary key stays what it was, time-ordered for the index. The ``pid`` is a
+random UUID and is the only identifier that crosses the wire, so a client
+learns nothing about when a row was created or what sits next to it. Existing
+rows are backfilled by the server default in the same statement that adds the
+column, which is why the column can be ``NOT NULL`` from the start.
+"""
+
+from __future__ import annotations
+
+import sqlalchemy as sa
+from alembic import op
+
+revision: str = "0003_public_ids"
+# The queue's migration ships only with a worker, so the parent follows the shape.
+down_revision: str | None = "{% if has_worker %}0002_queue_tables{% else %}0001_initial{% endif %}"
+branch_labels: str | None = None
+depends_on: str | None = None
+
+TABLES = ("users", "items")
+
+
+def upgrade() -> None:
+    """Add a backfilled, unique ``pid`` to every table a route names."""
+    for table in TABLES:
+        op.add_column(
+            table,
+            sa.Column(
+                "pid", sa.Uuid(), server_default=sa.text("gen_random_uuid()"), nullable=False
+            ),
+        )
+        op.create_index(op.f(f"ix_{table}_pid"), table, ["pid"], unique=True)
+
+
+def downgrade() -> None:
+    """Drop the public identifiers. The primary keys were never touched."""
+    for table in reversed(TABLES):
+        op.drop_index(op.f(f"ix_{table}_pid"), table_name=table)
+        op.drop_column(table, "pid")

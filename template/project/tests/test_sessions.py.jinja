@@ -91,7 +91,7 @@ async def test_a_disabled_account_cannot_sign_in(client: AsyncClient) -> None:
     created, token = await signed_in(client)
 
     disabled = await client.patch(
-        f"/users/{created['id']}", json={"is_active": False}, headers=bearer(token)
+        f"/users/{created['pid']}", json={"is_active": False}, headers=bearer(token)
     )
     response = await client.post("/sessions", json=CREDENTIALS)
 
@@ -160,7 +160,7 @@ async def test_changing_a_password_revokes_existing_sessions(client: AsyncClient
     other = (await client.post("/sessions", json=CREDENTIALS)).json()["access_token"]
 
     changed = await client.put(
-        f"/users/{created['id']}/password",
+        f"/users/{created['pid']}/password",
         json={"current_password": DEFAULT_USER["password"], "new_password": "a-new-password"},
         headers=bearer(token),
     )
@@ -175,7 +175,7 @@ async def test_disabling_an_account_revokes_its_sessions(client: AsyncClient) ->
     created, token = await signed_in(client)
 
     disabled = await client.patch(
-        f"/users/{created['id']}", json={"is_active": False}, headers=bearer(token)
+        f"/users/{created['pid']}", json={"is_active": False}, headers=bearer(token)
     )
 
     assert disabled.status_code == 200

@@ -52,6 +52,18 @@ class UserRepository:
         """
         return await self._session.get(User, user_id)
 
+    async def get_by_pid(self, pid: UUID) -> User | None:
+        """Return a user by public identifier: what a route names.
+
+        Args:
+            pid: The public identifier.
+
+        Returns:
+            The user, or ``None`` if there is no such row.
+        """
+        result = await self._session.execute(select(User).where(User.pid == pid))
+        return result.scalar_one_or_none()
+
     async def get_by_email(self, email: str) -> User | None:
         """Return a user by email address.
 

@@ -69,8 +69,9 @@ project's suite against the same Postgres.
   bearer token, `GET /sessions/current` for who you are, and an `items` module
   showing the shape every domain follows: models, schemas, repository, service
   and router, plus one line in the registry. `/items` is the caller's own, with
-  the owner taken from the session; `/users/{id}/items` is how an admin acts
-  for somebody. All of it in the OpenAPI document at `/docs`.
+  the owner taken from the session; `/users/{pid}/items` is how an admin acts
+  for somebody. A primary key never crosses the wire: routes and responses
+  carry a random public identifier instead. All of it in the OpenAPI document at `/docs`.
 - Every write inside a unit of work, and no session ever held across a
   request. Authorization policies checked in the service, not the router, so a
   job and a route share one answer to "may this caller do that".

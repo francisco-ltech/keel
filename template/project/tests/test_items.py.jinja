@@ -19,7 +19,7 @@ from __future__ import annotations
 import pytest
 from httpx import AsyncClient
 
-from tests.conftest import admin_bearer, bearer, signed_in
+from tests.conftest import admin_bearer, bearer, create_user, signed_in
 
 pytestmark = pytest.mark.anyio
 
@@ -35,16 +35,16 @@ async def test_every_items_route_refuses_an_anonymous_caller(client: AsyncClient
     owner, token = await signed_in(client)
     item = (
         await client.post(
-            f"/users/{owner['id']}/items", json={"name": "Engine"}, headers=bearer(token)
+            f"/users/{owner['pid']}/items", json={"name": "Engine"}, headers=bearer(token)
         )
     ).json()
-    base = f"/users/{owner['id']}/items"
+    base = f"/users/{owner['pid']}/items"
 
     assert (await client.post(base, json={"name": "Anonymous"})).status_code == 401
     assert (await client.get(base)).status_code == 401
-    assert (await client.get(f"{base}/{item['id']}")).status_code == 401
-    assert (await client.patch(f"{base}/{item['id']}", json={"name": "x"})).status_code == 401
-    assert (await client.delete(f"{base}/{item['id']}")).status_code == 401
+    assert (await client.get(f"{base}/{item['pid']}")).status_code == 401
+    assert (await client.patch(f"{base}/{item['pid']}", json={"name": "x"})).status_code == 401
+    assert (await client.delete(f"{base}/{item['pid']}")).status_code == 401
 
 
 async def test_a_stranger_may_not_touch_another_owners_items(client: AsyncClient) -> None:
@@ -56,17 +56,17 @@ async def test_a_stranger_may_not_touch_another_owners_items(client: AsyncClient
     """
     ada, ada_token = await signed_in(client, email="ada@example.com")
     stranger = bearer((await signed_in(client, email="mallory@example.com"))[1])
-    base = f"/users/{ada['id']}/items"
+    base = f"/users/{ada['pid']}/items"
     item = (await client.post(base, json={"name": "Engine"}, headers=bearer(ada_token))).json()
 
     assert (await client.post(base, json={"name": "Theirs"}, headers=stranger)).status_code == 403
     assert (await client.get(base, headers=stranger)).status_code == 403
-    assert (await client.get(f"{base}/{item['id']}", headers=stranger)).status_code == 403
-    patched = await client.patch(f"{base}/{item['id']}", json={"name": "x"}, headers=stranger)
+    assert (await client.get(f"{base}/{item['pid']}", headers=stranger)).status_code == 403
+    patched = await client.patch(f"{base}/{item['pid']}", json={"name": "x"}, headers=stranger)
     assert patched.status_code == 403
-    assert (await client.delete(f"{base}/{item['id']}", headers=stranger)).status_code == 403
+    assert (await client.delete(f"{base}/{item['pid']}", headers=stranger)).status_code == 403
 
-    intact = await client.get(f"{base}/{item['id']}", headers=bearer(ada_token))
+    intact = await client.get(f"{base}/{item['pid']}", headers=bearer(ada_token))
     assert intact.json()["name"] == "Engine", "a refused request changed something"
 
 
@@ -80,7 +80,7 @@ async def test_a_refusal_is_a_problem_document(client: AsyncClient) -> None:
     ada = (await signed_in(client, email="ada@example.com"))[0]
     stranger = bearer((await signed_in(client, email="mallory@example.com"))[1])
 
-    response = await client.get(f"/users/{ada['id']}/items", headers=stranger)
+    response = await client.get(f"/users/{ada['pid']}/items", headers=stranger)
 
     assert response.status_code == 403
     problem = response.json()
@@ -101,8 +101,8 @@ async def test_ownership_cannot_be_smuggled_through_the_query_string(client: Asy
     mallory, mallory_token = await signed_in(client, email="mallory@example.com")
 
     response = await client.get(
-        f"/users/{ada['id']}/items",
-        params={"owner_id": mallory["id"]},
+        f"/users/{ada['pid']}/items",
+        params={"owner_id": mallory["pid"]},
         headers=bearer(mallory_token),
     )
 
@@ -113,12 +113,11 @@ async def test_an_admin_may_write_anybodys_items(client: AsyncClient) -> None:
     """A role beating ownership, which the path comparison could never express."""
     ada = (await signed_in(client, email="ada@example.com"))[0]
     administrator = await admin_bearer()
-    base = f"/users/{ada['id']}/items"
+    base = f"/users/{ada['pid']}/items"
 
     created = await client.post(base, json={"name": "Filed by support"}, headers=administrator)
 
     assert created.status_code == 201
-    assert created.json()["owner_id"] == ada["id"]
     assert (await client.get(base, headers=administrator)).status_code == 200
 
 
@@ -126,7 +125,7 @@ async def test_the_owner_creates_an_item(client: AsyncClient) -> None:
     owner, token = await signed_in(client)
 
     response = await client.post(
-        f"/users/{owner['id']}/items",
+        f"/users/{owner['pid']}/items",
         json={"name": "Analytical Engine", "description": "Not finished."},
         headers=bearer(token),
     )
@@ -134,29 +133,28 @@ async def test_the_owner_creates_an_item(client: AsyncClient) -> None:
     assert response.status_code == 201
     body = response.json()
     assert body["name"] == "Analytical Engine"
-    assert body["owner_id"] == owner["id"]
 
 
 async def test_my_items_need_no_id_over_the_wire(client: AsyncClient) -> None:
     """The session names the owner: create, list, fetch, update and delete at /items."""
-    owner, token = await signed_in(client)
+    _, token = await signed_in(client)
     headers = bearer(token)
 
     created = await client.post("/items", json={"name": "Engine"}, headers=headers)
     assert created.status_code == 201
     item = created.json()
-    assert item["owner_id"] == owner["id"]
+    assert "id" not in item and "owner_id" not in item
 
     listed = (await client.get("/items", headers=headers)).json()
-    assert [entry["id"] for entry in listed] == [item["id"]]
+    assert [entry["pid"] for entry in listed] == [item["pid"]]
 
-    assert (await client.get(f"/items/{item['id']}", headers=headers)).json()["name"] == "Engine"
+    assert (await client.get(f"/items/{item['pid']}", headers=headers)).json()["name"] == "Engine"
 
-    updated = await client.patch(f"/items/{item['id']}", json={"name": "Mill"}, headers=headers)
+    updated = await client.patch(f"/items/{item['pid']}", json={"name": "Mill"}, headers=headers)
     assert updated.json()["name"] == "Mill"
 
-    assert (await client.delete(f"/items/{item['id']}", headers=headers)).status_code == 204
-    assert (await client.get(f"/items/{item['id']}", headers=headers)).status_code == 404
+    assert (await client.delete(f"/items/{item['pid']}", headers=headers)).status_code == 204
+    assert (await client.get(f"/items/{item['pid']}", headers=headers)).status_code == 404
 
 
 async def test_my_items_are_only_mine(client: AsyncClient) -> None:
@@ -169,7 +167,7 @@ async def test_my_items_are_only_mine(client: AsyncClient) -> None:
 
     ada_sees = (await client.get("/items", headers=bearer(ada_token))).json()
     assert [entry["name"] for entry in ada_sees] == ["Engine"]
-    grace_reads = await client.get(f"/items/{engine['id']}", headers=bearer(grace_token))
+    grace_reads = await client.get(f"/items/{engine['pid']}", headers=bearer(grace_token))
     assert grace_reads.status_code == 404
 
 
@@ -197,13 +195,13 @@ async def test_items_are_listed_per_owner(client: AsyncClient) -> None:
     ada, ada_token = await signed_in(client, email="ada@example.com")
     grace, grace_token = await signed_in(client, email="grace@example.com")
     await client.post(
-        f"/users/{ada['id']}/items", json={"name": "Engine"}, headers=bearer(ada_token)
+        f"/users/{ada['pid']}/items", json={"name": "Engine"}, headers=bearer(ada_token)
     )
     await client.post(
-        f"/users/{grace['id']}/items", json={"name": "Compiler"}, headers=bearer(grace_token)
+        f"/users/{grace['pid']}/items", json={"name": "Compiler"}, headers=bearer(grace_token)
     )
 
-    ada_items = (await client.get(f"/users/{ada['id']}/items", headers=bearer(ada_token))).json()
+    ada_items = (await client.get(f"/users/{ada['pid']}/items", headers=bearer(ada_token))).json()
 
     assert [item["name"] for item in ada_items] == ["Engine"]
 
@@ -218,12 +216,12 @@ async def test_fetching_another_owners_item_is_not_found(client: AsyncClient) ->
     grace, grace_token = await signed_in(client, email="grace@example.com")
     item = (
         await client.post(
-            f"/users/{ada['id']}/items", json={"name": "Engine"}, headers=bearer(ada_token)
+            f"/users/{ada['pid']}/items", json={"name": "Engine"}, headers=bearer(ada_token)
         )
     ).json()
 
     response = await client.get(
-        f"/users/{grace['id']}/items/{item['id']}", headers=bearer(grace_token)
+        f"/users/{grace['pid']}/items/{item['pid']}", headers=bearer(grace_token)
     )
 
     assert response.status_code == 404, "existence must not leak across owners"
@@ -234,14 +232,14 @@ async def test_updating_an_item(client: AsyncClient) -> None:
     headers = bearer(token)
     item = (
         await client.post(
-            f"/users/{owner['id']}/items",
+            f"/users/{owner['pid']}/items",
             json={"name": "Engine", "description": "Draft."},
             headers=headers,
         )
     ).json()
 
     response = await client.patch(
-        f"/users/{owner['id']}/items/{item['id']}",
+        f"/users/{owner['pid']}/items/{item['pid']}",
         json={"name": "Analytical Engine"},
         headers=headers,
     )
@@ -258,14 +256,14 @@ async def test_an_update_can_clear_the_description(client: AsyncClient) -> None:
     headers = bearer(token)
     item = (
         await client.post(
-            f"/users/{owner['id']}/items",
+            f"/users/{owner['pid']}/items",
             json={"name": "Engine", "description": "Draft."},
             headers=headers,
         )
     ).json()
 
     response = await client.patch(
-        f"/users/{owner['id']}/items/{item['id']}", json={"description": None}, headers=headers
+        f"/users/{owner['pid']}/items/{item['pid']}", json={"description": None}, headers=headers
     )
 
     assert response.json()["description"] is None
@@ -277,12 +275,12 @@ async def test_updating_another_owners_item_is_not_found(client: AsyncClient) ->
     grace, grace_token = await signed_in(client, email="grace@example.com")
     item = (
         await client.post(
-            f"/users/{ada['id']}/items", json={"name": "Engine"}, headers=bearer(ada_token)
+            f"/users/{ada['pid']}/items", json={"name": "Engine"}, headers=bearer(ada_token)
         )
     ).json()
 
     response = await client.patch(
-        f"/users/{grace['id']}/items/{item['id']}",
+        f"/users/{grace['pid']}/items/{item['pid']}",
         json={"name": "Stolen"},
         headers=bearer(grace_token),
     )
@@ -294,9 +292,9 @@ async def test_deleting_an_item(client: AsyncClient) -> None:
     owner, token = await signed_in(client)
     headers = bearer(token)
     item = (
-        await client.post(f"/users/{owner['id']}/items", json={"name": "Engine"}, headers=headers)
+        await client.post(f"/users/{owner['pid']}/items", json={"name": "Engine"}, headers=headers)
     ).json()
-    path = f"/users/{owner['id']}/items/{item['id']}"
+    path = f"/users/{owner['pid']}/items/{item['pid']}"
 
     assert (await client.delete(path, headers=headers)).status_code == 204
     assert (await client.get(path, headers=headers)).status_code == 404
@@ -307,13 +305,13 @@ async def test_deleting_an_owner_deletes_their_items(client: AsyncClient) -> Non
     owner, token = await signed_in(client)
     headers = bearer(token)
     item = (
-        await client.post(f"/users/{owner['id']}/items", json={"name": "Engine"}, headers=headers)
+        await client.post(f"/users/{owner['pid']}/items", json={"name": "Engine"}, headers=headers)
     ).json()
 
-    await client.delete(f"/users/{owner['id']}", headers=headers)
+    await client.delete(f"/users/{owner['pid']}", headers=headers)
 
     administrator = await admin_bearer()
-    gone = await client.get(f"/users/{owner['id']}/items/{item['id']}", headers=administrator)
+    gone = await client.get(f"/users/{owner['pid']}/items/{item['pid']}", headers=administrator)
     assert gone.status_code == 404
 
 
@@ -325,26 +323,31 @@ async def test_a_deleted_owners_token_stops_working(client: AsyncClient) -> None
     """
     owner, token = await signed_in(client)
 
-    await client.delete(f"/users/{owner['id']}", headers=bearer(token))
+    await client.delete(f"/users/{owner['pid']}", headers=bearer(token))
 
-    after = await client.get(f"/users/{owner['id']}/items", headers=bearer(token))
+    after = await client.get(f"/users/{owner['pid']}/items", headers=bearer(token))
     assert after.status_code == 401
 
 
-async def test_creating_an_item_for_an_unknown_owner_is_forbidden_to_a_stranger(
+async def test_a_stranger_gets_404_for_an_unknown_owner_and_403_for_a_real_one(
     client: AsyncClient,
 ) -> None:
-    """Authorization runs before the owner lookup, and that ordering is the test.
+    """The owner is resolved by pid first, then the policy runs; that is the design.
 
-    Move the `authorize` call after the existence check and a stranger gets 404
-    for an unregistered id and 403 for a real one — a free oracle for which user
-    ids exist. The admin-driven test next to this one takes the permitted branch
-    and can never see the flip.
+    Under primary keys the order was reversed, so a 404-versus-403 difference
+    could not be used to probe which ids exist. A pid is random: a stranger
+    holding one was given it, so the difference tells them nothing they did
+    not have, and resolving first keeps every rule working on primary keys.
     """
-    _, token = await signed_in(client)
+    ada = await create_user(client, email="ada@example.com")
+    _, stranger = await signed_in(client, email="mallory@example.com")
 
-    response = await client.post(
-        f"/users/{MISSING_ID}/items", json={"name": "Orphan"}, headers=bearer(token)
+    unknown = await client.post(
+        f"/users/{MISSING_ID}/items", json={"name": "Orphan"}, headers=bearer(stranger)
+    )
+    real = await client.post(
+        f"/users/{ada['pid']}/items", json={"name": "Not yours"}, headers=bearer(stranger)
     )
 
-    assert response.status_code == 403, "a stranger learned whether the owner exists"
+    assert unknown.status_code == 404
+    assert real.status_code == 403

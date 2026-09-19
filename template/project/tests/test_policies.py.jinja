@@ -42,9 +42,11 @@ def test_nobody_may_do_anything_to_items() -> None:
         assert not items_policy(None, action, ITEMS)
 
 
-def test_any_caller_may_read_an_account() -> None:
-    """A directory, not a profile. Narrow this arm if yours is the other one."""
-    assert account_policy(STRANGER, "view", ACCOUNT)
+def test_only_the_owner_or_an_admin_may_read_an_account() -> None:
+    """Another account is not a stranger's to look at; the caller's own view is the session."""
+    assert account_policy(OWNER, "view", ACCOUNT)
+    assert account_policy(ADMINISTRATOR, "view", ACCOUNT)
+    assert not account_policy(STRANGER, "view", ACCOUNT)
 
 
 def test_only_the_owner_or_an_admin_may_change_an_account() -> None:

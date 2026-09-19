@@ -78,6 +78,16 @@ class Account:
 
 
 @dataclass(frozen=True, slots=True)
+class Directory:
+    """The set of every account: what a listing reads.
+
+    No fields, because the question is about all of them at once. Listing is
+    the enumeration the sign-in path refuses to give, so the rule below hands
+    it to an administrator and nobody else.
+    """
+
+
+@dataclass(frozen=True, slots=True)
 class ItemsOf:
     """One owner's items, as a caller addresses them.
 
@@ -97,11 +107,11 @@ def account_policy(identity: Identity | None, action: str, account: Account) -> 
     """Decide what a caller may do to an account.
 
     Three different answers, which is why the action is a parameter rather than
-    three dependencies. Reading is open to anyone signed in, because this is a
-    directory rather than a profile with private fields — narrow ``view`` to
-    ``mine`` if yours is. Changing and removing are the owner's or an admin's.
-    Replacing the password is the **owner's alone**: it demands the password in
-    force, and an admin who knew it would not need the route.
+    three dependencies. Reading, changing and removing are the owner's or an
+    admin's: another account is not a stranger's to look at, and the caller's
+    own view is ``GET /sessions/current`` anyway. Replacing the password is
+    the **owner's alone**: it demands the password in force, and an admin who
+    knew it would not need the route.
 
     Args:
         identity: The caller, or ``None`` if nobody is authenticated.
@@ -116,9 +126,7 @@ def account_policy(identity: Identity | None, action: str, account: Account) -> 
 
     mine = identity.id == account.user_id
     match action:
-        case "view":
-            return True
-        case "update" | "delete":
+        case "view" | "update" | "delete":
             return mine or identity.has_role(ADMIN)
         case "change-password":
             return mine
@@ -151,7 +159,36 @@ def items_policy(identity: Identity | None, action: str, items: ItemsOf) -> bool
             return False
 
 
+def directory_policy(identity: Identity | None, action: str, _directory: Directory) -> bool:
+    """Decide whether a caller may list every account.
+
+    Args:
+        identity: The caller, or ``None`` if nobody is authenticated.
+        action: The ability being asked about; ``list`` is the only one.
+        _directory: The resource, carried for the signature every rule shares.
+
+    Returns:
+        Whether it is permitted: an administrator, for ``list``.
+    """
+    if identity is None:
+        return False
+    match action:
+        case "list":
+            return identity.has_role(ADMIN)
+        case _:
+            return False
+
+
 register_policy(Account, account_policy)
+register_policy(Directory, directory_policy)
 register_policy(ItemsOf, items_policy)
 
-__all__ = ["ADMIN", "Account", "ItemsOf", "account_policy", "items_policy"]
+__all__ = [
+    "ADMIN",
+    "Account",
+    "Directory",
+    "ItemsOf",
+    "account_policy",
+    "directory_policy",
+    "items_policy",
+]

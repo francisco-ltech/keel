@@ -78,7 +78,8 @@ async def list_users(
 
     Args:
         _: Declared for the dependency, not for the body. A listing of every
-            registered address is the answer the sign-in path refuses to give.
+            registered address is the answer the sign-in path refuses to give,
+            so the policy limits it to an administrator.
         limit: Maximum rows to return.
         offset: Rows to skip.
 
@@ -88,33 +89,33 @@ async def list_users(
     return await service.list_users(limit=limit, offset=offset)
 
 
-@router.get("/{user_id}", summary="Fetch a user")
-async def get_user(user_id: UUID, _: Caller) -> UserRead:
+@router.get("/{pid}", summary="Fetch a user")
+async def get_user(pid: UUID, _: Caller) -> UserRead:
     """Return one user.
 
-    Any caller may read any user: this is a directory, not a profile with
-    private fields. Narrow it by changing ``account_policy``'s ``view`` arm in
-    ``app/policies.py`` — no route changes, which is the point of the seam.
+    The owner or an administrator: ``account_policy``'s ``view`` arm in
+    ``app/policies.py`` decides, and widening it changes no route, which is
+    the point of the seam.
 
     Args:
-        user_id: The user's id.
+        pid: The user's public identifier.
         _: Declared for the dependency.
 
     Returns:
         The user.
     """
-    return await service.get_user(user_id)
+    return await service.get_user(pid)
 
 
-@router.patch("/{user_id}", summary="Update a user")
-async def update_user(user_id: UUID, payload: UserUpdate, _: Caller) -> UserRead:
+@router.patch("/{pid}", summary="Update a user")
+async def update_user(pid: UUID, payload: UserUpdate, _: Caller) -> UserRead:
     """Apply a partial update.
 
     ``PATCH`` rather than ``PUT`` because the payload is partial: omitted fields
     are left alone rather than cleared.
 
     Args:
-        user_id: The user's id.
+        pid: The user's public identifier.
         payload: The fields to change. No password; see
             :func:`change_password`.
         _: Declared for the dependency: 401 without a token. The 403 for
@@ -123,38 +124,38 @@ async def update_user(user_id: UUID, payload: UserUpdate, _: Caller) -> UserRead
     Returns:
         The updated user.
     """
-    return await service.update_user(user_id, payload)
+    return await service.update_user(pid, payload)
 
 
 @router.put(
-    "/{user_id}/password",
+    "/{pid}/password",
     status_code=status.HTTP_204_NO_CONTENT,
     summary="Change a password",
 )
-async def change_password(user_id: UUID, payload: PasswordChange, _: Caller) -> None:
+async def change_password(pid: UUID, payload: PasswordChange, _: Caller) -> None:
     """Replace a password, given the current one, and sign every device out.
 
-    ``PUT`` on a sub-resource rather than a field on ``PATCH /users/{user_id}``:
+    ``PUT`` on a sub-resource rather than a field on ``PATCH /users/{pid}``:
     it is a whole replacement with its own precondition, and separating it is
     what makes the precondition unskippable.
 
     Args:
-        user_id: The user's id.
+        pid: The user's public identifier.
         payload: The current password and its replacement.
         _: Declared for the dependency.
     """
-    await service.change_password(user_id, payload)
+    await service.change_password(pid, payload)
 
 
-@router.delete("/{user_id}", status_code=status.HTTP_204_NO_CONTENT, summary="Delete a user")
-async def delete_user(user_id: UUID, _: Caller) -> None:
+@router.delete("/{pid}", status_code=status.HTTP_204_NO_CONTENT, summary="Delete a user")
+async def delete_user(pid: UUID, _: Caller) -> None:
     """Delete a user and everything they own.
 
     Args:
-        user_id: The user's id.
+        pid: The user's public identifier.
         _: Declared for the dependency.
     """
-    await service.delete_user(user_id)
+    await service.delete_user(pid)
 
 
 __all__ = ["router"]

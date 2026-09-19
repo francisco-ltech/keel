@@ -83,7 +83,7 @@ async def test_a_short_password_is_rejected(
 async def test_fetching_a_user(client: AsyncClient) -> None:
     created, token = await signed_in(client)
 
-    response = await client.get(f"/users/{created['id']}", headers=bearer(token))
+    response = await client.get(f"/users/{created['pid']}", headers=bearer(token))
 
     assert response.status_code == 200
     assert response.json() == created
@@ -103,10 +103,10 @@ async def test_fetching_an_unknown_user_is_a_problem_document(client: AsyncClien
 
 async def test_listing_users(client: AsyncClient) -> None:
     """Asserted as a set: every row in one test shares a transaction timestamp."""
-    token = (await signed_in(client, email="ada@example.com"))[1]
+    await create_user(client, email="ada@example.com")
     await create_user(client, email="grace@example.com")
 
-    response = await client.get("/users", headers=bearer(token))
+    response = await client.get("/users", headers=await admin_bearer())
 
     assert response.status_code == 200
     emails = {user["email"] for user in response.json()}
@@ -114,12 +114,40 @@ async def test_listing_users(client: AsyncClient) -> None:
 
 
 async def test_listing_users_respects_the_page_size(client: AsyncClient) -> None:
-    token = (await signed_in(client, email="ada@example.com"))[1]
+    await create_user(client, email="ada@example.com")
     await create_user(client, email="grace@example.com")
 
-    response = await client.get("/users", params={"limit": 1}, headers=bearer(token))
+    response = await client.get("/users", params={"limit": 1}, headers=await admin_bearer())
 
     assert len(response.json()) == 1
+
+
+async def test_listing_users_needs_an_administrator(client: AsyncClient) -> None:
+    """A listing of every address is the enumeration the sign-in path refuses to give."""
+    token = (await signed_in(client))[1]
+
+    assert (await client.get("/users", headers=bearer(token))).status_code == 403
+
+
+async def test_another_users_account_is_not_readable(client: AsyncClient) -> None:
+    created = await create_user(client, email="ada@example.com")
+    stranger = (await signed_in(client, email="grace@example.com"))[1]
+
+    path = f"/users/{created['pid']}"
+    assert (await client.get(path, headers=bearer(stranger))).status_code == 403
+    assert (await client.get(path, headers=await admin_bearer())).status_code == 200
+
+
+async def test_no_response_carries_a_primary_key(client: AsyncClient) -> None:
+    """The pid is the only identifier on the wire; the primary key never leaves the process."""
+    created, token = await signed_in(client)
+
+    fetched = (await client.get(f"/users/{created['pid']}", headers=bearer(token))).json()
+    listed = (await client.get("/users", headers=await admin_bearer())).json()
+
+    assert "id" not in created and "id" not in fetched
+    assert all("id" not in user for user in listed)
+    assert created["pid"] == fetched["pid"]
 
 
 async def test_reading_users_requires_a_caller(client: AsyncClient) -> None:
@@ -132,14 +160,14 @@ async def test_reading_users_requires_a_caller(client: AsyncClient) -> None:
     created = await create_user(client)
 
     assert (await client.get("/users")).status_code == 401
-    assert (await client.get(f"/users/{created['id']}")).status_code == 401
+    assert (await client.get(f"/users/{created['pid']}")).status_code == 401
 
 
 async def test_updating_a_user(client: AsyncClient) -> None:
     created, token = await signed_in(client)
 
     response = await client.patch(
-        f"/users/{created['id']}", json={"full_name": "Augusta Ada King"}, headers=bearer(token)
+        f"/users/{created['pid']}", json={"full_name": "Augusta Ada King"}, headers=bearer(token)
     )
 
     assert response.status_code == 200
@@ -158,7 +186,7 @@ async def test_a_partial_update_cannot_carry_a_password(client: AsyncClient) -> 
     created, token = await signed_in(client)
 
     response = await client.patch(
-        f"/users/{created['id']}", json={"password": "a-different-password"}, headers=bearer(token)
+        f"/users/{created['pid']}", json={"password": "a-different-password"}, headers=bearer(token)
     )
 
     assert response.status_code == 200
@@ -174,17 +202,19 @@ async def test_updating_to_a_taken_email_is_a_conflict(client: AsyncClient) -> N
     other, token = await signed_in(client, email="grace@example.com")
 
     response = await client.patch(
-        f"/users/{other['id']}", json={"email": "ada@example.com"}, headers=bearer(token)
+        f"/users/{other['pid']}", json={"email": "ada@example.com"}, headers=bearer(token)
     )
 
     assert response.status_code == 409
 
 
-async def test_updating_an_unknown_user_is_forbidden(client: AsyncClient) -> None:
-    """403 before 404: the policy runs before the service opens a transaction.
+async def test_updating_an_unknown_user_is_not_found(client: AsyncClient) -> None:
+    """404 for a pid nobody has: a pid is random, so there is no registry to probe.
 
-    The ordering is the defence. Answering 404 first would turn this route into
-    a way to ask which ids are registered, for free and without a password.
+    Under primary keys the policy ran first and answered 403, because a
+    404-versus-403 difference would have been a free oracle for which ids
+    exist. With a random public identifier there is nothing to enumerate, and
+    resolving the row first lets every rule keep working on primary keys.
     """
     token = (await signed_in(client))[1]
 
@@ -192,7 +222,7 @@ async def test_updating_an_unknown_user_is_forbidden(client: AsyncClient) -> Non
         f"/users/{MISSING_ID}", json={"full_name": "Nobody"}, headers=bearer(token)
     )
 
-    assert response.status_code == 403
+    assert response.status_code == 404
 
 
 async def test_deleting_a_user(client: AsyncClient) -> None:
@@ -200,8 +230,8 @@ async def test_deleting_a_user(client: AsyncClient) -> None:
     created, token = await signed_in(client, email="ada@example.com")
     observer = (await signed_in(client, email="grace@example.com"))[1]
 
-    deleted = await client.delete(f"/users/{created['id']}", headers=bearer(token))
-    gone = await client.get(f"/users/{created['id']}", headers=bearer(observer))
+    deleted = await client.delete(f"/users/{created['pid']}", headers=bearer(token))
+    gone = await client.get(f"/users/{created['pid']}", headers=bearer(observer))
 
     assert deleted.status_code == 204
     assert gone.status_code == 404
@@ -218,14 +248,14 @@ async def test_a_caller_cannot_modify_another_users_account(client: AsyncClient)
     headers = bearer(attacker)
 
     disabled = await client.patch(
-        f"/users/{victim['id']}", json={"is_active": False}, headers=headers
+        f"/users/{victim['pid']}", json={"is_active": False}, headers=headers
     )
     repassworded = await client.put(
-        f"/users/{victim['id']}/password",
+        f"/users/{victim['pid']}/password",
         json={"current_password": "irrelevant", "new_password": "attacker-chosen"},
         headers=headers,
     )
-    removed = await client.delete(f"/users/{victim['id']}", headers=headers)
+    removed = await client.delete(f"/users/{victim['pid']}", headers=headers)
     victim_signs_in = await client.post(
         "/sessions", json={"email": "ada@example.com", "password": DEFAULT_USER["password"]}
     )
@@ -240,12 +270,12 @@ async def test_a_write_without_a_caller_is_refused(client: AsyncClient) -> None:
     """Anonymously: no PATCH, no password, no DELETE. 401, before ownership."""
     created = await create_user(client)
 
-    disabled = await client.patch(f"/users/{created['id']}", json={"is_active": False})
+    disabled = await client.patch(f"/users/{created['pid']}", json={"is_active": False})
     repassworded = await client.put(
-        f"/users/{created['id']}/password",
+        f"/users/{created['pid']}/password",
         json={"current_password": "x", "new_password": "attacker-chosen"},
     )
-    removed = await client.delete(f"/users/{created['id']}")
+    removed = await client.delete(f"/users/{created['pid']}")
 
     assert disabled.status_code == 401
     assert repassworded.status_code == 401
@@ -257,7 +287,7 @@ async def test_changing_a_password_requires_the_caller(client: AsyncClient) -> N
     created = await create_user(client)
 
     response = await client.put(
-        f"/users/{created['id']}/password",
+        f"/users/{created['pid']}/password",
         json={"current_password": DEFAULT_USER["password"], "new_password": "attacker-chosen"},
     )
 
@@ -278,7 +308,7 @@ async def test_changing_a_password_requires_the_current_one(client: AsyncClient)
     created, token = await signed_in(client)
 
     response = await client.put(
-        f"/users/{created['id']}/password",
+        f"/users/{created['pid']}/password",
         json={"current_password": "not-the-one", "new_password": "a-new-password"},
         headers=bearer(token),
     )
@@ -295,7 +325,7 @@ async def test_changing_a_password_replaces_it(client: AsyncClient) -> None:
     created, token = await signed_in(client)
 
     response = await client.put(
-        f"/users/{created['id']}/password",
+        f"/users/{created['pid']}/password",
         json={"current_password": DEFAULT_USER["password"], "new_password": "a-new-password"},
         headers=bearer(token),
     )
@@ -326,8 +356,8 @@ async def test_ownership_cannot_be_smuggled_through_the_query_string(client: Asy
     attacker, attacker_token = await signed_in(client, email="mallory@example.com")
 
     response = await client.patch(
-        f"/users/{victim['id']}",
-        params={"user_id": attacker["id"]},
+        f"/users/{victim['pid']}",
+        params={"user_id": attacker["pid"]},
         json={"full_name": "Owned"},
         headers=bearer(attacker_token),
     )
@@ -347,10 +377,10 @@ async def test_an_admin_may_change_an_account_but_not_its_password(client: Async
     administrator = await admin_bearer()
 
     renamed = await client.patch(
-        f"/users/{victim['id']}", json={"full_name": "Renamed by support"}, headers=administrator
+        f"/users/{victim['pid']}", json={"full_name": "Renamed by support"}, headers=administrator
     )
     repassworded = await client.put(
-        f"/users/{victim['id']}/password",
+        f"/users/{victim['pid']}/password",
         json={"current_password": "irrelevant", "new_password": "chosen-by-support"},
         headers=administrator,
     )
@@ -375,18 +405,18 @@ async def test_a_rehash_on_login_cannot_overwrite_a_newer_password(
     password keeps working. The write is a compare-and-set for that reason.
     """
     user = await create_user(client, email="racer@example.com")
-    user_id = UUID(user["id"])
+    pid = UUID(user["pid"])
 
     async with uow() as session:
         users = UserRepository(session)
-        row = await users.get(user_id)
+        row = await users.get_by_pid(pid)
         assert row is not None
         current = row.hashed_password
         await users.update(row, {"hashed_password": "changed-by-somebody-else"})
 
     async with uow() as session:
         swapped = await UserRepository(session).replace_hash_if_unchanged(
-            user_id, expected=current, new="the-stale-rehash"
+            row.id, expected=current, new="the-stale-rehash"
         )
 
     assert not swapped, "a stale rehash overwrote a newer password"
@@ -406,7 +436,7 @@ async def test_a_stranger_who_knows_the_password_still_cannot_replace_it(
     _, token = await signed_in(client)
 
     response = await client.put(
-        f"/users/{victim['id']}/password",
+        f"/users/{victim['pid']}/password",
         json={
             "current_password": DEFAULT_USER["password"],
             "new_password": "attacker-chosen-value",
@@ -435,7 +465,7 @@ async def test_an_admin_is_refused_the_password_route_by_the_policy(
     victim, _ = await signed_in(client, email="victim@example.com")
 
     response = await client.put(
-        f"/users/{victim['id']}/password",
+        f"/users/{victim['pid']}/password",
         json={"current_password": DEFAULT_USER["password"], "new_password": "whatever-1"},
         headers=await admin_bearer(),
     )

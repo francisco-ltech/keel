@@ -86,7 +86,8 @@ class UserRead(BaseModel):
     """What the API returns for a user. Note the absence of any password field.
 
     Attributes:
-        id: The application-generated UUID primary key.
+        pid: The public identifier, the one a URL names. The primary key is
+            never returned.
         email: The user's address.
         full_name: Display name.
         is_active: Whether the account is enabled.
@@ -96,7 +97,7 @@ class UserRead(BaseModel):
 
     model_config = ConfigDict(from_attributes=True)
 
-    id: UUID
+    pid: UUID
     email: EmailStr
     full_name: str
     is_active: bool

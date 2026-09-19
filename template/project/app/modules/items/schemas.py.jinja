@@ -44,20 +44,20 @@ class ItemRead(BaseModel):
     """What the API returns for an item.
 
     Attributes:
-        id: The application-generated UUID primary key.
+        pid: The public identifier, the one a URL names. Neither the primary
+            key nor the owner's is returned: the owner is whoever the route
+            was addressed to.
         name: Short label.
         description: Optional long text.
-        owner_id: The owning user.
         created_at: Server-side timestamp, always UTC-aware.
         updated_at: Server-side timestamp, always UTC-aware.
     """
 
     model_config = ConfigDict(from_attributes=True)
 
-    id: UUID
+    pid: UUID
     name: str
     description: str | None
-    owner_id: UUID
     created_at: datetime
     updated_at: datetime
 

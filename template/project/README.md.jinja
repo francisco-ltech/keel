@@ -185,10 +185,10 @@ next section.
 | | | |
 |---|---|---|
 | `POST /users` | open | registration has to work without a credential |
-| `GET /users` | `Caller` | a listing of every address is the enumeration answer |
-| `GET /users/{id}` | `Caller` + `view` | any caller today; one arm of the policy narrows it |
-| `PATCH`, `DELETE /users/{id}` | `Caller` + `update` / `delete` | the owner, or an admin |
-| `PUT /users/{id}/password` | `Caller` + `change-password` + the current password | the owner alone |
+| `GET /users` | `Caller` + `list` on the directory | an admin; a listing of every address is the enumeration answer |
+| `GET /users/{pid}` | `Caller` + `view` | the owner, or an admin |
+| `PATCH`, `DELETE /users/{pid}` | `Caller` + `update` / `delete` | the owner, or an admin |
+| `PUT /users/{pid}/password` | `Caller` + `change-password` + the current password | the owner alone |
 | `/items` | `Caller` | the caller's own; the session names the owner, so the URL does not |
 | `/users/{owner_id}/items` | `Caller` + the items policy | the owner, or an admin acting for them |
 
@@ -237,10 +237,18 @@ also means no transaction is opened and no connection borrowed. `create_user` is
 the one function that does not authorize, because registration cannot.
 
 **A resource is a reference, not a row.** `Account(user_id)` and
-`ItemsOf(owner_id)` carry an id and nothing else. A session is never held across
-a request, so a route has no ORM object to judge — and a rule written against an
-identifier works just as well before the row has been read. Register a policy
+`ItemsOf(owner_id)` carry a primary key and nothing else. A session is never
+held across a request, so a route has no ORM object to judge. Register a policy
 for a model class and pass the loaded object when a rule genuinely needs the row.
+
+**Two identifiers, one of them public.** Every row a route can name carries a
+`pid` beside its primary key (`keel.database.PublicId`): a random UUID, the
+only identifier in a URL or a response. The primary key is time-ordered for the
+index and never leaves the process, and the caller's own routes — `/items`,
+`GET /sessions/current` — need no identifier at all, because the session names
+them. A service resolves the `pid` a route named to the row, then authorizes
+against the row's primary key; a stranger holding a `pid` was given it, and a
+403 tells them nothing they did not have.
 
 **Roles come from you.** `Identity.roles` is whatever the edge put there when
 the token was minted, and this scaffold mints none: give your users a role
@@ -508,7 +516,7 @@ entrypoint are its decisions.
   them is a decision about session policy, not about storage.
 * **A password reset flow, and roles on the user row.** Both are application
   policy rather than framework: an email, a table, and a decision about
-  expiry. `PUT /users/{user_id}/password` is the *change* path and needs the
+  expiry. `PUT /users/{pid}/password` is the *change* path and needs the
   current password; a *reset* is the one that does not, and it needs a
   single-use token delivered out of band before it is safe.
 {% endif %}* **A generic base repository.** Two modules is not enough evidence to know which

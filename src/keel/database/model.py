@@ -18,7 +18,7 @@ import uuid
 from datetime import datetime
 from typing import Final
 
-from sqlalchemy import DateTime, MetaData, event, func
+from sqlalchemy import DateTime, MetaData, event, func, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from keel.database.ids import uuid7
@@ -73,6 +73,35 @@ class UUIDPrimaryKey:
     """
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid7)
+
+
+class PublicId:
+    """A second identifier, and the only one that crosses the wire.
+
+    The primary key is for the database: time-ordered so inserts cluster,
+    joined on, never meant to be seen. A ``pid`` is for everyone else — the
+    URL, the response body, a log line a client quotes back — and it is a
+    random UUID4, so it reveals nothing about when the row was created or what
+    was created next to it, and cannot be walked. Loco calls this ``pid``
+    too, and the name is kept on purpose: it should look different from ``id``
+    everywhere it appears, because it is.
+
+    Two columns rather than a random primary key, because the reasons for a
+    time-ordered key (:mod:`keel.database.ids`) are about the index and the
+    reasons for an unguessable one are about the wire, and one column cannot
+    be both.
+
+    Assigned eagerly, like the primary key, so a row has its ``pid`` before it
+    is flushed and a service can put it in a response without a refresh. The
+    server default covers rows a migration or a ``psql`` session inserts.
+    """
+
+    pid: Mapped[uuid.UUID] = mapped_column(
+        default=uuid.uuid4,
+        server_default=text("gen_random_uuid()"),
+        unique=True,
+        index=True,
+    )
 
 
 class TimestampMixin:
@@ -140,11 +169,14 @@ def _assign_identity(
     """
     if isinstance(target, UUIDPrimaryKey) and kwargs.get("id") is None:
         kwargs["id"] = uuid7()
+    if isinstance(target, PublicId) and kwargs.get("pid") is None:
+        kwargs["pid"] = uuid.uuid4()
 
 
 __all__: list[str] = [
     "NAMING_CONVENTION",
     "Model",
+    "PublicId",
     "TimestampMixin",
     "UUIDPrimaryKey",
     "utcnow",

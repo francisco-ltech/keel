@@ -17,7 +17,7 @@ deploy chose.
 
 **The direction of the call is the point.** ``handle`` calls
 :func:`app.modules.items.service.get_item` — the same function
-``GET /items/{item_id}`` calls. There is no worker-only copy of
+``GET /items/{pid}`` calls. There is no worker-only copy of
 the read, so a change to how an item is fetched cannot be right for HTTP and
 wrong for the queue.
 
@@ -61,7 +61,7 @@ CARD_TTL = 3600.0
 that a card missed by an invalidation repairs itself within the hour."""
 
 
-def card_key(item_id: UUID | str) -> str:
+def card_key(pid: UUID | str) -> str:
     """Return the cache key an item's card is stored under.
 
     A function rather than an f-string at each call site: the key format is a
@@ -69,12 +69,12 @@ def card_key(item_id: UUID | str) -> str:
     of it is how a cache quietly stops being read.
 
     Args:
-        item_id: The item's id.
+        pid: The item's public identifier.
 
     Returns:
         The key.
     """
-    return f"items:{item_id}:card"
+    return f"items:{pid}:card"
 
 
 @dataclass(frozen=True, slots=True)
@@ -91,8 +91,9 @@ class IndexItem(Job):
     actually make: running this twice writes the same key twice.
 
     Attributes:
-        item_id: The item to index, as a string — the payload is serialised, so
-            fields are wire types rather than ``UUID``.
+        item_pid: The item to index, by public identifier and as a string —
+            the payload is serialised, so fields are wire types rather than
+            ``UUID``.
         owner_id: The owner it must belong to. Carried rather than looked up,
             so the job asks the service exactly the scoped question the router
             asks and cannot read across owners by accident.
@@ -111,7 +112,7 @@ class IndexItem(Job):
     backoff: ClassVar[Backoff] = ExponentialBackoff(base=2.0, maximum=60.0)
     """A failing dependency needs time, not another request."""
 
-    item_id: str
+    item_pid: str
     owner_id: str
 
     async def handle(self) -> None:
@@ -129,16 +130,16 @@ class IndexItem(Job):
         # The owner's authority and no more: no roles, and only for this read.
         with acting_as(Identity(id=owner_id)):
             try:
-                item = await service.get_item(UUID(self.item_id), owner_id)
+                item = await service.get_item(UUID(self.item_pid), owner_id)
             except NotFoundError as exc:
-                raise PermanentFailureError(f"item {self.item_id} no longer exists") from exc
+                raise PermanentFailureError(f"item {self.item_pid} no longer exists") from exc
 
         await cache.put(
-            card_key(item.id),
-            {"id": str(item.id), "name": item.name, "description": item.description},
+            card_key(item.pid),
+            {"pid": str(item.pid), "name": item.name, "description": item.description},
             ttl=CARD_TTL,
         )
-        logger.info("indexed item %s", item.id)
+        logger.info("indexed item %s", item.pid)
 
 
 __all__ = ["CARD_TTL", "IndexItem", "card_key"]

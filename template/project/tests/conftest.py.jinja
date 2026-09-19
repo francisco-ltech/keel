@@ -41,9 +41,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from typing import Any
-{%- if has_api %}
-from uuid import uuid4
-{%- endif %}
+from uuid import UUID{% if has_api %}, uuid4{% endif %}
 
 import anyio
 import pytest
@@ -53,7 +51,7 @@ from httpx import ASGITransport, AsyncClient
 {%- endif %}
 from keel.auth import MINIMUM_MEMORY_COST{% if has_api %}, Identity{% endif %}, hashing_lifespan{% if has_api %}, issue_token{% endif %}
 from keel.cache import cache_lifespan
-from keel.database import Database, Model, current_database, database_lifespan
+from keel.database import Database, Model, current_database, database_lifespan, uow
 {%- if has_worker %}
 from keel.queue import queue_lifespan
 {%- endif %}
@@ -63,6 +61,7 @@ from keel.testing import rolled_back_database
 from app.main import create_app
 {% endif -%}
 from app.modules.users import service as users_service
+from app.modules.users.repository import UserRepository
 from app.modules.users.schemas import UserCreate, UserRead
 from app.settings import (
     CacheSettings,
@@ -171,6 +170,25 @@ async def rolled_back(runtime: None) -> AsyncIterator[None]:
         yield
 
 
+async def primary_key_of(user: UserRead) -> UUID:
+    """Return the primary key behind a user the API described.
+
+    Responses carry a ``pid`` and nothing else, so a test that drives a service
+    or a job directly — both work in primary keys — resolves it here, the way
+    a service does. Requires a bound database.
+
+    Args:
+        user: The user as a response described it.
+
+    Returns:
+        The primary key.
+    """
+    async with uow() as session:
+        row = await UserRepository(session).get_by_pid(user.pid)
+        assert row is not None, f"no row behind pid {user.pid}"
+        return row.id
+
+
 async def make_user(**overrides: str) -> UserRead:
     """Create a user through the service layer.
 
@@ -234,8 +252,8 @@ async def create_user(client: AsyncClient, **overrides: str) -> dict[str, str]:
 async def signed_in(client: AsyncClient, **overrides: str) -> tuple[dict[str, str], str]:
     """Create a user, sign them in, and return both halves.
 
-    Most routes under ``/users`` need a caller *and* the record's id, and
-    fetching the id back needs the token — so handing over both is what stops
+    Most routes under ``/users`` need a caller *and* the record's pid, and
+    fetching the pid back needs the token — so handing over both is what stops
     every test starting with the same four lines.
 
     Args:

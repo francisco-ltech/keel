@@ -51,17 +51,17 @@ class ItemRepository:
         """
         return await self._session.get(Item, item_id)
 
-    async def get_for_owner(self, item_id: UUID, owner_id: UUID) -> Item | None:
+    async def get_for_owner(self, pid: UUID, owner_id: UUID) -> Item | None:
         """Return an item only if it belongs to the given owner.
 
         Args:
-            item_id: The primary key.
+            pid: The public identifier, what a route names.
             owner_id: The owner the item must belong to.
 
         Returns:
             The item, or ``None`` if it does not exist or is someone else's.
         """
-        statement = select(Item).where(Item.id == item_id, Item.owner_id == owner_id)
+        statement = select(Item).where(Item.pid == pid, Item.owner_id == owner_id)
         result = await self._session.execute(statement)
         return result.scalar_one_or_none()
 

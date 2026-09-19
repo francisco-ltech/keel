@@ -3,7 +3,8 @@
 A model, a repository, and a unit of work::
 
     from keel.database import (
-        Model, Repository, SoftDeleteMixin, TimestampMixin, UUIDPrimaryKey, uow,
+        Model, Repository, SoftDeleteMixin, TimestampMixin,
+    UUIDPrimaryKey, uow,
     )
 
     class Post(Model, UUIDPrimaryKey, TimestampMixin, SoftDeleteMixin):
@@ -48,6 +49,7 @@ from keel.database.ids import timestamp_of, uuid7
 from keel.database.model import (
     NAMING_CONVENTION,
     Model,
+    PublicId,
     TimestampMixin,
     UUIDPrimaryKey,
     utcnow,
@@ -157,6 +159,7 @@ __all__ = [
     "ModelEvent",
     "Observer",
     "Page",
+    "PublicId",
     "Repository",
     "SoftDeleteMixin",
     "TimestampMixin",

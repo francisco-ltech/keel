@@ -96,16 +96,22 @@ hashed at last year's cost can be upgraded. Dropping the value silently leaves
 those accounts cheap forever.
 
 **A password change needs the current password, and revokes every session.**
-`PUT /users/{user_id}/password`, never a field on `UserUpdate`: a password set
+`PUT /users/{pid}/password`, never a field on `UserUpdate`: a password set
 without proving knowledge of the old one is account takeover wearing an update.
 After it lands, `token_store().revoke_subject(user_id)` — and the same after
 disabling or deleting an account, or the tokens issued before it still work.
 {% endif %}
 **Authorize in the service, against a resource, never in the router.** Every
-service function that acts on a named thing opens with
-`authorize("update", Account(user_id))` — before `uow()`, so a refusal opens no
-transaction. The rule is in `app/policies.py`, keyed by the resource's class. A
+service function that acts on a named thing resolves the `pid` the route named
+to its row, then calls `authorize("update", Account(user.id))` before it writes
+anything. The rule is in `app/policies.py`, keyed by the resource's class. A
 guard at the HTTP edge would protect only the callers who arrive over HTTP.
+
+**A primary key never crosses the wire.** Routes name a `pid`
+(`keel.database.PublicId`), responses carry a `pid`, and the caller's own
+things need no identifier at all: the session names them. Adding a model a
+route can name means mixing in `PublicId` and looking it up with
+`get_by_pid`.
 
 **A new resource type needs a policy before it needs a route.** An unregistered
 one is refused with a `ConfigurationError`, which this application reports as a

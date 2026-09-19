@@ -24,13 +24,14 @@ from collections.abc import AsyncIterator
 from typing import Any, cast
 
 import pytest
-from sqlalchemy import ForeignKey, String, Table, select
+from sqlalchemy import ForeignKey, String, Table, select, text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from keel.database import (
     Database,
     DatabaseConfig,
     Model,
+    PublicId,
     Repository,
     SoftDeleteMixin,
     TimestampMixin,
@@ -92,6 +93,18 @@ class Books(Repository[Book]):
     model = Book
 
 
+class Sku(Model, UUIDPrimaryKey, PublicId):
+    """A model with a public identifier beside its primary key."""
+
+    __tablename__ = "keel_test_skus"
+
+    code: Mapped[str] = mapped_column(String(50))
+
+
+class Skus(Repository[Sku]):
+    model = Sku
+
+
 class Tags(Repository[Tag]):
     model = Tag
 
@@ -99,7 +112,7 @@ class Tags(Repository[Tag]):
 @pytest.fixture
 async def database(database_url: str) -> AsyncIterator[Database]:
     """A live database with the test tables created and dropped around it."""
-    tables = [cast("Table", model.__table__) for model in (Author, Book, Tag)]
+    tables = [cast("Table", model.__table__) for model in (Author, Book, Tag, Sku)]
     instance = Database(DatabaseConfig(url=database_url))
     async with instance.connect() as connection:
         await connection.run_sync(Model.metadata.create_all, tables=tables)
@@ -524,3 +537,58 @@ async def test_pagination_excludes_soft_deleted_rows(database: Database) -> None
     async with uow() as session:
         page = await Authors(session).paginate(limit=10)
     assert [author.name for author in page.items] == ["kept"]
+
+
+# -- public identifiers -----------------------------------------------------
+
+
+@pytest.mark.postgres
+async def test_a_pid_is_assigned_eagerly_and_is_not_time_ordered(database: Database) -> None:
+    """Before the flush, like the primary key; random, unlike it."""
+    sku = Sku(code="A")
+    assert sku.pid is not None and sku.pid.version == 4
+    assert sku.id.version == 7
+    async with uow() as session:
+        session.add(sku)
+    assert Sku(code="B").pid != sku.pid
+
+
+@pytest.mark.postgres
+async def test_get_by_pid_finds_the_row_and_only_that_row(database: Database) -> None:
+    async with uow() as session:
+        created = await Skus(session).create(code="A")
+        await Skus(session).create(code="B")
+    async with uow() as session:
+        found = await Skus(session).get_by_pid(created.pid)
+        assert found is not None and found.id == created.id
+        assert await Skus(session).get_by_pid(uuid.uuid4()) is None
+        assert await Skus(session).get_by_pid(created.id) is None, "a primary key is not a pid"
+
+
+@pytest.mark.postgres
+async def test_get_by_pid_or_fail_names_the_model_and_the_pid(database: Database) -> None:
+    missing = uuid.uuid4()
+    async with uow() as session:
+        with pytest.raises(RecordNotFoundError) as error:
+            await Skus(session).get_by_pid_or_fail(missing)
+    assert "Sku" in str(error.value) and str(missing) in str(error.value)
+
+
+@pytest.mark.postgres
+async def test_a_model_without_a_pid_says_so(database: Database) -> None:
+    async with uow() as session:
+        with pytest.raises(TypeError, match="PublicId"):
+            await Tags(session).get_by_pid(uuid.uuid4())
+
+
+@pytest.mark.postgres
+async def test_a_row_inserted_without_a_pid_gets_one_from_the_server(database: Database) -> None:
+    """A migration backfill or a psql session must not be able to insert a row with no pid."""
+    async with uow() as session:
+        await session.execute(
+            text("INSERT INTO keel_test_skus (id, code) VALUES (:id, 'raw')"),
+            {"id": uuid.uuid4()},
+        )
+    async with uow() as session:
+        raw = await Skus(session).first(Sku.code == "raw")
+        assert raw is not None and raw.pid is not None and raw.pid.version == 4

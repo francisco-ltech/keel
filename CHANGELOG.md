@@ -11,8 +11,15 @@ Keel; the ADRs say why.
   `/users/{owner_id}/items` stays for an administrator acting for somebody,
   and both go through the same service and policy.
 - **`GET /sessions/current` returns a profile, not a user record.** No id:
-  the session names the caller. `UserRead`, with the id, stays on the routes
-  that address somebody else.
+  the session names the caller.
+- **A primary key never crosses the wire.** `keel.database.PublicId` adds a
+  random `pid` beside the time-ordered primary key, with `get_by_pid` on the
+  repository; every route that names a user or an item names its `pid`, and
+  every response carries the `pid` and nothing else. Migration
+  `0003_public_ids` backfills existing rows. ADR 0014.
+- **Administrative routes need an administrator.** Listing users is `list`
+  on a `Directory` resource, granted to the admin role; reading another
+  account is the owner's or an admin's, not any signed-in caller's.
 
 ## v0.1.3 — 2026-09-19
 

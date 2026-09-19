@@ -33,7 +33,7 @@ from app.modules.items import service as items_service
 from app.modules.items.jobs import IndexItem, card_key
 from app.modules.items.schemas import ItemCreate
 from app.policies import ItemsOf
-from tests.conftest import make_user
+from tests.conftest import make_user, primary_key_of
 
 pytestmark = pytest.mark.anyio
 
@@ -42,11 +42,12 @@ MISSING_ID = "00000000-0000-4000-8000-000000000000"
 
 async def test_creating_an_item_dispatches_the_index_job(rolled_back: None) -> None:
     owner = await make_user()
+    owner_id = await primary_key_of(owner)
 
-    with fake_queue() as queued, acting_as(Identity(id=owner.id)):
-        item = await items_service.create_item(owner.id, ItemCreate(name="Engine"))
+    with fake_queue() as queued, acting_as(Identity(id=owner_id)):
+        item = await items_service.create_item(owner_id, ItemCreate(name="Engine"))
 
-    queued.assert_pushed(IndexItem, item_id=str(item.id), owner_id=str(owner.id))
+    queued.assert_pushed(IndexItem, item_pid=str(item.pid), owner_id=str(owner_id))
 
 
 async def test_the_dispatch_carries_the_request_id_to_the_worker(rolled_back: None) -> None:
@@ -58,12 +59,13 @@ async def test_the_dispatch_carries_the_request_id_to_the_worker(rolled_back: No
     goes looking for a worker log line and finds nothing to search by.
     """
     owner = await make_user()
+    owner_id = await primary_key_of(owner)
 
-    identity = Identity(id=owner.id)
+    identity = Identity(id=owner_id)
     with fake_queue() as queued, acting_as(identity), correlate(request_id="req-from-the-api"):
-        item = await items_service.create_item(owner.id, ItemCreate(name="Engine"))
+        item = await items_service.create_item(owner_id, ItemCreate(name="Engine"))
 
-    envelope = queued.assert_pushed(IndexItem, item_id=str(item.id))
+    envelope = queued.assert_pushed(IndexItem, item_pid=str(item.pid))
     assert envelope.context["request_id"] == "req-from-the-api"
 
 
@@ -87,13 +89,14 @@ async def test_a_failed_creation_dispatches_nothing(rolled_back: None) -> None:
 
 async def test_the_index_job_caches_a_card(rolled_back: None) -> None:
     owner = await make_user()
-    with acting_as(Identity(id=owner.id)):
-        item = await items_service.create_item(owner.id, ItemCreate(name="Engine"))
+    owner_id = await primary_key_of(owner)
+    with acting_as(Identity(id=owner_id)):
+        item = await items_service.create_item(owner_id, ItemCreate(name="Engine"))
 
-    await IndexItem(item_id=str(item.id), owner_id=str(owner.id)).handle()
+    await IndexItem(item_pid=str(item.pid), owner_id=str(owner_id)).handle()
 
-    assert await cache.get(card_key(item.id)) == {
-        "id": str(item.id),
+    assert await cache.get(card_key(item.pid)) == {
+        "pid": str(item.pid),
         "name": "Engine",
         "description": None,
     }
@@ -102,14 +105,15 @@ async def test_the_index_job_caches_a_card(rolled_back: None) -> None:
 async def test_the_index_job_is_idempotent(rolled_back: None) -> None:
     """At-least-once is the only delivery guarantee, so running twice must be safe."""
     owner = await make_user()
-    with acting_as(Identity(id=owner.id)):
-        item = await items_service.create_item(owner.id, ItemCreate(name="Engine"))
-    job = IndexItem(item_id=str(item.id), owner_id=str(owner.id))
+    owner_id = await primary_key_of(owner)
+    with acting_as(Identity(id=owner_id)):
+        item = await items_service.create_item(owner_id, ItemCreate(name="Engine"))
+    job = IndexItem(item_pid=str(item.pid), owner_id=str(owner_id))
 
     await job.handle()
     await job.handle()
 
-    assert await cache.get(card_key(item.id)) is not None
+    assert await cache.get(card_key(item.pid)) is not None
 
 
 async def test_indexing_a_deleted_item_stops_retrying(rolled_back: None) -> None:
@@ -121,20 +125,23 @@ async def test_indexing_a_deleted_item_stops_retrying(rolled_back: None) -> None
     that was deleted on purpose.
     """
     owner = await make_user()
+    owner_id = await primary_key_of(owner)
 
     with pytest.raises(PermanentFailureError):
-        await IndexItem(item_id=MISSING_ID, owner_id=str(owner.id)).handle()
+        await IndexItem(item_pid=MISSING_ID, owner_id=str(owner_id)).handle()
 
 
 async def test_another_owners_item_is_permanently_unindexable(rolled_back: None) -> None:
     """The job asks the scoped question, so it cannot read across owners."""
     ada = await make_user(email="ada@example.com")
+    ada_id = await primary_key_of(ada)
     grace = await make_user(email="grace@example.com")
-    with acting_as(Identity(id=ada.id)):
-        item = await items_service.create_item(ada.id, ItemCreate(name="Engine"))
+    grace_id = await primary_key_of(grace)
+    with acting_as(Identity(id=ada_id)):
+        item = await items_service.create_item(ada_id, ItemCreate(name="Engine"))
 
     with pytest.raises(PermanentFailureError):
-        await IndexItem(item_id=str(item.id), owner_id=str(grace.id)).handle()
+        await IndexItem(item_pid=str(item.pid), owner_id=str(grace_id)).handle()
 
 
 async def test_the_job_runs_with_the_owners_authority_and_no_more(rolled_back: None) -> None:
@@ -146,13 +153,14 @@ async def test_the_job_runs_with_the_owners_authority_and_no_more(rolled_back: N
     acts for. The second half is what stops a queue becoming an escalation path.
     """
     ada = await make_user(email="ada@example.com")
-    with acting_as(Identity(id=ada.id)):
-        item = await items_service.create_item(ada.id, ItemCreate(name="Engine"))
+    ada_id = await primary_key_of(ada)
+    with acting_as(Identity(id=ada_id)):
+        item = await items_service.create_item(ada_id, ItemCreate(name="Engine"))
 
-    await IndexItem(item_id=str(item.id), owner_id=str(ada.id)).handle()
+    await IndexItem(item_pid=str(item.pid), owner_id=str(ada_id)).handle()
 
     assert current_identity() is None, "the job leaked its caller into the process"
-    assert await cache.get(card_key(item.id)) is not None
+    assert await cache.get(card_key(item.pid)) is not None
 
 
 async def test_a_job_acts_with_no_roles(rolled_back: None) -> None:
@@ -164,8 +172,9 @@ async def test_a_job_acts_with_no_roles(rolled_back: None) -> None:
     captures the identity the policy is actually asked about.
     """
     ada = await make_user(email="ada@example.com")
-    with acting_as(Identity(id=ada.id)):
-        item = await items_service.create_item(ada.id, ItemCreate(name="Engine"))
+    ada_id = await primary_key_of(ada)
+    with acting_as(Identity(id=ada_id)):
+        item = await items_service.create_item(ada_id, ItemCreate(name="Engine"))
 
     seen: list[Identity | None] = []
 
@@ -175,7 +184,7 @@ async def test_a_job_acts_with_no_roles(rolled_back: None) -> None:
 
     with use_policies() as policies:
         policies.register(ItemsOf, capture)
-        await IndexItem(item_id=str(item.id), owner_id=str(ada.id)).handle()
+        await IndexItem(item_pid=str(item.pid), owner_id=str(ada_id)).handle()
 
     assert seen, "the job never consulted a policy"
     assert all(who is not None and who.roles == frozenset() for who in seen), (
