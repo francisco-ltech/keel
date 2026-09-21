@@ -82,6 +82,7 @@ import anyio
 from keel.auth import hashing_lifespan
 from keel.cache import cache_lifespan
 from keel.database import current_database, database_lifespan, uow
+from keel.mail import mail_lifespan
 from keel.observability import Metrics, configure_logging, metrics_lifespan
 from keel.queue import (
     DatabaseFailureSink,
@@ -318,6 +319,7 @@ async def wired(config: Settings) -> AsyncIterator[tuple[Worker, Metrics]]:
         # Hashing but no token store: a job may create a user, none issues a
         # credential, and `acting_as` needs nothing bound to carry a caller.
         hashing_lifespan(config.hashing_config()),
+        mail_lifespan(config.mail_config(), events),
         queue_lifespan(queue_config, events),
     ):
         worker = Worker(

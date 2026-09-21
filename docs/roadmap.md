@@ -85,14 +85,27 @@ its scaffold came from, and `keel update` brings it forward. Releases are tags,
 latest one. PyPI is the next step, needing a name check and a publish workflow.
 The repository carries an MIT license, like Laravel's.
 
+## Phase 6 — the batteries with a caller
+
+Started 2026-09-21. The "beyond" list below had a rule: a subsystem gets a
+number when something needs it. Mail was first, because the template's
+registration had nobody to tell and the password reset it declines needs the
+same seam.
+
+* **Mail** ([0015](adr/0015-mail.md)) — `send()` over `smtp`, `log`, `null`
+  and a recording fake, a `Message` that refuses header injection once for
+  every driver, SMTP from the standard library on a worker thread, and a
+  welcome on registration in the template that is sent only once the
+  transaction commits. Mailpit beside Postgres and Redis under `just up`.
+
 ## Next
 
-Nothing is scheduled. Phase 5 closed with metrics; see below for what would
-get a number next and why nothing has one yet.
+Nothing else in Phase 6 is scheduled. Object storage, notifications, rate
+limiting and a job middleware chain wait for a caller, as mail did.
 
 ## Beyond, unscheduled
 
-Mail, object storage, notifications, rate limiting, and a job middleware chain.
+Object storage, notifications, rate limiting, and a job middleware chain.
 Each is a real feature with a real cost, and none has a caller yet. They get a
 phase number when something needs them — assigning one earlier is how a roadmap
 starts describing work that never happens.

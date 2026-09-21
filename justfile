@@ -167,6 +167,12 @@ doctor:
             await client.aclose()
         except Exception as exc:
             print(f"redis:    FAILED — {type(exc).__name__}: {exc}")
+        try:
+            from urllib.request import urlopen
+            with urlopen("http://localhost:8025/readyz", timeout=5) as reply:
+                print(f"mailpit:  ok — HTTP {reply.status} at :8025, SMTP on :1025")
+        except Exception as exc:
+            print(f"mailpit:  FAILED — {type(exc).__name__}: {exc}")
     asyncio.run(main())
     PY
 

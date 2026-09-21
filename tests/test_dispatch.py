@@ -17,6 +17,7 @@ says where to look.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import AsyncIterator, Iterator
 from dataclasses import dataclass
 from datetime import timedelta
@@ -36,7 +37,7 @@ from keel.database import (
     set_database,
     uow,
 )
-from keel.database.hooks import current_session, in_transaction
+from keel.database.hooks import after_commit, current_session, in_transaction
 from keel.exceptions import ConfigurationError
 from keel.queue import (
     FakeQueue,
@@ -263,6 +264,23 @@ async def test_the_row_is_committed_before_the_job_is_dispatched(
         queued.assert_pushed(SendInvoice, invoice_id="inv-2")
 
     assert seen == [1]
+
+
+@pytest.mark.postgres
+async def test_a_failing_after_commit_callback_is_logged_by_default(
+    database: Database, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The commit stands and the caller has returned, so a log line is all that is left."""
+
+    async def refused() -> None:
+        raise RuntimeError("the mail server is down")
+
+    with caplog.at_level(logging.ERROR, logger="keel.database"):
+        async with uow():
+            after_commit(refused)
+
+    assert "after-commit callback" in caplog.text
+    assert "the mail server is down" in caplog.text
 
 
 @pytest.mark.postgres

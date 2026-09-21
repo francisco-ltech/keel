@@ -14,6 +14,7 @@ diff will get it wrong eventually.
 
 from __future__ import annotations
 
+import logging
 import uuid
 from collections.abc import AsyncIterator, Iterator, Mapping
 from dataclasses import dataclass, field
@@ -312,6 +313,22 @@ async def test_a_failing_observer_does_not_undo_the_write(database: Database) ->
 
     async with uow() as session:
         assert await Accounts(session).get(account.id) is not None
+
+
+@pytest.mark.postgres
+async def test_a_failing_observer_is_logged_by_default(
+    database: Database, caplog: pytest.LogCaptureFixture
+) -> None:
+    class Exploding(Observer[Account]):
+        async def created(self, instance: Account) -> None:
+            raise RuntimeError("observer is broken")
+
+    observe(Account, Exploding())
+    with caplog.at_level(logging.ERROR, logger="keel.database"):
+        async with uow() as session:
+            await Accounts(session).create(name="logged")
+
+    assert "Exploding" in caplog.text and "observer is broken" in caplog.text
 
 
 @pytest.mark.postgres

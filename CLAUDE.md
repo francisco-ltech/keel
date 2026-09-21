@@ -40,11 +40,11 @@ them, or the copy drifts and starts lying.
 | `just test-serial` | one process, for tracebacks and debuggers |
 | `just check` | quick + test. What pre-push runs. |
 | `just test-generator` | generates the template in 3 shapes, ~70s |
-| `just doctor` | whether Postgres and Redis actually answer |
+| `just doctor` | whether Postgres, Redis and Mailpit actually answer |
 | `just new DEST` | a project linked to this checkout; `keel new` for users. ADR 0013 |
 
 Postgres is on **5433**, Redis on **6380**, to avoid clashing with anything on
-the default ports. `just up` starts them.
+the default ports; Mailpit on **1025**/**8025**. `just up` starts them.
 
 ## Rules that bite if ignored
 
@@ -98,6 +98,7 @@ src/keel/
   cache/      facade, drivers, locks, fake
   database/   engine, uow, repository, soft delete, observers, migrations
   queue/      jobs, dispatch, drivers, worker, failed jobs, scheduler
+  mail/       message, config, smtp/log/null drivers, fake, binding
   observability/  logging, correlation re-exports, readiness checks, the request inspector, metrics
   contracts/  the protocols drivers implement
   support/    binding, manager, events, keys, serialization — subsystem-agnostic

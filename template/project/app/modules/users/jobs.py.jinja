@@ -1,0 +1,67 @@
+"""Jobs the users module runs on the worker.
+
+Sending a welcome is the textbook job: it needs nothing the request has, it
+can fail for reasons the request cannot fix, and a retry a minute later is
+the right response to a mail server that was busy. Dispatched from inside the
+unit of work that created the account, so it is pushed only if that commits —
+a welcome to a row that rolled back would be a welcome to nobody.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import ClassVar
+from uuid import UUID
+
+from keel.database import uow
+from keel.exceptions import MailDeliveryError
+from keel.mail import send
+from keel.queue import Job, PermanentFailureError
+
+from app.modules.users.mail import welcome
+from app.modules.users.repository import UserRepository
+from app.modules.users.schemas import UserRead
+
+
+@dataclass(frozen=True, slots=True)
+class SendWelcome(Job):
+    """Send the welcome mail to a newly registered account.
+
+    Carries the public identifier rather than the address, so an account that
+    changed its email before the worker got to it is welcomed at the current
+    one, and one deleted meanwhile is welcomed nowhere.
+
+    Attributes:
+        user_pid: The account's public identifier, as a string — the payload
+            is serialised, so fields are wire types.
+    """
+
+    user_pid: str
+
+    max_attempts: ClassVar[int] = 5
+    timeout: ClassVar[float | None] = 30.0
+
+    async def handle(self) -> None:
+        """Look the account up and send.
+
+        Raises:
+            PermanentFailureError: If the account is gone, or the server's
+                answer was final. A deleted account and a 5xx are not reasons
+                to retry.
+            MailDeliveryError: If the server could not be reached or asked
+                for a retry. Retried, with backoff.
+        """
+        async with uow() as session:
+            user = await UserRepository(session).get_by_pid(UUID(self.user_pid))
+            if user is None:
+                raise PermanentFailureError(f"user {self.user_pid} no longer exists")
+            account = UserRead.model_validate(user)
+        try:
+            await send(welcome(account))
+        except MailDeliveryError as exc:
+            if exc.permanent:
+                raise PermanentFailureError(str(exc)) from exc
+            raise
+
+
+__all__ = ["SendWelcome"]

@@ -38,10 +38,11 @@ docs/adr/          why things are shaped the way they are
 |---|---|
 | `keel.cache` | Cache, atomic locks, `remember` with single-flight. Drivers: Redis, in-memory, null. Recording fake with assertions. |
 | `keel.database` | Async engine, pooling with a statement timeout, the `uow()` transaction idiom, declarative base with a migration-safe naming convention. |
-| `keel.testing` | `fake_cache()` and `rolled_back_database()`. |
+| `keel.testing` | `fake_cache()`, `fake_queue()`, `fake_mail()` and `rolled_back_database()`. |
 | `keel.database` | Generic repository, UUIDv7 keys, soft deletes as a global query scope, keyset pagination, model observers that fire after commit, factories and seeders, advisory-locked migrations with drift detection. |
 | `keel.queue` | Jobs as Commands, dispatch that waits for the transaction to commit, SAQ driver, a supervised worker with graceful shutdown and orphan recovery, durable failed jobs, and cron guarded by an advisory lock. |
 | `keel.auth` | The current-identity context, Argon2 password hashing with rehash-on-login, hashed-at-rest bearer tokens, and authorization policies registered per resource type with `authorize()` / `allows()`. Drivers: Redis, in-memory. Recording fake. No guard protocol. |
+| `keel.mail` | `send()` over SMTP, a logging driver, null, and a recording fake with assertions. A message validated once for every driver: header injection is refused before a driver sees it. |
 | `keel.observability` | A correlation context, structured JSON logging that carries it onto every record including third-party ones, jobs that inherit the request id that dispatched them, readiness checks, a development request inspector that records each request's queries, cache calls, dispatches and log lines as one timeline, and Prometheus metrics over the same sources. |
 | `template/` | Generates a service in three shapes — API, worker, or both — with domain modules, Alembic, tests and Docker. |
 
@@ -55,7 +56,7 @@ service:
 uv tool install "keel[cli] @ git+https://github.com/francisco-ltech/keel"
 keel new invoices     # asks for a name, a description and the shape
 cd invoices
-just up               # Postgres on 5433 and Redis on 6380, via Docker Compose
+just up               # Postgres on 5433, Redis on 6380 and Mailpit, via Docker Compose
 just dev              # the app in containers next to them: http://localhost:8000/docs
 ```
 
@@ -72,6 +73,8 @@ project's suite against the same Postgres.
   the owner taken from the session; `/users/{pid}/items` is how an admin acts
   for somebody. A primary key never crosses the wire: routes and responses
   carry a random public identifier instead. All of it in the OpenAPI document at `/docs`.
+- A welcome mail on registration, sent only once the transaction commits and
+  caught by Mailpit at http://localhost:8025 so nothing leaves the machine.
 - Every write inside a unit of work, and no session ever held across a
   request. Authorization policies checked in the service, not the router, so a
   job and a route share one answer to "may this caller do that".
@@ -101,7 +104,8 @@ curl -s -X POST localhost:8000/sessions -H 'Content-Type: application/json' \
   -d '{"email":"ada@example.com","password":"correct-horse-battery-staple"}'
 ```
 
-The first answers with the user. The second answers with `access_token`,
+The first answers with the user, and its welcome mail is at
+http://localhost:8025. The second answers with `access_token`,
 readable there and nowhere else: tokens are stored hashed. From here the
 session names the caller, so nothing below sends an id over the wire:
 
@@ -184,6 +188,9 @@ starves. See [ADR 0002](docs/adr/0002-the-unit-of-work.md).
   this rather than depending on Advanced-Alchemy.
 - [ADR 0004 — two type checkers](docs/adr/0004-two-type-checkers.md): ty for the
   inner loop, mypy as the gate, and the criteria for dropping one.
+- [ADR 0015 — mail](docs/adr/0015-mail.md): the subsystem shape applied a
+  third time, a message validated once for every driver, SMTP from the standard
+  library, and a welcome that waits for the commit.
 - [ADR 0013 — the installer](docs/adr/0013-the-installer.md): `keel new` and
   `keel update`, why the template's config moved to the repository root, and why
   a project pins Keel to the commit its scaffold came from.

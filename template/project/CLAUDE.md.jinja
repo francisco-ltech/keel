@@ -12,7 +12,7 @@ not regenerating.
 `worker.py` and a `jobs.py`, not regenerating.
 {% endif %}
 Built on [Keel](https://github.com/francisco-ltech/keel), which supplies the
-cache, database, identity{% if has_worker %} and queue{% endif %}. The rules below come from Keel and are not
+cache, database, identity, mail{% if has_worker %} and queue{% endif %}. The rules below come from Keel and are not
 stylistic — each one exists because the obvious alternative has a failure mode.
 
 ## Layout
@@ -23,6 +23,7 @@ app/modules/<domain>/
   schemas.py      Pydantic. Never imports models.
   repository.py   data access; takes a session, never opens one
   service.py      business logic; owns the transaction, returns schemas
+  mail.py         the messages this domain sends, one function each; never sends
 {% if has_api %}  router.py       HTTP only; calls services
 {% endif %}{% if has_worker %}  jobs.py         job handlers; call the same services
 {% endif %}```

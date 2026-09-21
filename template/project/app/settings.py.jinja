@@ -33,6 +33,7 @@ from pathlib import Path
 {% if has_api %}from keel.auth import DEFAULT_TOKEN_TTL, HashingConfig, TokenConfig{% else %}from keel.auth import HashingConfig{% endif %}
 from keel.cache import CacheConfig, StoreConfig
 from keel.database import DatabaseConfig
+from keel.mail import MailConfig
 from keel.observability import {% if has_api %}InspectorConfig, {% endif %}LoggingConfig, MetricsConfig
 {%- if has_worker %}
 from keel.queue import QueueConfig
@@ -143,6 +144,40 @@ class LoggingSettings(BaseSettings):
     level: str = "INFO"
     # `formatter` rather than `format`, which shadows a builtin on an attribute.
     formatter: str = Field(default="json", validation_alias=AliasChoices("LOG_FORMAT"))
+
+
+class MailSettings(BaseSettings):
+    """How this process sends mail.
+
+    ``smtp`` to the local Mailpit by default, which is what `just up` starts:
+    every message the application sends shows up at its web UI and nothing
+    leaves the machine. Production sets a real server and, almost always,
+    ``MAIL_SECURITY=starttls`` with credentials. ``log`` writes who was mailed
+    about what and sends nothing, for an environment with no server.
+
+    Attributes:
+        driver: ``smtp``, ``log`` or ``null``.
+        sender: The ``From`` address for a message that names none.
+        host: The SMTP server.
+        port: Its port.
+        username: SMTP credentials, if the server wants them.
+        password: With ``username``.
+        security: ``none``, ``starttls`` or ``tls``.
+        timeout: Seconds an SMTP conversation may take.
+    """
+
+    model_config = SettingsConfigDict(env_prefix="MAIL_", env_file=".env", extra="ignore")
+
+    driver: str = "smtp"
+    sender: str = Field(
+        default="{{ project_slug }}@localhost", validation_alias=AliasChoices("MAIL_FROM")
+    )
+    host: str = "localhost"
+    port: int = Field(default={{ mailpit_smtp_port }}, ge=1, le=65535)
+    username: str | None = None
+    password: str | None = None
+    security: str = "none"
+    timeout: float = Field(default=10.0, gt=0)
 
 
 class MetricsSettings(BaseSettings):
@@ -335,6 +370,7 @@ class WorkerSettings(BaseSettings):
         hashing: Password hashing cost, from ``HASHING_*``.
         logging: Log level and shape, from ``LOG_*``.
         metrics: Whether metrics are kept, from ``METRICS_*``.
+        mail: How mail is sent, from ``MAIL_*``.
 {%- if has_api %}
         inspector: Request inspector retention, from ``INSPECTOR_*``; on under ``DEBUG``.
         token: Bearer token settings, from ``REDIS_URL`` and ``TOKEN_*``.
@@ -361,6 +397,7 @@ class WorkerSettings(BaseSettings):
     hashing: HashingSettings = Field(default_factory=HashingSettings)
     logging: LoggingSettings = Field(default_factory=LoggingSettings)
     metrics: MetricsSettings = Field(default_factory=MetricsSettings)
+    mail: MailSettings = Field(default_factory=MailSettings)
 {%- if has_api %}
     inspector: InspectorSettings = Field(default_factory=InspectorSettings)
     token: TokenSettings = Field(default_factory=TokenSettings)
@@ -428,6 +465,25 @@ class WorkerSettings(BaseSettings):
             process that silently logs nothing.
         """
         return LoggingConfig(level=self.logging.level, formatter=self.logging.formatter)
+
+    def mail_config(self) -> MailConfig:
+        """Translate the validated settings into Keel's mail config.
+
+        Returns:
+            The plain dataclass :func:`keel.mail.mail_lifespan` expects. It
+            refuses an unknown security mode at construction, so a typo in
+            ``MAIL_SECURITY`` fails at start-up rather than on the first send.
+        """
+        return MailConfig(
+            driver=self.mail.driver,
+            sender=self.mail.sender,
+            host=self.mail.host,
+            port=self.mail.port,
+            username=self.mail.username,
+            password=self.mail.password,
+            security=self.mail.security,
+            timeout=self.mail.timeout,
+        )
 
     def metrics_config(self) -> MetricsConfig:
         """Translate the validated settings into Keel's metrics config.

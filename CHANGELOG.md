@@ -4,6 +4,31 @@ Releases are tags. `keel new` generates from the latest one, and `keel update`
 moves a project between them. Entries say what changed for someone building on
 Keel; the ADRs say why.
 
+## Unreleased
+
+Mail, the first subsystem of Phase 6. A project on an earlier release gets it
+with `keel update`; `just up` then also starts Mailpit.
+
+- **`keel.mail`.** `send(Message(...))` over a swappable driver: `smtp` from
+  the standard library on a worker thread, `log` for an environment with no
+  server, `null`, and a recording fake reached through
+  `keel.testing.fake_mail()` with `assert_sent`, `assert_sent_times` and
+  `assert_nothing_sent`. A `Message` is validated once for every driver: a
+  recipient is required and a line break in an address, subject or header is
+  refused as header injection. `MAIL_*` configures it. ADR 0015.
+- **The template welcomes a new account.** `modules/users/mail.py` builds the
+  message; with a worker `SendWelcome` is dispatched inside the unit of work and
+  pushed after the commit, without one the send runs `after_commit`. Mailpit
+  runs beside Postgres and Redis, the app containers point at it, and every
+  message a development run sends is at http://localhost:8025. The generated
+  suite runs on the `log` driver and needs no Mailpit.
+- **A failing after-commit callback or model observer is logged by default.**
+  `Database(on_deferred_error=..., on_observer_error=...)` used to swallow
+  the exception when nothing was passed, and no generated project passed
+  anything, so a dispatch that could not be pushed left no trace. Both now
+  log on `keel.database` with the traceback; the handlers still route it
+  elsewhere.
+
 ## v0.1.4 — 2026-09-19
 
 Identifiers on the wire, and who may see what. A project on an earlier

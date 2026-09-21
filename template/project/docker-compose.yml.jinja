@@ -27,6 +27,19 @@ services:
       retries: 5
       start_period: 10s
 
+  mailpit:
+    # Catches every message the application sends in development and shows it
+    # at http://localhost:{{ mailpit_ui_port }}. Nothing leaves the machine.
+    image: axllent/mailpit
+    ports:
+      - "{{ mailpit_smtp_port }}:1025"
+      - "{{ mailpit_ui_port }}:8025"
+    healthcheck:
+      test: ["CMD", "/mailpit", "readyz"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
   redis:
     image: redis:7-alpine
     command: ["redis-server", "--appendonly", "yes"]
@@ -41,7 +54,7 @@ services:
       retries: 5
       start_period: 5s
 
-  # Behind the `app` profile, so `just up` still starts only Postgres and Redis.
+  # Behind the `app` profile, so `just up` still starts only the services above.
   # Deployment model and why there is no Dockerfile: see the README.
 {%- if has_api %}
 
@@ -64,6 +77,9 @@ services:
       UV_LINK_MODE: copy
       DATABASE_URL: postgresql+asyncpg://keel:keel@postgres:5432/keel
       REDIS_URL: redis://redis:6379/0
+      MAIL_DRIVER: smtp
+      MAIL_HOST: mailpit
+      MAIL_PORT: "1025"
     volumes:
       - .:/srv/app
       # The container's virtualenv, kept across restarts so `uv sync` is a no-op
@@ -79,6 +95,7 @@ services:
     depends_on:
       postgres: {condition: service_healthy}
       redis: {condition: service_healthy}
+      mailpit: {condition: service_healthy}
 {%- endif %}
 {%- if has_worker %}
 
@@ -96,6 +113,9 @@ services:
       UV_LINK_MODE: copy
       DATABASE_URL: postgresql+asyncpg://keel:keel@postgres:5432/keel
       REDIS_URL: redis://redis:6379/0
+      MAIL_DRIVER: smtp
+      MAIL_HOST: mailpit
+      MAIL_PORT: "1025"
       QUEUE_DRIVER: saq
       WORKER_HEALTH_FILE: /tmp/{{ project_slug }}-worker.health
     volumes:
@@ -117,6 +137,7 @@ services:
     depends_on:
       postgres: {condition: service_healthy}
       redis: {condition: service_healthy}
+      mailpit: {condition: service_healthy}
 {%- endif %}
 
 volumes:

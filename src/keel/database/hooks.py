@@ -36,6 +36,7 @@ consults them. This module is the mechanism, not the interface.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Awaitable, Callable
 from contextvars import ContextVar
 from typing import TYPE_CHECKING, Final
@@ -45,6 +46,8 @@ if TYPE_CHECKING:
 
 type AfterCommit = Callable[[], Awaitable[None]]
 """A coroutine function to run once the surrounding transaction has committed."""
+
+logger = logging.getLogger("keel.database")
 
 CALLBACKS_KEY: Final = "keel_after_commit"
 """Key under which pending callbacks live on ``Session.info``.
@@ -124,8 +127,8 @@ async def run_after_commit(
     Args:
         session: The session whose callbacks should run.
         on_error: Called with any exception a callback raises. When omitted,
-            failures are swallowed — an application should pass something that
-            logs, because a dropped dispatch is invisible otherwise.
+            the failure is logged with its traceback on ``keel.database``: a
+            dropped dispatch or mail would be invisible otherwise.
 
     Returns:
         The number of callbacks run.
@@ -134,8 +137,10 @@ async def run_after_commit(
     for callback in pending:
         try:
             await callback()
-        except Exception as exc:  # noqa: BLE001 — one callback must not break the rest
-            if on_error is not None:
+        except Exception as exc:  # one callback must not break the rest
+            if on_error is None:
+                logger.exception("after-commit callback %r failed; the commit stands", callback)
+            else:
                 on_error(exc)
     return len(pending)
 

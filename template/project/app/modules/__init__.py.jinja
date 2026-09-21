@@ -25,7 +25,8 @@ from typing import TYPE_CHECKING, Final
 {% if has_worker %}from app.modules.items.jobs import IndexItem
 {% endif %}{% if has_api %}from app.modules.items.router import router as items_router
 from app.modules.sessions.router import router as sessions_router
-from app.modules.users.router import router as users_router
+{% endif %}{% if has_worker %}from app.modules.users.jobs import SendWelcome
+{% endif %}{% if has_api %}from app.modules.users.router import router as users_router
 {% endif %}
 if TYPE_CHECKING:
 {%- if has_api %}
@@ -44,7 +45,7 @@ MODULES: Final[tuple[APIRouter, ...]] = (
 """Every router the application serves, in the order they are mounted."""
 
 {% endif %}{% if has_worker %}
-JOBS: Final[tuple[type[Job], ...]] = (IndexItem,)
+JOBS: Final[tuple[type[Job], ...]] = (IndexItem, SendWelcome)
 """Every job this service can run.
 
 Named rather than left as an import side effect. A tuple can be counted in a

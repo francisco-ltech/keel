@@ -141,3 +141,32 @@ class LockTimeoutError(CacheError):
         self.name = name
         self.timeout = timeout
         super().__init__(f"could not acquire lock {name!r} within {timeout}s")
+
+
+class MailError(KeelError):
+    """Base class for mail failures."""
+
+
+class InvalidMessageError(MailError):
+    """Raised when a message cannot be sent as written.
+
+    No recipient, an empty subject, or a line break in something that becomes
+    a header — which is header injection, and refused before any driver sees
+    it rather than left to whichever driver notices.
+    """
+
+
+class MailDeliveryError(MailError):
+    """Raised when the transport refused a message or could not be reached.
+
+    Names the server and any recipient it refused. Never a body.
+
+    Attributes:
+        permanent: ``True`` when the server answered with a 5xx, which no
+            retry will change: a job that sends should stop retrying then.
+            ``False`` for a timeout, an unreachable host or a 4xx.
+    """
+
+    def __init__(self, message: str, *, permanent: bool = False) -> None:
+        super().__init__(message)
+        self.permanent = permanent

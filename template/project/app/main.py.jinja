@@ -41,7 +41,10 @@ it dispatched.{% endif %}
 **Liveness and readiness are different questions.** Liveness touches nothing;
 readiness asks every dependency a request can need, and ``READINESS`` below is
 that list. A dependency added to the lifespan belongs in it too — a probe that
-skips one reports ready while every request that needs it fails.
+skips one reports ready while every request that needs it fails. Mail is the
+one exception: no request needs the server to answer, a welcome that fails is
+a log line or a retried job, and a probe on it would pull the API out of
+rotation for a dead relay. ADR 0010 sends that class of fact to metrics.
 """
 
 from __future__ import annotations
@@ -54,6 +57,7 @@ from fastapi.responses import JSONResponse, Response
 from keel.auth import hashing_lifespan, token_lifespan
 from keel.cache import cache_lifespan
 from keel.database import current_database, database_lifespan
+from keel.mail import mail_lifespan
 from keel.observability import (
     Check,
     bound_metrics,
@@ -125,6 +129,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             cache_lifespan(config.cache_config(), events),
             hashing_lifespan(config.hashing_config()),
             token_lifespan(config.token_config()),
+            mail_lifespan(config.mail_config(), events),
 {%- if has_worker %}
             queue_lifespan(config.queue_config(), events),
 {%- endif %}

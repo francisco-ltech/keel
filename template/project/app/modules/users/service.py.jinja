@@ -51,8 +51,19 @@ from uuid import UUID
 import anyio
 from keel.auth import authorize, password_hasher{% if has_api %}, token_store{% endif %}
 from keel.database import uow
+{%- if has_worker %}
+from keel.queue import dispatch
+{%- else %}
+from keel.database.hooks import after_commit
+from keel.mail import send
+{%- endif %}
 
 from app.errors import ConflictError, ForbiddenError, NotFoundError
+{%- if has_worker %}
+from app.modules.users.jobs import SendWelcome
+{%- else %}
+from app.modules.users.mail import welcome
+{%- endif %}
 from app.modules.users.repository import DEFAULT_PAGE_SIZE, UserRepository
 from app.modules.users.schemas import PasswordChange, UserCreate, UserRead, UserUpdate
 from app.policies import Account, Directory
@@ -102,7 +113,21 @@ async def create_user(payload: UserCreate) -> UserRead:
             full_name=payload.full_name,
             hashed_password=hashed,
         )
-        return UserRead.model_validate(user)
+        created = UserRead.model_validate(user)
+{%- if has_worker %}
+        # Inside the unit of work on purpose: the push waits for the commit, so a
+        # welcome is never sent for an account that rolled back.
+        await dispatch(SendWelcome(user_pid=str(created.pid)))
+{%- else %}
+
+        async def welcome_later() -> None:
+            await send(welcome(created))
+
+        # Runs once the transaction commits, from the request: the same seam a
+        # worker's dispatch uses. A row that rolls back welcomes nobody.
+        after_commit(welcome_later)
+{%- endif %}
+        return created
 
 
 async def list_users(*, limit: int = DEFAULT_PAGE_SIZE, offset: int = 0) -> list[UserRead]:

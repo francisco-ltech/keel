@@ -70,6 +70,29 @@ def namespace() -> KeyNamespace:
     return KeyNamespace(f"keel-test:{os.getpid()}")
 
 
+MAILPIT_SMTP_HOST = os.environ.get("MAILPIT_SMTP_HOST", "localhost")
+MAILPIT_SMTP_PORT = int(os.environ.get("MAILPIT_SMTP_PORT", "1025"))
+MAILPIT_API = os.environ.get("MAILPIT_API", "http://localhost:8025")
+
+
+@pytest.fixture(scope="session")
+def mailpit() -> tuple[str, int, str]:
+    """Mailpit's SMTP host and port, and its API, skipping the session if it is unreachable.
+
+    Returns:
+        ``(smtp_host, smtp_port, api_url)``.
+    """
+    import httpx
+
+    try:
+        answered = httpx.get(f"{MAILPIT_API}/api/v1/info", timeout=3).status_code == 200
+    except httpx.HTTPError:
+        answered = False
+    if not answered:
+        pytest.skip(f"no Mailpit reachable at {MAILPIT_API}")
+    return MAILPIT_SMTP_HOST, MAILPIT_SMTP_PORT, MAILPIT_API
+
+
 @pytest.fixture(scope="session")
 def redis_url() -> str:
     """The Redis URL under test, skipping the session if it is unreachable."""

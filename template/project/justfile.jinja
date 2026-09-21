@@ -14,12 +14,12 @@ default:
 install:
     uv sync
 
-# Start Postgres and Redis.
+# Start Postgres, Redis and Mailpit.
 up:
     docker compose up -d
 
-# Run the application the way it deploys: in containers next to Postgres and
-# Redis, from this directory mounted in. One recipe on every OS — no shell
+# Run the application the way it deploys: in containers next to Postgres,
+# Redis and Mailpit, from this directory mounted in. One recipe on every OS — no shell
 # script, no process supervision on the host — and the API reloads on change.
 dev:
     docker compose --profile app up

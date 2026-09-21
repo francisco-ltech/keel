@@ -30,15 +30,16 @@ domain, which is what stops the two halves from drifting.{% endif %}
 
 ```sh
 just install          # uv sync
-just up               # Postgres and Redis, if you are not already running them
+just up               # Postgres, Redis and Mailpit, if you are not already running them
 cp .env.example .env  # optional; every value has a working default
 just migrate          # apply migrations from the host; `just dev` also does it on start
 just dev              # {% if service_shape == 'api' %}the API in a container: http://localhost:8000/docs{% elif service_shape == 'worker' %}the worker in a container{% else %}the API on :8000 and the worker, in containers{% endif %}
 ```
 
 `just dev` runs the application the way it deploys: in containers next to
-Postgres and Redis, from this directory mounted in, so it is the same command
-on macOS, Linux and Windows. {% if has_api %}The API reloads when a file changes{% if has_worker %}; the worker
+Postgres, Redis and Mailpit, from this directory mounted in, so it is the same
+command on macOS, Linux and Windows. Every message the application sends lands
+in Mailpit, at http://localhost:{{ mailpit_ui_port }}; nothing leaves the machine. {% if has_api %}The API reloads when a file changes{% if has_worker %}; the worker
 does not, so after changing a job run `docker compose restart worker`{% endif %}.
 `just serve` runs the API on the host instead, for a debugger.{% else %}The worker does not reload; after
 changing a job run `docker compose restart worker`, or run it on the host with
@@ -69,7 +70,7 @@ app/
   modules/
     __init__.py    the registry: {% if has_api %}MODULES{% if has_worker %} and JOBS{% endif %}{% else %}JOBS{% endif %}
 {% if has_api %}    sessions/      sign in, sign out, who am I — no table of its own
-{% endif %}    users/         models · schemas · repository · service{% if has_api %} · router{% endif %}
+{% endif %}    users/         models · schemas · repository · service{% if has_api %} · router{% endif %} · mail{% if has_worker %} · jobs{% endif %}
     items/         the same files{% if has_worker %}, plus jobs.py{% endif %}, scoped by owner_id
   migrations/      async Alembic, target_metadata = Model.metadata
 tests/             rollback-per-test against a real Postgres
@@ -92,6 +93,11 @@ tests/             rollback-per-test against a real Postgres
 * **A repository takes a session; it never opens one.**
 * **A service opens `uow()` and returns schemas.** Never an ORM object — its
   session has closed by the time the router has it.
+* **A message is built in `mail.py` and sent from a seam that waits for the
+  commit.** Registration {% if has_worker %}dispatches `SendWelcome`, which the queue pushes only once
+  the transaction commits{% else %}registers the send with `after_commit`, so it runs only once
+  the transaction commits{% endif %}. A welcome to a row that rolled back would be a
+  welcome to nobody.
 {% if has_api %}* **A router calls services.** No session, no repository, no SQLAlchemy import.
 {% endif %}{% if has_worker %}* **A job handler calls the same services a router does.** It is a second entry
   into the domain, not a second copy of it.
@@ -307,7 +313,7 @@ table nightly through `SCHEDULE`, which is also where recurring work goes.
 
 `pydantic-settings`. Each subsystem carries its own prefix rather than a nested
 delimiter, so the variables read as `DATABASE_URL`, `CACHE_STORE`,
-`HASHING_TIME_COST`, `LOG_LEVEL`{% if has_api %}, `TOKEN_DRIVER`{% endif %}, `QUEUE_DRIVER`
+`HASHING_TIME_COST`, `LOG_LEVEL`, `MAIL_HOST`{% if has_api %}, `TOKEN_DRIVER`{% endif %}, `QUEUE_DRIVER`
 and `WORKER_HEALTH_FILE` — the names a hosting platform injects. Keel's own
 configs are plain frozen dataclasses — the library takes no configuration-stack
 dependency — so `app/settings.py` is the one place that translates between the
@@ -326,8 +332,8 @@ resolves no tokens. A job that acts on someone's behalf still can —
 
 `pydantic-settings`. Each subsystem carries its own prefix rather than a nested
 delimiter, so the variables read as `DATABASE_URL`, `CACHE_STORE`,
-`HASHING_TIME_COST`, `LOG_LEVEL` and `TOKEN_DRIVER` — the names a hosting
-platform injects.
+`HASHING_TIME_COST`, `LOG_LEVEL`, `MAIL_HOST` and `TOKEN_DRIVER` — the names a
+hosting platform injects.
 Keel's own configs are plain frozen dataclasses — the library takes no
 configuration-stack dependency — so `app/settings.py` is the one place that
 translates between the two. See `.env.example`.
@@ -453,6 +459,9 @@ Two things follow from that and will eventually surprise someone:
   is the transaction timestamp. Assert on sets, not on timestamp order.
 * The cache is switched to the in-process `array` driver, so the suite needs
   Postgres but not Redis. Use `keel.testing.fake_cache` to assert on caching.
+* Mail is switched to `log`, so the suite needs no Mailpit either. A test that
+  asks what was sent enters `keel.testing.fake_mail`, which records every
+  message and asserts on recipient and subject. See `tests/test_users.py`.
 {% if has_api %}* The token store is switched to `memory` for the same reason, and
   `HASHING_*` is turned down to the cheapest parameters Keel accepts. Argon2 at
   production cost is tens of milliseconds and every test that needs a user pays
@@ -464,7 +473,7 @@ Two things follow from that and will eventually surprise someone:
 {% endif %}
 ## Running it in Docker
 
-`just up` starts only Postgres and Redis. `just dev` is `docker compose
+`just up` starts only Postgres, Redis and Mailpit. `just dev` is `docker compose
 --profile app up`, which adds {% if has_api and has_worker %}the API and the worker — the same image with a
 different command, which is the whole point of the table above.{% elif has_api %}the API.{% else %}the worker.{% endif %} Each app
 container keeps its virtualenv in a named volume, so the `uv sync` on start is
@@ -515,8 +524,8 @@ entrypoint are its decisions.
 {% if has_api %}* **Refresh tokens.** `revoke` plus `issue` composes rotation today. Pairing
   them is a decision about session policy, not about storage.
 * **A password reset flow, and roles on the user row.** Both are application
-  policy rather than framework: an email, a table, and a decision about
-  expiry. `PUT /users/{pid}/password` is the *change* path and needs the
+  policy rather than framework: a table, a decision about expiry, and a message
+  built the way `modules/users/mail.py` builds the welcome. `PUT /users/{pid}/password` is the *change* path and needs the
   current password; a *reset* is the one that does not, and it needs a
   single-use token delivered out of band before it is safe.
 {% endif %}* **A generic base repository.** Two modules is not enough evidence to know which

@@ -26,12 +26,13 @@ from keel.auth import Identity, acting_as, current_identity, use_policies
 from keel.cache import cache
 from keel.observability import correlate
 from keel.queue import PermanentFailureError
-from keel.testing import fake_queue
+from keel.testing import fake_mail, fake_queue
 
 from app.errors import NotFoundError
 from app.modules.items import service as items_service
 from app.modules.items.jobs import IndexItem, card_key
 from app.modules.items.schemas import ItemCreate
+from app.modules.users.jobs import SendWelcome
 from app.policies import ItemsOf
 from tests.conftest import make_user, primary_key_of
 
@@ -190,3 +191,22 @@ async def test_a_job_acts_with_no_roles(rolled_back: None) -> None:
     assert all(who is not None and who.roles == frozenset() for who in seen), (
         "a job reached further than the person it acts for"
     )
+
+
+# -- the welcome job ------------------------------------------------------------
+
+
+async def test_the_welcome_job_sends_to_the_accounts_current_address(rolled_back: None) -> None:
+    owner = await make_user(email="ada@example.com", full_name="Ada Lovelace")
+
+    with fake_mail() as outbox:
+        await SendWelcome(user_pid=str(owner.pid)).handle()
+
+    sent = outbox.assert_sent(to="ada@example.com", subject_contains="Welcome")
+    assert "Ada Lovelace" in sent.text
+
+
+async def test_welcoming_a_deleted_account_stops_retrying(rolled_back: None) -> None:
+    with fake_mail() as outbox, pytest.raises(PermanentFailureError):
+        await SendWelcome(user_pid=MISSING_ID).handle()
+    outbox.assert_nothing_sent()

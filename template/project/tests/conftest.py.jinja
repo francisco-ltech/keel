@@ -52,6 +52,7 @@ from httpx import ASGITransport, AsyncClient
 from keel.auth import MINIMUM_MEMORY_COST{% if has_api %}, Identity{% endif %}, hashing_lifespan{% if has_api %}, issue_token{% endif %}
 from keel.cache import cache_lifespan
 from keel.database import Database, Model, current_database, database_lifespan, uow
+from keel.mail import mail_lifespan
 {%- if has_worker %}
 from keel.queue import queue_lifespan
 {%- endif %}
@@ -66,6 +67,7 @@ from app.modules.users.schemas import UserCreate, UserRead
 from app.settings import (
     CacheSettings,
     HashingSettings,
+    MailSettings,
 {%- if has_worker %}
     QueueSettings,
 {%- endif %}
@@ -103,6 +105,9 @@ def settings() -> Settings:
     base = Settings()
     overrides: dict[str, Any] = {
         "cache": CacheSettings(store="array", prefix="test:cache", default_ttl=60.0),
+        # `log`, so the suite needs no Mailpit; a test that asserts on mail uses
+        # `keel.testing.fake_mail`, which records what would have been sent.
+        "mail": MailSettings(driver="log"),
         "hashing": HashingSettings(time_cost=1, memory_cost=MINIMUM_MEMORY_COST, parallelism=1),
     }
 {%- if has_api %}
@@ -156,6 +161,7 @@ async def runtime(settings: Settings) -> AsyncIterator[None]:
         database_lifespan(settings.database_config()),
         cache_lifespan(settings.cache_config()),
         hashing_lifespan(settings.hashing_config()),
+        mail_lifespan(settings.mail_config()),
 {%- if has_worker %}
         queue_lifespan(settings.queue_config()),
 {%- endif %}

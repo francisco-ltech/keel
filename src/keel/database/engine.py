@@ -67,11 +67,11 @@ class Database:
         on_observer_error: Called when a model observer raises after a commit.
             Observers run once the write is durable, so a failure there cannot
             roll anything back and must not stop the remaining observers — but
-            it must not vanish either. Pass something that logs.
-        on_deferred_error: Called when an after-commit callback raises — most
-            often a job that could not be pushed because the queue was
-            unreachable. Silence here means a dispatch disappears with no
-            record, so pass something that logs.
+            it must not vanish either. Logged on ``keel.database`` by default;
+            pass something to route it elsewhere.
+        on_deferred_error: Called when an after-commit callback raises — a job
+            that could not be pushed, a mail the server refused. Logged on
+            ``keel.database`` by default; pass something to route it elsewhere.
     """
 
     __slots__ = (

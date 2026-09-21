@@ -33,6 +33,7 @@ attribute history to tell the three apart.
 
 from __future__ import annotations
 
+import logging
 from collections import defaultdict
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
@@ -43,6 +44,8 @@ from sqlalchemy.orm import Session
 from sqlalchemy.orm.attributes import instance_state
 
 from keel.database.soft_delete import SoftDeleteMixin
+
+logger = logging.getLogger("keel.database")
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -259,8 +262,8 @@ async def dispatch_pending(
     Args:
         session: The session whose events should be delivered.
         on_error: Called with the exception and the event it came from. When
-            omitted, failures are swallowed — an application should pass
-            something that logs.
+            omitted, the failure is logged with its traceback on
+            ``keel.database``, naming the observer and the event.
 
     Returns:
         The number of events delivered.
@@ -270,8 +273,15 @@ async def dispatch_pending(
         for observer in observers_for(type(occurrence.instance)):
             try:
                 await _deliver(observer, occurrence)
-            except Exception as exc:  # noqa: BLE001 — one observer must not break the rest
-                if on_error is not None:
+            except Exception as exc:  # one observer must not break the rest
+                if on_error is None:
+                    logger.exception(
+                        "observer %r failed on %s of %s; the commit stands",
+                        observer,
+                        occurrence.lifecycle,
+                        type(occurrence.instance).__name__,
+                    )
+                else:
                     on_error(exc, occurrence)
     return len(pending)
 

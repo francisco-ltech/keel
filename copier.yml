@@ -46,6 +46,7 @@ _exclude:
   - "{% if not has_worker %}app/worker.py{% endif %}"
   - "{% if not has_worker %}app/healthcheck.py{% endif %}"
   - "{% if not has_worker %}app/modules/items/jobs.py{% endif %}"
+  - "{% if not has_worker %}app/modules/users/jobs.py{% endif %}"
   - "{% if not has_worker %}tests/test_worker_wiring.py{% endif %}"
   - "{% if not has_worker %}app/migrations/versions/0002_queue_tables.py{% endif %}"
   - "{% if not has_worker %}tests/test_jobs.py{% endif %}"
@@ -126,6 +127,16 @@ postgres_port:
   type: int
   help: Host port Postgres listens on
   default: 5433
+
+mailpit_smtp_port:
+  type: int
+  help: Host port Mailpit's SMTP listens on
+  default: 1025
+
+mailpit_ui_port:
+  type: int
+  help: Host port Mailpit's web UI and API listen on
+  default: 8025
 
 redis_port:
   type: int

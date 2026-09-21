@@ -173,6 +173,7 @@ filterwarnings = [
 markers = [
     "redis: requires a live Redis server (see docker-compose.yml)",
     "postgres: requires a live Postgres server (see docker-compose.yml)",
+    "mailpit: requires a live Mailpit, SMTP and API (see docker-compose.yml)",
     "contract: driver contract suite, run against every cache driver",
     "generator: generates the starter template and runs its suite; slow",
 ]

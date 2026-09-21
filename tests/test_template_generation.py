@@ -384,7 +384,7 @@ def test_compose_runs_every_entrypoint_the_shape_scaffolds(generated: Path, shap
     the worker, so the half that needs no worker got nothing to run.
     """
     compose = yaml.safe_load((generated / "docker-compose.yml").read_text())
-    assert set(compose["services"]) == {"postgres", "redis", *shape.processes}
+    assert set(compose["services"]) == {"postgres", "redis", "mailpit", *shape.processes}
 
     for process in shape.processes:
         assert compose["services"][process]["profiles"] == ["app"], (
@@ -611,6 +611,14 @@ def test_every_documented_environment_variable_is_actually_read(
         "HASHING_PARALLELISM": "1",
         "LOG_LEVEL": "DEBUG",
         "LOG_FORMAT": "text",
+        "MAIL_DRIVER": "log",
+        "MAIL_FROM": "probe@example.com",
+        "MAIL_HOST": "mail.probe",
+        "MAIL_PORT": "2525",
+        "MAIL_USERNAME": "probe-user",
+        "MAIL_PASSWORD": "probe-pass",
+        "MAIL_SECURITY": "starttls",
+        "MAIL_TIMEOUT": "7.5",
         "APP_NAME": "Probe App",
         "DEBUG": "true",
         "METRICS_ENABLED": "false",
@@ -633,6 +641,8 @@ def test_every_documented_environment_variable_is_actually_read(
         "17",
         "6399",
         "9216",
+        "mail.probe",
+        "2525",
         "DEBUG",
         "Probe App",
         *shape.variables.values(),

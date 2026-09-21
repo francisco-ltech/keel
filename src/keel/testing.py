@@ -42,6 +42,7 @@ from keel.cache.repository import Repository
 from keel.contracts.cache import Store
 from keel.database import use_database
 from keel.database.engine import Database
+from keel.mail import FakeMailer, MailConfig, MailManager, use_mail_manager
 from keel.queue.config import QueueConfig
 from keel.queue.dispatch import use_queue
 from keel.queue.fake import FakeQueue
@@ -215,4 +216,30 @@ def fake_tokens(*, driver: str = "fake", ttl: float | None = None) -> Iterator[F
         yield recorder
 
 
-__all__ = ["fake_cache", "fake_queue", "fake_tokens", "rolled_back_database"]
+__all__ = ["fake_cache", "fake_mail", "fake_queue", "fake_tokens", "rolled_back_database"]
+
+
+@contextmanager
+def fake_mail(*, driver: str = "fake", sender: str = "tests@keel.invalid") -> Iterator[FakeMailer]:
+    """Replace the bound mailer with a recording fake for the duration of a block.
+
+    Records without delivering — see :mod:`keel.mail.fake` for why this one
+    records where the cache's fake decorates a real backend.
+
+    Example:
+        >>> with fake_mail() as outbox:  # doctest: +SKIP
+        ...     await users.create_user(payload)
+        ...     outbox.assert_sent(to="ada@example.com", subject_contains="Welcome")
+
+    Args:
+        driver: The driver name to bind under. Rarely worth changing.
+        sender: The ``From`` filled in for a message that names none.
+
+    Yields:
+        The fake, for assertions.
+    """
+    manager = MailManager(MailConfig(driver=driver, sender=sender))
+    outbox = FakeMailer(driver)
+    manager.extend(driver, lambda _name: outbox)
+    with use_mail_manager(manager):
+        yield outbox

@@ -16,13 +16,18 @@ account-takeover path while these routes were open.
 
 from __future__ import annotations
 
-from uuid import UUID
+{% if not has_worker %}import logging
+{% endif %}from uuid import UUID
 
 import pytest
 from httpx import AsyncClient
 from keel.database import uow
-
-from app.modules.users.repository import UserRepository
+{% if has_worker %}from keel.testing import fake_queue
+{% else %}from keel.mail import MailConfig, MailManager, use_mail_manager
+from keel.testing import fake_mail
+{% endif %}
+{% if has_worker %}from app.modules.users.jobs import SendWelcome
+{% endif %}from app.modules.users.repository import UserRepository
 from tests.conftest import DEFAULT_USER, admin_bearer, bearer, create_user, signed_in
 
 pytestmark = pytest.mark.anyio
@@ -42,6 +47,51 @@ async def test_creating_a_user_returns_it(
     assert body["is_active"] is True
     assert body["created_at"] and body["updated_at"]
 
+
+{% if has_worker %}async def test_registration_dispatches_a_welcome(
+    client: AsyncClient, user_payload: dict[str, str]
+) -> None:
+    """The mail is a job: pushed after the commit, retried if the server is busy."""
+    with fake_queue() as queued:
+        response = await client.post("/users", json=user_payload)
+
+    assert response.status_code == 201
+    queued.assert_pushed(SendWelcome, user_pid=response.json()["pid"])
+{% else %}async def test_registration_sends_a_welcome(
+    client: AsyncClient, user_payload: dict[str, str]
+) -> None:
+    """Sent after the commit, from the request: this service has no worker to hand it to."""
+    with fake_mail() as outbox:
+        response = await client.post("/users", json=user_payload)
+
+    assert response.status_code == 201
+    sent = outbox.assert_sent(to="ada@example.com", subject_contains="Welcome")
+    assert "Ada Lovelace" in sent.text
+    assert sent.html is not None and "ada@example.com" in sent.html
+
+
+async def test_a_registration_that_fails_sends_nothing(
+    client: AsyncClient, user_payload: dict[str, str]
+) -> None:
+    await client.post("/users", json=user_payload)
+    with fake_mail() as outbox:
+        duplicate = await client.post("/users", json=user_payload)
+
+    assert duplicate.status_code == 409
+    outbox.assert_nothing_sent()
+
+
+async def test_a_welcome_the_server_refuses_is_logged_not_raised(
+    client: AsyncClient, user_payload: dict[str, str], caplog: pytest.LogCaptureFixture
+) -> None:
+    """The account is committed before the send runs: a 201 and a log line, never a 500."""
+    unreachable = MailManager(MailConfig(driver="smtp", host="127.0.0.1", port=1, timeout=2))
+    with use_mail_manager(unreachable), caplog.at_level(logging.ERROR, logger="keel.database"):
+        response = await client.post("/users", json=user_payload)
+
+    assert response.status_code == 201
+    assert "after-commit callback" in caplog.text and "127.0.0.1:1" in caplog.text
+{% endif %}
 
 async def test_the_password_is_never_returned(
     client: AsyncClient, user_payload: dict[str, str]
