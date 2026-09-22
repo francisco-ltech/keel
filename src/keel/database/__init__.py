@@ -34,7 +34,7 @@ none, and that is not an omission. A cache, a queue and a mailer are all
 worth faking because their real implementations are slow, remote or
 irreversible. A database's test double is a *real database inside a transaction
 that gets rolled back* — anything else stops testing the queries, which are the
-part most likely to be wrong. :func:`keel.testing.rollback_session` provides it.
+part most likely to be wrong. :func:`keel.testing.rolled_back_database` provides it.
 """
 
 from __future__ import annotations

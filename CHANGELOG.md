@@ -22,6 +22,10 @@ with `keel update`; `just up` then also starts Mailpit.
   runs beside Postgres and Redis, the app containers point at it, and every
   message a development run sends is at http://localhost:8025. The generated
   suite runs on the `log` driver and needs no Mailpit.
+- **One guide per feature under `docs/`.** Cache, database, queue,
+  authentication, mail, observability and getting started, each with the
+  wiring, the calls, the fake and what the template does. The README is the
+  table of contents; the ADRs stay the reasoning.
 - **A failing after-commit callback or model observer is logged by default.**
   `Database(on_deferred_error=..., on_observer_error=...)` used to swallow
   the exception when nothing was passed, and no generated project passed

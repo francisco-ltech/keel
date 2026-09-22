@@ -27,7 +27,9 @@ record what you declined. "This should just be a function" is a valid finding.
 `docs/roadmap.md` is what the phase numbers in the ADRs refer to.
 
 The other ADRs carry the reasoning per subsystem. Link to them; never restate
-them, or the copy drifts and starts lying.
+them, or the copy drifts and starts lying. `docs/<feature>.md` is the guide a
+user reads: how to wire it, the calls, the fake, what the template does with
+it. A change to a subsystem's surface updates its guide in the same commit.
 
 ## Commands
 
@@ -103,7 +105,7 @@ src/keel/
   contracts/  the protocols drivers implement
   support/    binding, manager, events, keys, serialization — subsystem-agnostic
 template/     the starter template, three service shapes; copier.yml is at the root
-docs/adr/     why things are the way they are
+docs/         one guide per feature (how to use it), and adr/ (why it is that way)
 ```
 
 `keel.queue` exports the worker, SAQ driver, failed jobs and scheduler
