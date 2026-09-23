@@ -4,10 +4,13 @@ Releases are tags. `keel new` generates from the latest one, and `keel update`
 moves a project between them. Entries say what changed for someone building on
 Keel; the ADRs say why.
 
-## Unreleased
+## v0.2.0 — 2026-09-23
 
-Mail, the first subsystem of Phase 6. A project on an earlier release gets it
-with `keel update`; `just up` then also starts Mailpit.
+Mail, the first subsystem of Phase 6, and a changed default that every
+project sees. A project on an earlier release gets it with `keel update`;
+`just up` then also starts Mailpit. A minor version rather than a patch:
+the library has a new subsystem, and after-commit failures that used to be
+silent now log.
 
 - **`keel.mail`.** `send(Message(...))` over a swappable driver: `smtp` from
   the standard library on a worker thread, `log` for an environment with no
