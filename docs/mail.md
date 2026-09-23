@@ -130,8 +130,11 @@ no Mailpit; the tests that ask what was sent enter `fake_mail()`.
 - No template engine or `Mailable` class. A message is a function returning a
   `Message`; a second message that should share a layout is what would change
   that. ADR 0015.
-- No attachments, and no provider driver for SES, Postmark or Resend. Each of
-  them speaks SMTP; a driver arrives with the deployment that needs one.
+- No attachments yet.
+- No driver for a provider's HTTP API. SES, Postmark, Resend and the rest all
+  accept SMTP, so any of them works today by setting `MAIL_HOST`, the
+  credentials and `MAIL_SECURITY=starttls`. Their HTTP APIs add batching and
+  provider-side templates, which nothing here uses yet.
 - No address validation beyond the line-break check. What is deliverable is
   the server's decision, reported per recipient.
 - No readiness check on the mail server. No request needs it to answer, and a
