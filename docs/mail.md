@@ -65,6 +65,27 @@ recipients after accepting the rest has sent the mail, so that is reported on
 the `Delivery` instead: `recipients` is who got it and `refused` is who did
 not, with the server's reason.
 
+## Templates
+
+A second message that should share the first one's layout is what
+`keel.mail.templates` is for. Install the `templates` extra, point a
+`MailTemplates` at a directory, and name a message by its template pair:
+
+```python
+from keel.mail import MailTemplates
+
+templates = MailTemplates("app/templates/mail", globals={"app_name": "Invoices"})
+
+message = templates.message("welcome", to=user.email, subject="Welcome to Invoices", user=user)
+```
+
+`welcome.txt.j2` must exist and `welcome.html.j2` may. HTML templates
+autoescape and text ones do not, decided by the file name, so the same
+`{{ user.full_name }}` is safe in one and readable in the other. An undefined
+variable is an error, never blank text. Every template sees the context the
+call passes plus the globals, and an HTML template can extend a shared layout
+the usual Jinja way.
+
 ## Sending later
 
 There is no queue inside the mail subsystem. A job that calls `send()` is the
@@ -117,9 +138,10 @@ failed assertion prints the timeline of what was sent.
 
 ## In the template
 
-`app/modules/users/mail.py` builds the welcome, one function per message and
-no template engine. With a worker, `create_user` dispatches `SendWelcome` from
-`app/modules/users/jobs.py`. Without one, the send runs after the commit on
+`app/modules/users/mail.py` builds the welcome from
+`app/templates/mail/welcome.{txt,html}.j2` through the one renderer in
+`app/mail.py`, and the password reset does the same. With a worker,
+`create_user` dispatches `SendWelcome` from `app/modules/users/jobs.py`. Without one, the send runs after the commit on
 the request. Mailpit runs beside Postgres and Redis under `just up`, the app
 containers point at it, and every message a development run sends is at
 http://localhost:8025. The generated suite runs on the `log` driver and needs
@@ -127,9 +149,8 @@ no Mailpit; the tests that ask what was sent enter `fake_mail()`.
 
 ## Limits
 
-- No template engine or `Mailable` class. A message is a function returning a
-  `Message`; a second message that should share a layout is what would change
-  that. ADR 0015.
+- No `Mailable` class. A message is a function that names a template pair, or
+  returns a `Message` directly. ADR 0016.
 - No attachments yet.
 - No driver for a provider's HTTP API. SES, Postmark, Resend and the rest all
   accept SMTP, so any of them works today by setting `MAIL_HOST`, the

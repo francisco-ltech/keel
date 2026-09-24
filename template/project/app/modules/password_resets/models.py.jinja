@@ -1,0 +1,42 @@
+"""The ``password_resets`` table.
+
+SQLAlchemy only. This module must never import ``schemas``.
+"""
+
+from __future__ import annotations
+
+import uuid
+from datetime import datetime
+
+from keel.database import Model, TimestampMixin, UUIDPrimaryKey
+from sqlalchemy import DateTime, ForeignKey, String
+from sqlalchemy.orm import Mapped, mapped_column
+
+
+class PasswordReset(Model, UUIDPrimaryKey, TimestampMixin):
+    """One issued reset code.
+
+    No ``pid``: nothing names a reset over the wire. The code itself is what a
+    client presents, and it is not stored.
+
+    Attributes:
+        user_id: The account it resets. ``ON DELETE CASCADE``, because a code
+            for a deleted account must not outlive it.
+        code_digest: SHA-256 of the code, hex. The plaintext exists once, in
+            the message.
+        expires_at: After this, redeeming fails however valid the code was.
+        used_at: When it was redeemed or retired, or ``None`` while it can
+            still be redeemed. Set once, never cleared.
+    """
+
+    __tablename__ = "password_resets"
+
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    code_digest: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
+
+
+__all__ = ["PasswordReset"]

@@ -1,0 +1,8 @@
+{% extends "layout.html.j2" %}
+{% block body %}
+<p>Hello {{ user.full_name }},</p>
+<p>Somebody asked to reset the {{ app_name }} password for <b>{{ user.email }}</b>.
+If that was you, use this code within {{ valid_for_minutes }} minutes:</p>
+<p style="font-size: 22px; letter-spacing: 1px;"><code>{{ code }}</code></p>
+<p>It works once. If it was not you, ignore this message and your password stays as it is.</p>
+{% endblock %}

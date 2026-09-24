@@ -1,0 +1,72 @@
+"""The job that mails a reset code.
+
+Like the welcome, a retry a minute later is the right answer to a busy mail
+server. Unlike the welcome, the payload carries a secret: the code, which
+exists nowhere else in plaintext. It rides through Redis for the seconds
+between the push and the send, lands in ``keel_failed_jobs`` only if every
+attempt fails, and reaches the log only if that write fails too, since the
+failed-job store logs the envelope it could not keep. A code is single-use
+and expires in an hour, and an operator who can read any of those can also
+write the ``users`` table, so this is accepted rather than worked around
+with a second table of codes. The job's ``repr`` redacts it, so an ordinary
+log line naming the job does not carry it.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import ClassVar
+from uuid import UUID
+
+from keel.database import uow
+from keel.exceptions import MailDeliveryError
+from keel.mail import send
+from keel.queue import Job, PermanentFailureError
+
+from app.modules.password_resets.mail import reset_code
+from app.modules.users.repository import UserRepository
+from app.modules.users.schemas import UserRead
+
+
+@dataclass(frozen=True, slots=True)
+class SendResetCode(Job):
+    """Mail a reset code to the account it was issued for.
+
+    Attributes:
+        user_pid: The account's public identifier, as a string.
+        code: The code, plaintext. See the module docstring.
+    """
+
+    user_pid: str
+    code: str
+
+    max_attempts: ClassVar[int] = 5
+    timeout: ClassVar[float | None] = 30.0
+
+    def __repr__(self) -> str:
+        """Name the account and never the code: a repr is what a log line wants."""
+        return f"SendResetCode(user_pid={self.user_pid!r}, code='<redacted>')"
+
+    async def handle(self) -> None:
+        """Look the account up and send.
+
+        Raises:
+            PermanentFailureError: If the account is gone or disabled, or the
+                server's answer was final.
+            MailDeliveryError: If the server could not be reached or asked
+                for a retry. Retried, with backoff.
+        """
+        async with uow() as session:
+            user = await UserRepository(session).get_by_pid(UUID(self.user_pid))
+            if user is None or not user.is_active:
+                raise PermanentFailureError(f"user {self.user_pid} cannot be reset")
+            account = UserRead.model_validate(user)
+        try:
+            await send(reset_code(account, self.code))
+        except MailDeliveryError as exc:
+            if exc.permanent:
+                raise PermanentFailureError(str(exc)) from exc
+            raise
+
+
+__all__ = ["SendResetCode"]

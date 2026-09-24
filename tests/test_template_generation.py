@@ -153,8 +153,19 @@ ALWAYS = (
     "app/modules/users/repository.py",
     "app/modules/users/models.py",
     "app/modules/users/schemas.py",
+    "app/modules/users/mail.py",
+    "app/modules/password_resets/service.py",
+    "app/modules/password_resets/repository.py",
+    "app/modules/password_resets/models.py",
+    "app/modules/password_resets/schemas.py",
+    "app/modules/password_resets/mail.py",
+    "app/mail.py",
+    "app/templates/mail/layout.html.j2",
+    "app/templates/mail/welcome.txt.j2",
+    "app/templates/mail/reset_code.html.j2",
     "app/migrations/env.py",
     "app/migrations/versions/0001_initial.py",
+    "app/migrations/versions/0004_password_resets.py",
     "tests/conftest.py",
 )
 """The layout every shape shares. One codebase and one schema is the claim; this
@@ -173,13 +184,17 @@ API_FILES = (
     "app/modules/sessions/router.py",
     "app/modules/users/router.py",
     "app/modules/items/router.py",
+    "app/modules/password_resets/router.py",
     "tests/test_sessions.py",
+    "tests/test_password_resets.py",
     "tests/test_items.py",
 )
 WORKER_FILES = (
     "app/worker.py",
     "app/healthcheck.py",
     "app/modules/items/jobs.py",
+    "app/modules/users/jobs.py",
+    "app/modules/password_resets/jobs.py",
     "app/migrations/versions/0002_queue_tables.py",
     "tests/test_jobs.py",
 )

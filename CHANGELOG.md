@@ -4,6 +4,20 @@ Releases are tags. `keel new` generates from the latest one, and `keel update`
 moves a project between them. Entries say what changed for someone building on
 Keel; the ADRs say why.
 
+## Unreleased
+
+- **Password reset in the template.** `POST /password-resets` mails a
+  single-use code to a registered address and answers 202 either way;
+  `POST /password-resets/redeem` sets a new password with it, once, and
+  signs every device out. The code is hashed at rest, redeemed in one
+  statement, and travels in the body. Migration `0004_password_resets` runs
+  when the containers next start. ADR 0016.
+- **`keel.mail.templates`.** `MailTemplates` renders a message's text and
+  HTML from a directory of Jinja templates, the `templates` extra. HTML
+  autoescapes, text does not, and an undefined variable is an error. The
+  generated project renders its welcome and its reset through one renderer
+  in `app/mail.py` over `app/templates/mail`, with a shared layout.
+
 ## v0.2.0 — 2026-09-23
 
 Mail, the first subsystem of Phase 6, and a changed default that every

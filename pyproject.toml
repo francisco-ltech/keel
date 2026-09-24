@@ -37,6 +37,9 @@ metrics = ["prometheus-client>=0.21"]
 # The `keel` command: `keel new`, `keel update`. Optional because a service's
 # runtime image should not carry a scaffolder.
 cli = ["copier>=9.4"]
+# Mail rendered from Jinja templates. Optional because a service that builds
+# its messages by hand should not carry a template engine.
+templates = ["jinja2>=3.1"]
 
 [project.scripts]
 keel = "keel.cli:main"
@@ -53,7 +56,7 @@ keel = { workspace = true }
 
 [dependency-groups]
 dev = [
-    "keel[postgres,migrations,factories,queue,auth,metrics,cli]",
+    "keel[postgres,migrations,factories,queue,auth,metrics,cli,templates]",
     "pytest>=8.0",
     "pytest-cov>=5.0",
     "anyio>=4.0",

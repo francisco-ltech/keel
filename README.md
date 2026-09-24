@@ -44,7 +44,7 @@ links.
 | Database | [docs/database.md](docs/database.md) | The `uow()` transaction idiom, repositories, UUIDv7 keys with public identifiers, soft deletes, observers after commit, locked migrations. |
 | Queue | [docs/queue.md](docs/queue.md) | Jobs as commands, dispatch that waits for the commit, a supervised worker, durable failed jobs, a cron schedule. |
 | Authentication | [docs/authentication.md](docs/authentication.md) | The current identity, Argon2 passwords, hashed bearer tokens, and a policy per resource type. |
-| Mail | [docs/mail.md](docs/mail.md) | `send(Message(...))` over SMTP, a logging driver or null, with header injection refused before a driver sees it. |
+| Mail | [docs/mail.md](docs/mail.md) | `send(Message(...))` over SMTP, a logging driver or null, messages rendered from templates, header injection refused before a driver sees it. |
 | Observability | [docs/observability.md](docs/observability.md) | A request id on every log line into the worker, readiness checks, a request inspector for development, Prometheus metrics. |
 | Template | [docs/getting-started.md](docs/getting-started.md) | A service in three shapes, API, worker or both, with domain modules, Alembic, tests and Docker. |
 

@@ -1,0 +1,48 @@
+"""The message a reset request sends.
+
+The code goes in the message as text. This service serves no page to link
+to; a frontend that has one adds its link to ``reset_code.html.j2``, with
+the code in it. The message is the one place the plaintext exists, so
+nothing else may log it.
+"""
+
+from __future__ import annotations
+
+from datetime import timedelta
+from typing import TYPE_CHECKING
+
+from app.mail import APP_NAME, templates
+from app.modules.users.schemas import UserRead
+
+if TYPE_CHECKING:
+    from keel.mail import Message
+
+CODE_TTL = timedelta(hours=1)
+"""How long a code stays redeemable. Long enough for a slow mail server and a
+distracted reader; short enough that a mailbox read next week opens nothing.
+Here rather than in the service because the message states it."""
+
+RESET_SUBJECT = f"Reset your {APP_NAME} password"
+
+
+def reset_code(user: UserRead, code: str) -> Message:
+    """Build the message carrying a reset code.
+
+    Args:
+        user: The account, as the API describes it.
+        code: The code, plaintext. Its only appearance.
+
+    Returns:
+        The message, sender left to the configuration.
+    """
+    return templates.message(
+        "reset_code",
+        to=user.email,
+        subject=RESET_SUBJECT,
+        user=user,
+        code=code,
+        valid_for_minutes=int(CODE_TTL.total_seconds() // 60),
+    )
+
+
+__all__ = ["CODE_TTL", "RESET_SUBJECT", "reset_code"]

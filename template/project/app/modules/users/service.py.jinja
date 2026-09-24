@@ -59,6 +59,7 @@ from keel.mail import send
 {%- endif %}
 
 from app.errors import ConflictError, ForbiddenError, NotFoundError
+from app.modules.password_resets.repository import PasswordResetRepository
 {%- if has_worker %}
 from app.modules.users.jobs import SendWelcome
 {%- else %}
@@ -213,6 +214,9 @@ async def update_user(pid: UUID, payload: UserUpdate) -> UserRead:
 
         updated = await users.update(user, changes)
         result = UserRead.model_validate(updated)
+        if changes.get("is_active") is False:
+            # A disabled account must not be reopened by a code mailed before.
+            await PasswordResetRepository(session).retire_outstanding(user.id)
 {%- if has_api %}
 
     # After the commit and outside the block: revoking is a token-store round
@@ -236,6 +240,10 @@ async def change_password(pid: UUID, payload: PasswordChange) -> None:
     the block closes for the hashing, and a second block writes the replacement.
     Nothing between them can leave the account without a password — the write is
     a single ``UPDATE``.
+
+    The second block also retires every outstanding reset code. Somebody who
+    changes their password on suspecting a leak must not be undone an hour
+    later by a code that was mailed before the change.
 
     Args:
         pid: The public identifier, as the route named it.
@@ -272,10 +280,13 @@ async def change_password(pid: UUID, payload: PasswordChange) -> None:
 
     async with uow() as session:
         users = UserRepository(session)
-        user = await users.get(user_id)
+        # Locked, and before the reset rows: the order every path that touches
+        # an account and its codes takes, so none of them can deadlock.
+        user = await users.lock(user_id)
         if user is None:
             raise NotFoundError(f"no user with pid {pid}")
         await users.update(user, {"hashed_password": hashed})
+        await PasswordResetRepository(session).retire_outstanding(user_id)
 {%- if has_api %}
 
     # Every device that was signed in with the old password stops working. A

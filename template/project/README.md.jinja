@@ -72,6 +72,9 @@ app/
 {% if has_api %}    sessions/      sign in, sign out, who am I — no table of its own
 {% endif %}    users/         models · schemas · repository · service{% if has_api %} · router{% endif %} · mail{% if has_worker %} · jobs{% endif %}
     items/         the same files{% if has_worker %}, plus jobs.py{% endif %}, scoped by owner_id
+    password_resets/  a single-use code, hashed at rest; the change path for somebody who cannot sign in
+  mail.py          the one MailTemplates over templates/mail; every module's mail.py renders through it
+  templates/mail/  a .txt.j2 and a .html.j2 per message; layout.html.j2 is the look of all of them
   migrations/      async Alembic, target_metadata = Model.metadata
 tests/             rollback-per-test against a real Postgres
 ```
@@ -93,8 +96,10 @@ tests/             rollback-per-test against a real Postgres
 * **A repository takes a session; it never opens one.**
 * **A service opens `uow()` and returns schemas.** Never an ORM object — its
   session has closed by the time the router has it.
-* **A message is built in `mail.py` and sent from a seam that waits for the
-  commit.** Registration {% if has_worker %}dispatches `SendWelcome`, which the queue pushes only once
+* **A message is a template pair, named from `mail.py` and sent from a seam
+  that waits for the commit.** `app/templates/mail/<name>.txt.j2` is
+  mandatory and `<name>.html.j2` extends `layout.html.j2`; a module's
+  `mail.py` names the pair, the recipients and the subject. Registration {% if has_worker %}dispatches `SendWelcome`, which the queue pushes only once
   the transaction commits{% else %}registers the send with `after_commit`, so it runs only once
   the transaction commits{% endif %}. A welcome to a row that rolled back would be a
   welcome to nobody.
@@ -130,6 +135,26 @@ Three endpoints, on a resource rather than on three verbs:
 | `POST /sessions` | sign in | returns a bearer token, once |
 | `GET /sessions/current` | who am I | the caller's own user record |
 | `DELETE /sessions/current` | sign out | revokes that one token |
+
+And two more for the person who cannot sign in, both open and both silent
+about whether the address exists:
+
+| | | |
+|---|---|---|
+| `POST /password-resets` | request a code | 202 and no body either way; a message goes out only to a registered, active address, once a minute |
+| `POST /password-resets/redeem` | set a new password | 204 with the code from the message, once; every session is signed out |
+
+The code is 32 bytes of `secrets` output and the table keeps its SHA-256, like
+the token store. It is not a bearer token and is not kept in the token store,
+because a store entry resolves to an identity and a reset code in it would sign
+the holder in. Redeeming is one `UPDATE ... WHERE used_at IS NULL` statement,
+which is what makes a code single-use under concurrency, and every path that
+touches an account and its codes locks the account row first, which is what
+keeps two of them from deadlocking. A password change retires every
+outstanding code. The code travels in the request body, not the path, because
+the access log and the inspector record paths. The reply says nothing about
+whether the address exists; the request's timing does, and so does the 409
+one route over, which is why that is recorded rather than closed.
 
 A token is 256 bits of `secrets` output and the store keeps only its SHA-256, so
 nothing — including this application — can hand a working credential back. That
@@ -523,11 +548,12 @@ entrypoint are its decisions.
   registry answers one rule per resource type until then.
 {% if has_api %}* **Refresh tokens.** `revoke` plus `issue` composes rotation today. Pairing
   them is a decision about session policy, not about storage.
-* **A password reset flow, and roles on the user row.** Both are application
-  policy rather than framework: a table, a decision about expiry, and a message
-  built the way `modules/users/mail.py` builds the welcome. `PUT /users/{pid}/password` is the *change* path and needs the
-  current password; a *reset* is the one that does not, and it needs a
-  single-use token delivered out of band before it is safe.
+* **Roles on the user row.** Application policy rather than framework: the
+  policies read `Identity.roles`, and what fills it is yours to decide.
+* **Rate limiting on `POST /password-resets` beyond one message a minute per
+  account.** A request for an unregistered address costs a query and nothing
+  else, and nothing counts them. That is the first caller for a rate-limiting
+  subsystem, which Keel does not have yet.
 {% endif %}* **A generic base repository.** Two modules is not enough evidence to know which
   methods genuinely repeat. Phase 2.
 * **Soft deletes and audit columns.** Listed in the ADR rather than stubbed here;

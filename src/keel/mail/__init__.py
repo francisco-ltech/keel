@@ -29,6 +29,8 @@ ADR 0015 records the reasoning and what was declined.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING, Any
+
 from keel.contracts.mail import Mailer
 from keel.mail.binding import (
     MailSent,
@@ -53,6 +55,27 @@ from keel.mail.message import (
 )
 from keel.mail.smtp_driver import SmtpMailer
 
+if TYPE_CHECKING:
+    from keel.mail.templates import MailTemplates
+
+_LAZY = {"MailTemplates": "keel.mail.templates"}
+"""Needs Jinja, the `templates` extra, so it is imported on first use."""
+
+
+def __getattr__(name: str) -> Any:
+    """Import a template-backed name on first use (PEP 562)."""
+    if name in _LAZY:
+        import importlib
+
+        return getattr(importlib.import_module(_LAZY[name]), name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def __dir__() -> list[str]:
+    """List the lazy names too, so introspection matches ``__all__``."""
+    return sorted(set(globals()) | set(_LAZY))
+
+
 __all__ = [
     "DEFAULT_SENDER",
     "FORBIDDEN_IN_HEADERS",
@@ -66,6 +89,7 @@ __all__ = [
     "MailConfig",
     "MailManager",
     "MailSent",
+    "MailTemplates",
     "Mailer",
     "MailerFactory",
     "Message",

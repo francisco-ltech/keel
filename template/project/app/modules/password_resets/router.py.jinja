@@ -1,0 +1,51 @@
+"""HTTP for password resets.
+
+Both routes are open: the caller has no credential, which is the whole
+premise. Neither returns a body, and neither answers differently for an
+address that is not registered. See the service's docstring.
+
+The second route is a verb, unlike everything else in this application. The
+alternative, ``PUT /password-resets/{code}``, puts a live credential in the
+path, and the access log and the request inspector record paths. A body is
+the one place a secret can travel without being written down.
+"""
+
+from __future__ import annotations
+
+from fastapi import APIRouter, Response, status
+
+from app.modules.password_resets import service
+from app.modules.password_resets.schemas import ResetRedemption, ResetRequest
+
+router = APIRouter(prefix="/password-resets", tags=["password-resets"])
+
+
+@router.post(
+    "",
+    status_code=status.HTTP_202_ACCEPTED,
+    response_class=Response,
+    summary="Request a reset code",
+)
+async def request_reset(payload: ResetRequest) -> None:
+    """Send a reset code to the address, if an account has it.
+
+    ``response_class=Response`` so the body is empty rather than ``null``: a
+    202 with nothing in it is the whole answer, whatever happened.
+
+    Args:
+        payload: The address.
+    """
+    await service.request_reset(payload)
+
+
+@router.post("/redeem", status_code=status.HTTP_204_NO_CONTENT, summary="Redeem a reset code")
+async def redeem_reset(payload: ResetRedemption) -> None:
+    """Set a new password with a code, once, and sign every device out.
+
+    Args:
+        payload: The code and the new password.
+    """
+    await service.redeem_reset(payload)
+
+
+__all__ = ["router"]

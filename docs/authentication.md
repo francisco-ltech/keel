@@ -159,6 +159,12 @@ in. The `sessions` module is the login: `POST /sessions` verifies a password
 and issues a token, `GET /sessions/current` returns the caller's profile, and
 `DELETE /sessions/current` revokes the presented token.
 
+`POST /password-resets` and `POST /password-resets/redeem` are the change
+path for somebody who cannot sign in: a single-use code, hashed at rest,
+mailed to the address on the account and redeemed once for a new password.
+[ADR 0016](adr/0016-password-reset.md) has the rules that keep an open route
+from becoming an oracle.
+
 `app/policies.py` holds three rules. `Account` is owner-or-admin for view,
 update and delete, and owner alone for `change-password`. `Directory` is every
 account at once, and only an admin may `list` it. `ItemsOf` is owner-or-admin
@@ -176,7 +182,7 @@ Each of these is absent on purpose, and the ADR records what would change it.
 - A user provider: the row and its schema are the application's. [ADR 0007](adr/0007-identity-and-tokens.md)
 - A policy chain: nothing yet has to run for every resource. [ADR 0008](adr/0008-authorization-policies.md)
 - Refresh tokens: `revoke_token` plus `issue_token` composes rotation. [ADR 0007](adr/0007-identity-and-tokens.md)
-- Password reset, and rate limiting on sign-in: both are the application's. [ADR 0007](adr/0007-identity-and-tokens.md)
+- Rate limiting on sign-in and on reset requests: the application's, until a rate-limiting subsystem has a caller. [ADR 0007](adr/0007-identity-and-tokens.md)
 - A source for roles: the template's admin arms wait for one. [ADR 0008](adr/0008-authorization-policies.md)
 
 ## Further reading

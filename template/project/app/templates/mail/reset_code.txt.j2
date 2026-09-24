@@ -1,0 +1,9 @@
+Hello {{ user.full_name }},
+
+Somebody asked to reset the {{ app_name }} password for {{ user.email }}. If that
+was you, use this code within {{ valid_for_minutes }} minutes:
+
+    {{ code }}
+
+It works once. If it was not you, ignore this message and your password stays
+as it is.

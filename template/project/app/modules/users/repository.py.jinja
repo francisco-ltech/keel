@@ -52,6 +52,26 @@ class UserRepository:
         """
         return await self._session.get(User, user_id)
 
+    async def lock(self, user_id: UUID) -> User | None:
+        """Return a user by id, holding its row lock until the commit.
+
+        ``SELECT ... FOR UPDATE``: a second transaction asking for the same
+        account waits here, then reads what the first one committed. That is
+        what turns a read-then-write into a serial sequence, and what gives
+        every path that touches an account and its reset codes the same lock
+        order, account first, so two of them cannot deadlock.
+
+        Args:
+            user_id: The primary key.
+
+        Returns:
+            The user, or ``None`` if there is no such row.
+        """
+        result = await self._session.execute(
+            select(User).where(User.id == user_id).with_for_update()
+        )
+        return result.scalar_one_or_none()
+
     async def get_by_pid(self, pid: UUID) -> User | None:
         """Return a user by public identifier: what a route names.
 

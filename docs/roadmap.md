@@ -97,11 +97,17 @@ same seam.
   every driver, SMTP from the standard library on a worker thread, and a
   welcome on registration in the template that is sent only once the
   transaction commits. Mailpit beside Postgres and Redis under `just up`.
+* **Password reset, and messages from templates** ([0016](adr/0016-password-reset.md))
+  — the template's change path for somebody who cannot sign in: a single-use
+  code hashed at rest, redeemed in one statement, silent about whether the
+  address exists. Writing its message met ADR 0015's condition for a template
+  engine, so `keel.mail.templates` renders both messages from a shared layout.
 
 ## Next
 
-Nothing else in Phase 6 is scheduled. Object storage, notifications, rate
-limiting and a job middleware chain wait for a caller, as mail did.
+Nothing else in Phase 6 is scheduled. Rate limiting now has two callers
+waiting, sign-in and reset requests, and is the likely next slice. Object
+storage, notifications and a job middleware chain still wait for one.
 
 ## Beyond, unscheduled
 

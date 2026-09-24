@@ -1,0 +1,174 @@
+"""Business logic for password resets.
+
+Two functions, and the same rules as every other service: ``uow()`` spans the
+atomic work, the hash runs on a thread outside it, and what comes back is a
+schema or nothing.
+
+**Requesting says nothing in the reply.** An unknown address, a disabled
+account and a request inside the cooldown all answer exactly as a successful
+one does: a 202 and no body. What differs is whether a message goes out, and
+how long the request takes: the path that issues a code locks a row, inserts
+one and hands off a send, and a stopwatch can tell it from the path that
+returns after one query. That is accepted rather than closed, and the reason
+is one route over: ``POST /users`` answers a registered address with a 409,
+so this route's timing tells an attacker nothing registration does not say
+outright. Closing one without the other would be theatre; closing both is a
+flow that answers registration by mail, which is application policy.
+
+**The account row is the lock.** ``request_reset`` and ``redeem_reset`` both
+take ``SELECT ... FOR UPDATE`` on the user before touching the reset table.
+For the request, that is what makes the cooldown hold under concurrency: two
+simultaneous requests for one address queue on the row, and the second reads
+the first one's committed code. For the redemption, it is what stops two
+codes for one account redeemed at once from deadlocking: both transactions
+want the user row and every reset row, and taking the user first gives them
+one order.
+
+**The code is minted here and stored as a digest.** 32 bytes from ``secrets``,
+URL-safe, hashed with SHA-256 like a bearer token. It is not a bearer token,
+and it is not kept in the token store: a store entry resolves to an
+``Identity``, so a reset code in it would sign the holder in.
+
+**Redeeming revokes every session.** Somebody who resets a password is
+usually somebody who suspects the old one leaked. Every token issued under it
+stops working, the same as :func:`app.modules.users.service.change_password`.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import secrets
+from datetime import timedelta
+
+{% if has_api %}from keel.auth import token_store
+{% endif %}from keel.database import uow, utcnow
+{%- if has_worker %}
+from keel.queue import dispatch
+{%- else %}
+from keel.database.hooks import after_commit
+from keel.mail import send
+{%- endif %}
+
+from app.errors import ValidationError
+{%- if has_worker %}
+from app.modules.password_resets.jobs import SendResetCode
+{%- endif %}
+from app.modules.password_resets.mail import CODE_TTL{% if not has_worker %}, reset_code{% endif %}
+from app.modules.password_resets.repository import PasswordResetRepository
+from app.modules.password_resets.schemas import ResetRedemption, ResetRequest
+from app.modules.users.repository import UserRepository
+from app.modules.users.schemas import UserRead
+from app.modules.users.service import hash_in_a_thread
+
+REQUEST_COOLDOWN = timedelta(seconds=60)
+"""One message per account per minute, however many times the form is
+submitted and however many at once. The earlier code stays valid, so a flood
+cannot lock the owner out; it can only stop the flood from reaching the
+mailbox."""
+
+INVALID_CODE = "the reset code is invalid, expired or already used"
+"""One message for all three. Which of them it was is not the caller's to learn."""
+
+
+def digest_code(code: str) -> str:
+    """Hash a code the way the table stores it.
+
+    Args:
+        code: The plaintext.
+
+    Returns:
+        Its SHA-256, hex.
+    """
+    return hashlib.sha256(code.encode()).hexdigest()
+
+
+async def request_reset(payload: ResetRequest) -> None:
+    """Issue a code for the account behind an address, if there is one.
+
+    Args:
+        payload: The address.
+
+    Returns:
+        Nothing, in every case. See the module docstring.
+    """
+    code = secrets.token_urlsafe(32)
+    since = utcnow() - REQUEST_COOLDOWN
+
+    async with uow() as session:
+        users = UserRepository(session)
+        found = await users.get_by_email(payload.email)
+        if found is None or not found.is_active:
+            return
+        # The row lock serialises concurrent requests for one account, so the
+        # cooldown check below sees what a request a moment earlier committed.
+        user = await users.lock(found.id)
+        if user is None or not user.is_active:
+            return
+        resets = PasswordResetRepository(session)
+        if await resets.issued_since(user.id, since):
+            return
+        await resets.create(user_id=user.id, code_digest=digest_code(code), ttl=CODE_TTL)
+        account = UserRead.model_validate(user)
+{%- if has_worker %}
+        # Pushed after the commit, so a code is never mailed for a row that
+        # rolled back. The plaintext rides in the payload; see the job.
+        await dispatch(SendResetCode(user_pid=str(account.pid), code=code))
+{%- else %}
+
+        async def send_later() -> None:
+            await send(reset_code(account, code))
+
+        after_commit(send_later)
+{%- endif %}
+
+
+async def redeem_reset(payload: ResetRedemption) -> None:
+    """Replace the password of the account a code was issued for.
+
+    Args:
+        payload: The code and the new password.
+
+    Raises:
+        ValidationError: If the code is unknown, expired or already used, or
+            the account was disabled meanwhile. A 422 rather than a 404: the
+            request named no resource, and the body is what was wrong.
+    """
+    code_digest = digest_code(payload.code)
+
+    # A code that matches nothing is refused before any hashing: Argon2 is
+    # tens of milliseconds and 64 MiB per call, on a route with no caller to
+    # charge it to. The code is 256 random bits, so there is nothing for a
+    # stopwatch to learn from the early exit.
+    async with uow() as session:
+        owner = await PasswordResetRepository(session).owner_of(code_digest)
+    if owner is None:
+        raise ValidationError(INVALID_CODE)
+
+    hashed = await hash_in_a_thread(payload.password)
+
+    async with uow() as session:
+        users = UserRepository(session)
+        # The account first, then the reset rows: the same order as a request
+        # and a password change, so two redemptions at once cannot deadlock.
+        user = await users.lock(owner)
+        resets = PasswordResetRepository(session)
+        user_id = await resets.redeem(code_digest)
+        if user is None or user_id is None or not user.is_active:
+            raise ValidationError(INVALID_CODE)
+        await users.update(user, {"hashed_password": hashed})
+        await resets.retire_outstanding(user_id)
+{%- if has_api %}
+
+    # After the commit and outside the block: revoking is a token-store round
+    # trip, and a reset that leaves a stolen session live has reset nothing.
+    await token_store().revoke_subject(user_id)
+{%- endif %}
+
+
+__all__ = [
+    "INVALID_CODE",
+    "REQUEST_COOLDOWN",
+    "digest_code",
+    "redeem_reset",
+    "request_reset",
+]

@@ -1,21 +1,23 @@
 """The messages the users module sends.
 
-A function per message, returning a :class:`keel.mail.Message`: the subject,
-the text, and an HTML alternative to it. No template engine — a welcome is
-four lines, and the day a message needs a layout is the day to pick one.
-Nothing here sends; :func:`keel.mail.send` does, from a job or after a commit,
-which is the caller's decision rather than the message's.
+A function per message, naming the template pair under ``app/templates/mail``,
+the recipients and the subject. The bodies live in the templates and their
+look in ``layout.html.j2``; see ``app/mail.py``. Nothing here sends:
+:func:`keel.mail.send` does, from a job or after a commit, which is the
+caller's decision rather than the message's.
 """
 
 from __future__ import annotations
 
-from html import escape
+from typing import TYPE_CHECKING
 
-from keel.mail import Message
-
+from app.mail import APP_NAME, templates
 from app.modules.users.schemas import UserRead
 
-WELCOME_SUBJECT = "Welcome to {{ project_name }}"
+if TYPE_CHECKING:
+    from keel.mail import Message
+
+WELCOME_SUBJECT = f"Welcome to {APP_NAME}"
 
 
 def welcome(user: UserRead) -> Message:
@@ -27,16 +29,7 @@ def welcome(user: UserRead) -> Message:
     Returns:
         The message, sender left to the configuration.
     """
-    name = user.full_name
-    return Message(
-        to=user.email,
-        subject=WELCOME_SUBJECT,
-        text=f"Hello {name},\n\nYour account is ready. Sign in with {user.email}.\n",
-        html=(
-            f"<p>Hello {escape(name)},</p>"
-            f"<p>Your account is ready. Sign in with <b>{escape(user.email)}</b>.</p>"
-        ),
-    )
+    return templates.message("welcome", to=user.email, subject=WELCOME_SUBJECT, user=user)
 
 
 __all__ = ["WELCOME_SUBJECT", "welcome"]

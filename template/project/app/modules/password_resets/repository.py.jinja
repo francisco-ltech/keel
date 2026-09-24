@@ -1,0 +1,137 @@
+"""Queries against the ``password_resets`` table.
+
+A repository takes a session; it never opens one.
+"""
+
+from __future__ import annotations
+
+from datetime import datetime, timedelta
+from typing import TYPE_CHECKING, Any, cast
+from uuid import UUID
+
+from keel.database import utcnow
+from sqlalchemy import CursorResult, func, select, update
+
+from app.modules.password_resets.models import PasswordReset
+
+if TYPE_CHECKING:
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+
+class PasswordResetRepository:
+    """Data access for :class:`~app.modules.password_resets.models.PasswordReset`.
+
+    Args:
+        session: The session to run against, supplied by the service inside
+            its ``uow()`` block.
+    """
+
+    __slots__ = ("_session",)
+
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def create(self, *, user_id: UUID, code_digest: str, ttl: timedelta) -> PasswordReset:
+        """Record an issued code.
+
+        Args:
+            user_id: Whose account it resets.
+            code_digest: The code's SHA-256, hex. Never the code.
+            ttl: How long it stays redeemable.
+
+        Returns:
+            The persisted row.
+        """
+        reset = PasswordReset(user_id=user_id, code_digest=code_digest, expires_at=utcnow() + ttl)
+        self._session.add(reset)
+        await self._session.flush()
+        return reset
+
+    async def issued_since(self, user_id: UUID, moment: datetime) -> bool:
+        """Whether a code was issued for the account after *moment*.
+
+        The request path's throttle: one message per account per cooldown,
+        however many times the form is submitted.
+
+        Args:
+            user_id: The account.
+            moment: The start of the window.
+
+        Returns:
+            ``True`` if a row was created in the window, used or not.
+        """
+        statement = select(
+            select(PasswordReset.id)
+            .where(PasswordReset.user_id == user_id, PasswordReset.created_at > moment)
+            .exists()
+        )
+        return bool(await self._session.scalar(statement))
+
+    async def owner_of(self, code_digest: str) -> UUID | None:
+        """Say whose account a code belongs to, without consuming it.
+
+        The cheap first look: a code that matches nothing is refused before
+        the caller spends Argon2 on a password it will never store, and a
+        code that matches names the account whose row lock the caller takes
+        before :meth:`redeem`.
+
+        Args:
+            code_digest: SHA-256 of the presented code.
+
+        Returns:
+            The account's primary key, or ``None``. Says nothing about
+            expiry or use; :meth:`redeem` decides those.
+        """
+        statement = select(PasswordReset.user_id).where(PasswordReset.code_digest == code_digest)
+        user_id: UUID | None = await self._session.scalar(statement)
+        return user_id
+
+    async def redeem(self, code_digest: str) -> UUID | None:
+        """Consume a code, atomically, and say whose it was.
+
+        One ``UPDATE`` guarded by ``used_at IS NULL`` and the expiry, so two
+        requests presenting the same code cannot both succeed: the second
+        finds ``used_at`` set and gets ``None``.
+
+        Args:
+            code_digest: SHA-256 of the presented code.
+
+        Returns:
+            The account's primary key, or ``None`` if the code is unknown,
+            expired or already used. One answer for all three on purpose.
+        """
+        statement = (
+            update(PasswordReset)
+            .where(
+                PasswordReset.code_digest == code_digest,
+                PasswordReset.used_at.is_(None),
+                PasswordReset.expires_at > func.now(),
+            )
+            .values(used_at=func.now())
+            .returning(PasswordReset.user_id)
+        )
+        user_id: UUID | None = await self._session.scalar(statement)
+        return user_id
+
+    async def retire_outstanding(self, user_id: UUID) -> int:
+        """Mark every unredeemed code for the account as used.
+
+        Called whenever the password changes, by a reset or by the owner: a
+        code from an earlier request must not still open the account after
+        the password it was issued against is gone.
+
+        Args:
+            user_id: The account.
+
+        Returns:
+            How many codes were retired.
+        """
+        result = await self._session.execute(
+            update(PasswordReset)
+            .where(PasswordReset.user_id == user_id, PasswordReset.used_at.is_(None))
+            .values(used_at=func.now())
+        )
+        return int(cast("CursorResult[Any]", result).rowcount)
+
+
+__all__ = ["PasswordResetRepository"]

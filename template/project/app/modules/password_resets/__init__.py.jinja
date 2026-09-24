@@ -1,0 +1,23 @@
+"""Password resets: the change path for somebody who cannot sign in.
+
+``PUT /users/{pid}/password`` needs the current password. This module is the
+other half, for the person who forgot it: a single-use code delivered to the
+address on the account, redeemed once for a new password. It is its own domain
+rather than a corner of ``users`` because it owns a table, a message and a
+lifetime of its own, and because the two rules that keep it safe are easier to
+see in a small module than in a large one.
+
+**The code is hashed at rest and never stored, logged or returned.** The table
+holds its SHA-256, like the bearer token store does. A leaked table hands out
+nothing that works.
+
+**Redeeming is one atomic statement.** ``UPDATE ... WHERE used_at IS NULL AND
+expires_at > now() RETURNING user_id`` is what makes a code single-use under
+concurrency. A read followed by a write would let two requests redeem the same
+code in the gap.
+
+The same five files as every other module, minus a policy: both routes are
+open, because a caller who could authenticate would not need them.
+"""
+
+from __future__ import annotations

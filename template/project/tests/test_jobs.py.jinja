@@ -32,6 +32,7 @@ from app.errors import NotFoundError
 from app.modules.items import service as items_service
 from app.modules.items.jobs import IndexItem, card_key
 from app.modules.items.schemas import ItemCreate
+from app.modules.password_resets.jobs import SendResetCode
 from app.modules.users.jobs import SendWelcome
 from app.policies import ItemsOf
 from tests.conftest import make_user, primary_key_of
@@ -209,4 +210,24 @@ async def test_the_welcome_job_sends_to_the_accounts_current_address(rolled_back
 async def test_welcoming_a_deleted_account_stops_retrying(rolled_back: None) -> None:
     with fake_mail() as outbox, pytest.raises(PermanentFailureError):
         await SendWelcome(user_pid=MISSING_ID).handle()
+    outbox.assert_nothing_sent()
+
+
+# -- the reset-code job ---------------------------------------------------------
+
+
+async def test_the_reset_job_mails_the_code_to_the_account(rolled_back: None) -> None:
+    owner = await make_user(email="ada@example.com", full_name="Ada Lovelace")
+
+    with fake_mail() as outbox:
+        await SendResetCode(user_pid=str(owner.pid), code="the-code").handle()
+
+    sent = outbox.assert_sent(to="ada@example.com", subject_contains="Reset")
+    assert "the-code" in sent.text
+    assert sent.html is not None and "the-code" in sent.html
+
+
+async def test_resetting_a_deleted_account_stops_retrying(rolled_back: None) -> None:
+    with fake_mail() as outbox, pytest.raises(PermanentFailureError):
+        await SendResetCode(user_pid=MISSING_ID, code="the-code").handle()
     outbox.assert_nothing_sent()

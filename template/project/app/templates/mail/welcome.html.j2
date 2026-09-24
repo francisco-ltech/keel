@@ -1,0 +1,5 @@
+{% extends "layout.html.j2" %}
+{% block body %}
+<p>Hello {{ user.full_name }},</p>
+<p>Your {{ app_name }} account is ready. Sign in with <b>{{ user.email }}</b>.</p>
+{% endblock %}

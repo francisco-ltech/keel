@@ -23,7 +23,8 @@ app/modules/<domain>/
   schemas.py      Pydantic. Never imports models.
   repository.py   data access; takes a session, never opens one
   service.py      business logic; owns the transaction, returns schemas
-  mail.py         the messages this domain sends, one function each; never sends
+  mail.py         the messages this domain sends, one function each, rendered from
+                  app/templates/mail through app/mail.py; never sends
 {% if has_api %}  router.py       HTTP only; calls services
 {% endif %}{% if has_worker %}  jobs.py         job handlers; call the same services
 {% endif %}```

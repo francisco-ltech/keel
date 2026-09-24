@@ -1,0 +1,27 @@
+"""Where this service's messages are rendered from.
+
+One :class:`keel.mail.MailTemplates` over ``app/templates/mail``, shared by
+every module that sends. A message is a pair of files there, ``<name>.txt.j2``
+and ``<name>.html.j2``; the HTML ones extend ``layout.html.j2``, which is the
+one place the look of every message lives. A module's ``mail.py`` names the
+pair, the recipients and the subject, and nothing else.
+
+The globals are what every message may mention without being told: the
+application's name. A public URL, once there is a frontend to link to, goes
+here too.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+from keel.mail import MailTemplates
+
+APP_NAME = "{{ project_name }}"
+
+templates = MailTemplates(
+    Path(__file__).parent / "templates" / "mail", globals={"app_name": APP_NAME}
+)
+"""The renderer. Import this; do not build a second one."""
+
+__all__ = ["APP_NAME", "templates"]
