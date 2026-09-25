@@ -28,7 +28,7 @@ forward to a newer release. Releases are tags, listed in the
 That install line takes the `keel` command from the tip of `main`. The
 template it generates from, and the Keel version a project pins, come from the
 latest release regardless. To hold the command itself at a release, name the
-tag: `uv tool install "keel[cli] @ git+https://github.com/francisco-ltech/keel@v0.2.0"`.
+tag: `uv tool install "keel[cli] @ git+https://github.com/francisco-ltech/keel@v0.3.0"`.
 
 `just up` also creates the `keel` database the defaults point at. If Postgres,
 Redis and Mailpit already run on those ports, skip `just up`, create a

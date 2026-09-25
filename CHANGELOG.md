@@ -4,7 +4,11 @@ Releases are tags. `keel new` generates from the latest one, and `keel update`
 moves a project between them. Entries say what changed for someone building on
 Keel; the ADRs say why.
 
-## Unreleased
+## v0.3.0 — 2026-09-25
+
+Phase 6 continues: what a service needs on day two. A project on an earlier
+release gets all of it with `keel update`; migration `0004_password_resets`
+runs when its containers next start, and `just up` is unchanged.
 
 - **`keel.ratelimit`.** A fixed-window limiter on the cache's store, no
   driver family of its own: `guard(key, Limit.per_minute(5))` raises
