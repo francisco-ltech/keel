@@ -52,7 +52,13 @@ from typing import {% if has_api %}TYPE_CHECKING, Any, {% endif %}Final
 {% if has_api %}
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
-from keel.exceptions import AuthorizationDeniedError, ConfigurationError, KeelError
+from keel.exceptions import (
+    AuthorizationDeniedError,
+    ConfigurationError,
+    KeelError,
+    TooManyAttemptsError,
+)
+from keel.ratelimit import retry_after_header
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 if TYPE_CHECKING:
@@ -171,7 +177,8 @@ class ValidationError(AppError):
         detail: What went wrong with this particular request.
         problem_type: A URI identifying the problem type.
         headers: Response headers. A 401 needs ``WWW-Authenticate`` to be a
-            legal 401 at all (RFC 9110), and nothing else here needs headers.
+            legal 401 at all, and a 429 should carry ``Retry-After`` (RFC
+            9110). Nothing else here needs one.
         **extra: Additional members. RFC 9457 allows them, and a client that
             does not know about one must ignore it.
 
@@ -266,6 +273,32 @@ async def handle_authorization_denied(request: Request, exc: Exception) -> JSONR
     )
 
 
+async def handle_too_many_attempts(request: Request, exc: Exception) -> JSONResponse:
+    """Report a spent rate limit as a 429 that says when to come back.
+
+    The detail names neither the key nor the limit. The key is the address
+    and the client, which the caller already knows, and the limit is what an
+    attacker would tune a run to.
+
+    Args:
+        request: The request being answered.
+        exc: The exception.
+
+    Returns:
+        The problem response, with the ``Retry-After`` a 429 should carry.
+    """
+    # Guaranteed by the registration in register_error_handlers.
+    assert isinstance(exc, TooManyAttemptsError)
+    return problem(
+        request,
+        status=429,
+        title="Too Many Requests",
+        detail="too many attempts; try again later",
+        problem_type=f"{PROBLEM_BASE}/too-many-attempts",
+        headers={"Retry-After": retry_after_header(exc.retry_after)},
+    )
+
+
 async def handle_keel_error(request: Request, exc: Exception) -> JSONResponse:
     """Report a framework failure.
 
@@ -357,6 +390,7 @@ def register_error_handlers(app: FastAPI) -> None:
     app.add_exception_handler(AppError, handle_app_error)
     app.add_exception_handler(AuthenticationError, handle_authentication_error)
     app.add_exception_handler(AuthorizationDeniedError, handle_authorization_denied)
+    app.add_exception_handler(TooManyAttemptsError, handle_too_many_attempts)
     app.add_exception_handler(KeelError, handle_keel_error)
     app.add_exception_handler(RequestValidationError, handle_request_validation_error)
     app.add_exception_handler(StarletteHTTPException, handle_http_exception)

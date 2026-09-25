@@ -100,7 +100,8 @@ src/keel/
   cache/      facade, drivers, locks, fake
   database/   engine, uow, repository, soft delete, observers, migrations
   queue/      jobs, dispatch, drivers, worker, failed jobs, scheduler
-  mail/       message, config, smtp/log/null drivers, fake, binding
+  mail/       message, config, smtp/log/null drivers, fake, binding, templates
+  ratelimit/  a fixed window on the cache's store; guard raises, attempt answers
   observability/  logging, correlation re-exports, readiness checks, the request inspector, metrics
   contracts/  the protocols drivers implement
   support/    binding, manager, events, keys, serialization — subsystem-agnostic

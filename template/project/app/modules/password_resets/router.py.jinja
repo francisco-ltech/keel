@@ -12,10 +12,11 @@ the one place a secret can travel without being written down.
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Response, status
+from fastapi import APIRouter, Request, Response, status
 
 from app.modules.password_resets import service
 from app.modules.password_resets.schemas import ResetRedemption, ResetRequest
+from app.security import client_of
 
 router = APIRouter(prefix="/password-resets", tags=["password-resets"])
 
@@ -26,7 +27,7 @@ router = APIRouter(prefix="/password-resets", tags=["password-resets"])
     response_class=Response,
     summary="Request a reset code",
 )
-async def request_reset(payload: ResetRequest) -> None:
+async def request_reset(payload: ResetRequest, request: Request) -> None:
     """Send a reset code to the address, if an account has it.
 
     ``response_class=Response`` so the body is empty rather than ``null``: a
@@ -34,8 +35,9 @@ async def request_reset(payload: ResetRequest) -> None:
 
     Args:
         payload: The address.
+        request: For the client's address, the throttle's key.
     """
-    await service.request_reset(payload)
+    await service.request_reset(payload, client=client_of(request))
 
 
 @router.post("/redeem", status_code=status.HTTP_204_NO_CONTENT, summary="Redeem a reset code")

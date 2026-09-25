@@ -30,6 +30,18 @@ arithmetic is not.
 before that stays cheap forever unless something notices.
 ``verify_and_upgrade`` hands back a replacement when the stored hash is stale,
 and this is the one moment the plaintext exists to make it with.
+
+**Five attempts a minute, per address and client.** Argon2 makes a guess
+slow; the throttle makes guesses finite from any one place. The key pairs
+the address with the client so that an attacker cannot lock the owner out by
+guessing at their address from elsewhere, and cannot spread guesses across
+addresses from one place without each address getting its own five. What it
+does not cap is the total across many places: an attacker with many
+addresses gets five from each, which is the price of not letting one of
+them lock the owner out. A correct password clears
+the window: four typos and a success should not leave the owner one mistake
+from a lockout. The count happens before the row is read, so a refused
+attempt costs no query and no hash.
 """
 
 from __future__ import annotations
@@ -37,6 +49,7 @@ from __future__ import annotations
 import anyio
 from keel.auth import Identity, issue_token, password_hasher, require_identity, revoke_token
 from keel.database import uow
+from keel.ratelimit import Limit, clear, guard
 
 from app.errors import AuthenticationError
 from app.modules.sessions.schemas import SessionRead, SignIn
@@ -50,8 +63,26 @@ and an uncapped header is an uncapped write to the token store."""
 INVALID_CREDENTIALS = "email or password is incorrect"
 """One message for both failures. Two would be an enumeration oracle in prose."""
 
+SIGN_IN_LIMIT = Limit.per_minute(5)
+"""Wrong passwords one address may be offered from one client, per minute."""
 
-async def sign_in(payload: SignIn, *, label: str | None = None) -> SessionRead:
+
+def throttle_key(email: str, client: str | None) -> str:
+    """The window a sign-in counts against: the address and the client together.
+
+    Args:
+        email: As typed; lower-cased here so case is not a way around it.
+        client: The client's address, or ``None`` for a caller with none.
+
+    Returns:
+        The key.
+    """
+    return f"sign-in:{email.lower()}|{client or 'unknown'}"
+
+
+async def sign_in(
+    payload: SignIn, *, label: str | None = None, client: str | None = None
+) -> SessionRead:
     """Exchange an email and password for a bearer token.
 
     Args:
@@ -59,14 +90,22 @@ async def sign_in(payload: SignIn, *, label: str | None = None) -> SessionRead:
         label: What a "signed-in devices" listing should show for this token —
             the user agent, typically. Truncated here rather than at the edge,
             because this is the layer that decides what gets stored.
+        client: The client's address, for the throttle's key. A caller with
+            none, a management command say, shares one window.
 
     Returns:
         The new session, including the token's only readable copy.
 
     Raises:
+        TooManyAttemptsError: If this address has had its five wrong
+            passwords from this client inside a minute. Before anything is
+            read or hashed.
         AuthenticationError: If the credentials do not match, or the account is
             disabled.
     """
+    key = throttle_key(payload.email, client)
+    await guard(key, SIGN_IN_LIMIT)
+
     # One transaction and one query whether or not the address exists, and only
     # values leave it: the row is detached the moment the block ends.
     async with uow() as session:
@@ -85,6 +124,7 @@ async def sign_in(payload: SignIn, *, label: str | None = None) -> SessionRead:
         raise AuthenticationError(INVALID_CREDENTIALS)
     if not is_active:
         raise AuthenticationError("this account is disabled")
+    await clear(key, SIGN_IN_LIMIT)
 
     # A second unit of work, for the one case that writes. Conditional on the
     # hash we verified: a password changed during those ~40ms must not be lost.
@@ -140,4 +180,12 @@ async def current_user() -> Profile:
         return Profile.model_validate(user)
 
 
-__all__ = ["INVALID_CREDENTIALS", "LABEL_MAX_LENGTH", "current_user", "sign_in", "sign_out"]
+__all__ = [
+    "INVALID_CREDENTIALS",
+    "LABEL_MAX_LENGTH",
+    "SIGN_IN_LIMIT",
+    "current_user",
+    "sign_in",
+    "sign_out",
+    "throttle_key",
+]

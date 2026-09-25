@@ -6,6 +6,13 @@ Keel; the ADRs say why.
 
 ## Unreleased
 
+- **`keel.ratelimit`.** A fixed-window limiter on the cache's store, no
+  driver family of its own: `guard(key, Limit.per_minute(5))` raises
+  `TooManyAttemptsError` with how long to wait, `attempt` returns the
+  verdict, `clear` forgets the window. The template throttles sign-in at
+  five wrong passwords a minute per address and client, clearing on
+  success, and reset requests at ten a minute per client, both answering
+  429 with `Retry-After`. ADR 0017.
 - **Password reset in the template.** `POST /password-resets` mails a
   single-use code to a registered address and answers 202 either way;
   `POST /password-resets/redeem` sets a new password with it, once, and

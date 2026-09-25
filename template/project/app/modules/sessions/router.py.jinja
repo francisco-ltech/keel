@@ -13,12 +13,12 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from fastapi import APIRouter, Header, status
+from fastapi import APIRouter, Header, Request, status
 
 from app.modules.sessions import service
 from app.modules.sessions.schemas import SessionRead, SignIn
 from app.modules.users.schemas import Profile
-from app.security import BearerToken, Caller
+from app.security import BearerToken, Caller, client_of
 
 router = APIRouter(prefix="/sessions", tags=["sessions"])
 
@@ -26,12 +26,15 @@ router = APIRouter(prefix="/sessions", tags=["sessions"])
 @router.post("", status_code=status.HTTP_201_CREATED, summary="Sign in")
 async def sign_in(
     payload: SignIn,
+    request: Request,
     user_agent: Annotated[str | None, Header()] = None,
 ) -> SessionRead:
     """Exchange credentials for a bearer token.
 
     Args:
         payload: The email and password.
+        request: For the client's address, half of the throttle's key. See
+            :func:`client_of`.
         user_agent: Translated into the token's label, which is what a
             "signed-in devices" listing shows. The service decides what to keep
             of it; this layer only knows it came from a header.
@@ -39,7 +42,7 @@ async def sign_in(
     Returns:
         The new session. The token is readable here and nowhere else.
     """
-    return await service.sign_in(payload, label=user_agent)
+    return await service.sign_in(payload, label=user_agent, client=client_of(request))
 
 
 @router.get("/current", summary="The signed-in user")

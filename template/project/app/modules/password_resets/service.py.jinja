@@ -24,6 +24,11 @@ codes for one account redeemed at once from deadlocking: both transactions
 want the user row and every reset row, and taking the user first gives them
 one order.
 
+**Ten requests a minute per client, whatever the address.** The cooldown is
+per account and so says nothing about an address that has none; this is the
+limit on the client, so one place cannot walk a list of addresses through
+the route, and it is counted before the address is looked up.
+
 **The code is minted here and stored as a digest.** 32 bytes from ``secrets``,
 URL-safe, hashed with SHA-256 like a bearer token. It is not a bearer token,
 and it is not kept in the token store: a store entry resolves to an
@@ -42,12 +47,14 @@ from datetime import timedelta
 
 {% if has_api %}from keel.auth import token_store
 {% endif %}from keel.database import uow, utcnow
-{%- if has_worker %}
-from keel.queue import dispatch
-{%- else %}
+{%- if not has_worker %}
 from keel.database.hooks import after_commit
 from keel.mail import send
 {%- endif %}
+{%- if has_worker %}
+from keel.queue import dispatch
+{%- endif %}
+from keel.ratelimit import Limit, guard
 
 from app.errors import ValidationError
 {%- if has_worker %}
@@ -66,6 +73,9 @@ submitted and however many at once. The earlier code stays valid, so a flood
 cannot lock the owner out; it can only stop the flood from reaching the
 mailbox."""
 
+REQUEST_LIMIT = Limit.per_minute(10)
+"""Reset requests one client may make in a minute, whatever the addresses."""
+
 INVALID_CODE = "the reset code is invalid, expired or already used"
 """One message for all three. Which of them it was is not the caller's to learn."""
 
@@ -82,15 +92,21 @@ def digest_code(code: str) -> str:
     return hashlib.sha256(code.encode()).hexdigest()
 
 
-async def request_reset(payload: ResetRequest) -> None:
+async def request_reset(payload: ResetRequest, *, client: str | None = None) -> None:
     """Issue a code for the account behind an address, if there is one.
 
     Args:
         payload: The address.
+        client: The client's address, for the throttle's key.
 
     Returns:
         Nothing, in every case. See the module docstring.
+
+    Raises:
+        TooManyAttemptsError: If this client has made ten requests inside a
+            minute. Before the address is looked up.
     """
+    await guard(f"reset-request:{client or 'unknown'}", REQUEST_LIMIT)
     code = secrets.token_urlsafe(32)
     since = utcnow() - REQUEST_COOLDOWN
 
@@ -168,6 +184,7 @@ async def redeem_reset(payload: ResetRedemption) -> None:
 __all__ = [
     "INVALID_CODE",
     "REQUEST_COOLDOWN",
+    "REQUEST_LIMIT",
     "digest_code",
     "redeem_reset",
     "request_reset",

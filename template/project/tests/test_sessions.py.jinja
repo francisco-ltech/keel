@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import pytest
 from fastapi import FastAPI
-from httpx import AsyncClient
+from httpx import ASGITransport, AsyncClient
 from keel.auth import PasswordHasher, require_identity, use_password_hasher
 from keel.database.hooks import in_transaction
 from pydantic import ValidationError
@@ -49,6 +49,65 @@ async def test_the_password_is_not_echoed_back(client: AsyncClient) -> None:
     body = (await client.post("/sessions", json=CREDENTIALS)).json()
 
     assert DEFAULT_USER["password"] not in str(body)
+
+
+async def test_five_wrong_passwords_close_the_door_for_a_minute(client: AsyncClient) -> None:
+    """The sixth attempt is a 429 with a Retry-After, before any hash runs."""
+    await create_user(client)
+    wrong = {**CREDENTIALS, "password": "not-the-one"}
+    for _ in range(5):
+        assert (await client.post("/sessions", json=wrong)).status_code == 401
+
+    refused = await client.post("/sessions", json=wrong)
+
+    assert refused.status_code == 429
+    assert refused.headers["content-type"].startswith("application/problem+json")
+    assert 1 <= int(refused.headers["retry-after"]) <= 60
+    assert "not-the-one" not in refused.text and CREDENTIALS["email"] not in refused.text
+    # The right password is refused too: the window, not the guess, is what closed.
+    assert (await client.post("/sessions", json=CREDENTIALS)).status_code == 429
+
+
+async def test_a_correct_password_clears_the_window(client: AsyncClient) -> None:
+    """Four typos and a success leave the owner five attempts again, not one."""
+    await create_user(client)
+    wrong = {**CREDENTIALS, "password": "not-the-one"}
+    for _ in range(4):
+        await client.post("/sessions", json=wrong)
+
+    assert (await client.post("/sessions", json=CREDENTIALS)).status_code == 201
+    for _ in range(4):
+        await client.post("/sessions", json=wrong)
+    assert (await client.post("/sessions", json=CREDENTIALS)).status_code == 201
+
+
+async def test_the_window_is_per_address(client: AsyncClient) -> None:
+    """Guesses at one address do not lock a different account out."""
+    await create_user(client)
+    await create_user(client, email="grace@example.com")
+    wrong = {**CREDENTIALS, "password": "not-the-one"}
+    for _ in range(6):
+        await client.post("/sessions", json=wrong)
+
+    other = await client.post(
+        "/sessions", json={"email": "grace@example.com", "password": DEFAULT_USER["password"]}
+    )
+
+    assert other.status_code == 201
+
+
+async def test_the_window_is_per_client_too(app: FastAPI, client: AsyncClient) -> None:
+    """Six wrong guesses from one place do not lock the owner out from another."""
+    await create_user(client)
+    wrong = {**CREDENTIALS, "password": "not-the-one"}
+    for _ in range(6):
+        await client.post("/sessions", json=wrong)
+    elsewhere = ASGITransport(app=app, client=("10.0.0.2", 4242))
+
+    async with AsyncClient(transport=elsewhere, base_url="http://test") as other:
+        response = await other.post("/sessions", json=CREDENTIALS)
+
+    assert response.status_code == 201
 
 
 async def test_a_wrong_password_is_rejected(client: AsyncClient) -> None:

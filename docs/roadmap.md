@@ -102,12 +102,16 @@ same seam.
   code hashed at rest, redeemed in one statement, silent about whether the
   address exists. Writing its message met ADR 0015's condition for a template
   engine, so `keel.mail.templates` renders both messages from a shared layout.
+* **Rate limiting** ([0017](adr/0017-rate-limiting.md)) — a fixed window on
+  the cache's store, no driver family of its own; `guard` raises with the
+  wait and `attempt` answers. Sign-in is five wrong passwords a minute per
+  address and client, reset requests ten a minute per client, both before
+  anything is read or hashed.
 
 ## Next
 
-Nothing else in Phase 6 is scheduled. Rate limiting now has two callers
-waiting, sign-in and reset requests, and is the likely next slice. Object
-storage, notifications and a job middleware chain still wait for one.
+Nothing else in Phase 6 is scheduled. Object storage, notifications and a
+job middleware chain still wait for something in the template to need them.
 
 ## Beyond, unscheduled
 

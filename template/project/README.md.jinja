@@ -156,6 +156,15 @@ the access log and the inspector record paths. The reply says nothing about
 whether the address exists; the request's timing does, and so does the 409
 one route over, which is why that is recorded rather than closed.
 
+Sign-in is throttled: five wrong passwords for one address from one client
+in a minute, and the sixth answers 429 with a `Retry-After`, before any hash
+runs. A correct password clears the window. `POST /password-resets` allows
+ten requests a minute per client, whatever the addresses. The client is the
+peer address as ASGI saw it; behind a reverse proxy, run uvicorn with
+`--proxy-headers` and `--forwarded-allow-ips` naming the proxy, or every
+client shares one window. `app/security.py` says why the header is never
+read directly.
+
 A token is 256 bits of `secrets` output and the store keeps only its SHA-256, so
 nothing — including this application — can hand a working credential back. That
 is the opposite rule from passwords, which are hashed with Argon2 precisely
@@ -550,10 +559,9 @@ entrypoint are its decisions.
   them is a decision about session policy, not about storage.
 * **Roles on the user row.** Application policy rather than framework: the
   policies read `Identity.roles`, and what fills it is yours to decide.
-* **Rate limiting on `POST /password-resets` beyond one message a minute per
-  account.** A request for an unregistered address costs a query and nothing
-  else, and nothing counts them. That is the first caller for a rate-limiting
-  subsystem, which Keel does not have yet.
+* **Rate limits anywhere but sign-in and reset requests.** Registration and
+  the item routes have none. `keel.ratelimit.guard` is one line wherever one
+  is wanted; which routes deserve one is a decision about your traffic.
 {% endif %}* **A generic base repository.** Two modules is not enough evidence to know which
   methods genuinely repeat. Phase 2.
 * **Soft deletes and audit columns.** Listed in the ADR rather than stubbed here;

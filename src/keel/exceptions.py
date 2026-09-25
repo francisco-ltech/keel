@@ -170,3 +170,21 @@ class MailDeliveryError(MailError):
     def __init__(self, message: str, *, permanent: bool = False) -> None:
         super().__init__(message)
         self.permanent = permanent
+
+
+class TooManyAttemptsError(KeelError):
+    """Raised when a rate limit refuses an attempt.
+
+    An HTTP edge answers 429 with a ``Retry-After`` header; a job backs off.
+    Names the key, which is the application's own string and may hold an
+    address, so it belongs in a log and not in a reply.
+
+    Attributes:
+        key: What was being limited.
+        retry_after: Seconds until the window closes.
+    """
+
+    def __init__(self, key: str, *, retry_after: float) -> None:
+        super().__init__(f"too many attempts for {key!r}; retry in {retry_after:.0f}s")
+        self.key = key
+        self.retry_after = retry_after

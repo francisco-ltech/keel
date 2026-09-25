@@ -53,7 +53,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from typing import Annotated, Final
 
-from fastapi import Depends
+from fastapi import Depends, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from keel.auth import Identity, acting_as, resolve_token
 
@@ -140,12 +140,33 @@ async def require_bearer_token(credentials: Credentials) -> str:
 BearerToken = Annotated[str, Depends(require_bearer_token)]
 """The presented token, unresolved."""
 
+
+def client_of(request: Request) -> str:
+    """Name the client for a rate limit's key.
+
+    The peer address as ASGI saw it. Behind a reverse proxy that is the
+    proxy's address for every client, and a limit keyed on it becomes one
+    shared window: run uvicorn with ``--proxy-headers`` and
+    ``--forwarded-allow-ips`` naming the proxy, and Starlette rewrites the
+    peer from ``X-Forwarded-For`` before this reads it. Never read that header
+    here: unrewritten, it is whatever the client typed.
+
+    Args:
+        request: The request.
+
+    Returns:
+        The address, or ``unknown`` for a transport that has none.
+    """
+    return request.client.host if request.client else "unknown"
+
+
 __all__ = [
     "BearerToken",
     "Caller",
     "Credentials",
     "MaybeCaller",
     "bearer_scheme",
+    "client_of",
     "require_bearer_token",
     "require_caller",
     "resolve_caller",
